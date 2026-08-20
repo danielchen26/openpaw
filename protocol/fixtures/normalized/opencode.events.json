@@ -1,0 +1,187 @@
+[
+  {
+    "version": "1",
+    "event_id": "evt_82d1043d5322509f57606e5d",
+    "session_id": "sess_oc-ses_2f64fc11cffegKaJScI4Md0FTX",
+    "agent": "opencode",
+    "seq": 0,
+    "timestamp": "2026-08-20T17:00:00Z",
+    "cwd": "/Users/dev/src/openpaw",
+    "git_branch": null,
+    "multiplexer_target": null,
+    "type": "turn.completed",
+    "payload": {
+      "turn_id": "msg_c460d2f9c0017ChTxn92m4Fae2",
+      "role": "user",
+      "text": "Add the websocket upgrade path to the preview proxy."
+    }
+  },
+  {
+    "version": "1",
+    "event_id": "evt_605e591c91ab40beba138837",
+    "session_id": "sess_oc-ses_2f64fc11cffegKaJScI4Md0FTX",
+    "agent": "opencode",
+    "seq": 1,
+    "timestamp": "2026-08-20T17:00:12Z",
+    "cwd": "/Users/dev/src/openpaw",
+    "git_branch": null,
+    "multiplexer_target": null,
+    "type": "turn.delta",
+    "payload": {
+      "turn_id": "msg_c4b2186d8001ILwDoNkyZur5tU",
+      "delta": "Upgrade handling needs hop-by-hop headers stripped.",
+      "kind": "thinking"
+    }
+  },
+  {
+    "version": "1",
+    "event_id": "evt_ef315ecac444bdff5c476cb0",
+    "session_id": "sess_oc-ses_2f64fc11cffegKaJScI4Md0FTX",
+    "agent": "opencode",
+    "seq": 2,
+    "timestamp": "2026-08-20T17:00:15Z",
+    "cwd": "/Users/dev/src/openpaw",
+    "git_branch": null,
+    "multiplexer_target": null,
+    "type": "turn.completed",
+    "payload": {
+      "turn_id": "msg_c4b2186d8001ILwDoNkyZur5tU",
+      "role": "assistant",
+      "text": "Adding a websocket upgrade branch to the proxy."
+    }
+  },
+  {
+    "version": "1",
+    "event_id": "evt_8c65fe4e3488d827139afd99",
+    "session_id": "sess_oc-ses_2f64fc11cffegKaJScI4Md0FTX",
+    "agent": "opencode",
+    "seq": 3,
+    "timestamp": "2026-08-20T17:00:20Z",
+    "cwd": "/Users/dev/src/openpaw",
+    "git_branch": null,
+    "multiplexer_target": null,
+    "type": "tool.started",
+    "payload": {
+      "call_id": "call_9f2a1c",
+      "tool": "bash",
+      "summary": "npm install tungstenite",
+      "command": "npm install tungstenite",
+      "paths": [],
+      "risk": {
+        "class": "package_installation",
+        "requires_detail_expansion": false,
+        "reasons": [
+          "installs packages: npm install"
+        ]
+      }
+    }
+  },
+  {
+    "version": "1",
+    "event_id": "evt_94b7e166a35c0963a9ec6fb0",
+    "session_id": "sess_oc-ses_2f64fc11cffegKaJScI4Md0FTX",
+    "agent": "opencode",
+    "seq": 4,
+    "timestamp": "2026-08-20T17:01:00Z",
+    "cwd": "/Users/dev/src/openpaw",
+    "git_branch": null,
+    "multiplexer_target": null,
+    "type": "tool.completed",
+    "payload": {
+      "call_id": "call_9f2a1c",
+      "exit_code": 0,
+      "duration_ms": 40000,
+      "summary": "added 1 package"
+    }
+  },
+  {
+    "version": "1",
+    "event_id": "evt_753b38114ba8d89bce7d9314",
+    "session_id": "sess_oc-ses_2f64fc11cffegKaJScI4Md0FTX",
+    "agent": "opencode",
+    "seq": 5,
+    "timestamp": "2026-08-20T17:01:05Z",
+    "cwd": "/Users/dev/src/openpaw",
+    "git_branch": null,
+    "multiplexer_target": null,
+    "type": "tool.started",
+    "payload": {
+      "call_id": "call_9f2a1d",
+      "tool": "edit",
+      "paths": [
+        "/Users/dev/src/openpaw/host/crates/openpaw-preview/src/ws.rs"
+      ],
+      "risk": {
+        "class": "local_write",
+        "requires_detail_expansion": false,
+        "reasons": [
+          "writes files: /Users/dev/src/openpaw/host/crates/openpaw-preview/src/ws.rs"
+        ]
+      }
+    }
+  },
+  {
+    "version": "1",
+    "event_id": "evt_805097cfeb5fde442a1203bb",
+    "session_id": "sess_oc-ses_2f64fc11cffegKaJScI4Md0FTX",
+    "agent": "opencode",
+    "seq": 6,
+    "timestamp": "2026-08-20T17:01:05.5Z",
+    "cwd": "/Users/dev/src/openpaw",
+    "git_branch": null,
+    "multiplexer_target": null,
+    "type": "tool.failed",
+    "payload": {
+      "call_id": "call_9f2a1d",
+      "error": "file not found"
+    }
+  },
+  {
+    "version": "1",
+    "event_id": "evt_7e0c84b046833666591245c1",
+    "session_id": "sess_oc-ses_2f64fc11cffegKaJScI4Md0FTX",
+    "agent": "opencode",
+    "seq": 7,
+    "timestamp": "2026-08-20T17:00:10Z",
+    "cwd": "/Users/dev/src/openpaw",
+    "git_branch": null,
+    "multiplexer_target": null,
+    "type": "file.modified",
+    "payload": {
+      "path": "/Users/dev/src/openpaw/host/crates/openpaw-preview/src/proxy.rs"
+    }
+  },
+  {
+    "version": "1",
+    "event_id": "evt_247648e6212f1562af2a193d",
+    "session_id": "sess_oc-ses_2f64fc11cffegKaJScI4Md0FTX",
+    "agent": "opencode",
+    "seq": 8,
+    "timestamp": "2026-08-20T17:03:00Z",
+    "cwd": "/Users/dev/src/openpaw",
+    "git_branch": null,
+    "multiplexer_target": null,
+    "type": "usage.updated",
+    "payload": {
+      "input_tokens": 18400,
+      "output_tokens": 920,
+      "cached_input_tokens": 16000,
+      "cost_usd": 0.184
+    }
+  },
+  {
+    "version": "1",
+    "event_id": "evt_3394f455c1447defec131650",
+    "session_id": "sess_oc-ses_2f64fc11cffegKaJScI4Md0FTX",
+    "agent": "opencode",
+    "seq": 9,
+    "timestamp": "2026-08-20T17:03:00Z",
+    "cwd": "/Users/dev/src/openpaw",
+    "git_branch": null,
+    "multiplexer_target": null,
+    "type": "agent.completed",
+    "payload": {
+      "reason": "stop"
+    }
+  }
+]

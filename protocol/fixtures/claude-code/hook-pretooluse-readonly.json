@@ -1,0 +1,10 @@
+{
+  "session_id": "57ae0add-f501-42d6-a04d-618fc9d3bfae",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-src-openpaw/57ae0add-f501-42d6-a04d-618fc9d3bfae.jsonl",
+  "cwd": "/Users/dev/src/openpaw",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "/Users/dev/src/openpaw/README.md"
+  }
+}

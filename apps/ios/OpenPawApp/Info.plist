@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>OpenPaw</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string></string>
+	</dict>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIUserInterfaceStyle</key>
+	<string>Dark</string>
+
+	<!-- Purpose strings. Each one says what OpenPaw does with the data and where the data goes, because
+	     "OpenPaw needs access to your microphone" tells the reader nothing they can decide with. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>OpenPaw records audio only while you hold the dictate button, so you can speak a prompt instead of typing it on a phone keyboard. Recording stops the moment you let go and the audio is never written to disk.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>OpenPaw turns your dictated prompt into text. Recognition runs on this device whenever the language supports it, and the transcript goes only to the coding agent on your own machine.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>OpenPaw uses the camera so you can photograph a screen, a whiteboard or a device under test and attach it to a prompt. Photos are uploaded to your own machine over the SSH tunnel and nowhere else.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>OpenPaw reads the photos you pick so you can attach a screenshot or a design to a prompt. It reads only the items you select, and it never scans your library.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>OpenPaw saves an annotated screenshot back to your photo library when you ask it to, so you keep a copy of the redacted version you sent.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>OpenPaw asks for Face ID before it shows your sessions, because anyone holding this phone could otherwise approve a command that deletes files or reads credentials on your machine.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>OpenPaw connects to the machine you added by address, which is usually on your own network. It contacts only the hosts you configure and never scans for others.</string>
+
+	<!-- The forwarded host API is reached at 127.0.0.1 through the SSH tunnel, which is plain HTTP inside an
+	     encrypted channel. Nothing else is exempted from App Transport Security. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+
+	<!-- No UIBackgroundModes key. Dictation is push-to-talk and foreground-only, the PTY and the event stream are
+	     torn down when the app leaves the foreground, and there is no push service in a local-first product, so
+	     the app claims no background execution at all. Adding a mode it does not use would be a rejection risk
+	     and a battery cost for nothing. -->
+
+	<key>UIFileSharingEnabled</key>
+	<false/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<false/>
+</dict>
+</plist>

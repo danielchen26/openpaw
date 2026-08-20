@@ -1,0 +1,489 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openpaw.dev/schema/v1/event.schema.json",
+  "title": "OpenPaw agent event",
+  "description": "Normalized event emitted by openpaw-host after adapting a coding agent's native logs, hooks or process state.",
+  "type": "object",
+  "required": [
+    "version",
+    "event_id",
+    "session_id",
+    "agent",
+    "seq",
+    "timestamp",
+    "type",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": "1"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^evt_[0-9a-f]{24}$",
+      "description": "Content addressed: 'evt_' + first 24 hex chars of sha256(session_id 0x1F source_key). Stable across re-reads, which makes ingestion idempotent."
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^sess_[A-Za-z0-9._:-]{1,120}$"
+    },
+    "agent": {
+      "$ref": "#/$defs/agentKind"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic per session, assigned in source order."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "cwd": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "git_branch": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "multiplexer_target": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "e.g. tmux target 'work:2.0' when the session was discovered inside a multiplexer."
+    },
+    "type": {
+      "$ref": "#/$defs/eventType"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "permission.requested"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/permissionRequested"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "permission.resolved"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/permissionResolved"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "question.requested"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/questionRequested"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "tool.started"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/toolStarted"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "usage.updated"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/usageUpdated"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "context.updated"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/contextUpdated"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "agentKind": {
+      "type": "string",
+      "enum": [
+        "claude-code",
+        "codex",
+        "opencode",
+        "gemini-cli",
+        "cursor-cli",
+        "kimi-cli",
+        "qwen-code",
+        "generic"
+      ]
+    },
+    "eventType": {
+      "type": "string",
+      "enum": [
+        "agent.started",
+        "agent.working",
+        "agent.completed",
+        "agent.failed",
+        "turn.started",
+        "turn.delta",
+        "turn.completed",
+        "tool.started",
+        "tool.output",
+        "tool.completed",
+        "tool.failed",
+        "permission.requested",
+        "permission.resolved",
+        "question.requested",
+        "question.answered",
+        "plan.created",
+        "plan.updated",
+        "file.read",
+        "file.created",
+        "file.modified",
+        "file.deleted",
+        "usage.updated",
+        "context.updated"
+      ]
+    },
+    "riskClass": {
+      "type": "string",
+      "enum": [
+        "read_only",
+        "local_write",
+        "git_operation",
+        "network_access",
+        "package_installation",
+        "destructive_shell",
+        "credential_access",
+        "unknown"
+      ],
+      "description": "Coarse capability bucket used to drive the approval UI. Never collapse to a single green button."
+    },
+    "risk": {
+      "type": "object",
+      "required": [
+        "class",
+        "requires_detail_expansion",
+        "reasons"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/riskClass"
+        },
+        "requires_detail_expansion": {
+          "type": "boolean",
+          "description": "True for rm, sudo, credential access, force push, production deploy, database mutation and secret modification. Clients MUST refuse to approve until the full detail has been shown."
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "approve_once",
+        "approve_always",
+        "deny",
+        "deny_always",
+        "answer",
+        "stop",
+        "acknowledge"
+      ]
+    },
+    "permissionRequested": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "tool",
+        "summary",
+        "risk",
+        "actions"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "risk": {
+          "$ref": "#/$defs/risk"
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/action"
+          }
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "permissionResolved": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "decision",
+        "decided_by"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "decision": {
+          "$ref": "#/$defs/action"
+        },
+        "decided_by": {
+          "type": "string",
+          "enum": [
+            "device",
+            "terminal",
+            "policy",
+            "timeout"
+          ]
+        },
+        "device_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "questionRequested": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "question",
+        "allows_free_text"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "choices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allows_free_text": {
+          "type": "boolean"
+        }
+      }
+    },
+    "toolStarted": {
+      "type": "object",
+      "required": [
+        "call_id",
+        "tool"
+      ],
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "risk": {
+          "$ref": "#/$defs/risk"
+        }
+      }
+    },
+    "usageUpdated": {
+      "type": "object",
+      "required": [
+        "input_tokens",
+        "output_tokens"
+      ],
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cached_input_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cost_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "rate_limit_percent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "rate_limit_resets_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "contextUpdated": {
+      "type": "object",
+      "required": [
+        "used_tokens",
+        "max_tokens",
+        "percent_used"
+      ],
+      "properties": {
+        "used_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "percent_used": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    }
+  }
+}

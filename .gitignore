@@ -1,0 +1,24 @@
+# Rust
+/host/target/
+**/*.rs.bk
+
+# Swift / Xcode
+.build/
+.swiftpm/
+*.xcuserstate
+xcuserdata/
+DerivedData/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+Package.resolved.lock
+
+# macOS
+.DS_Store
+
+# OpenPaw local state (never commit device tokens)
+.openpaw/
+/artifacts/
+
+# Scratch build trees from the no-Xcode iOS typecheck path
+.build-ios/
+.build-*/

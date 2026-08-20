@@ -1,0 +1,388 @@
+import Foundation
+import OpenPawProtocol
+import OpenPawSSH
+import OpenPawTerminalCore
+import OpenPawUI
+import Security
+
+/// Establishes the loopback tunnel that the structured host is reached through.
+///
+/// A protocol rather than a concrete type for two reasons: forwarding belongs to the SSH package, and expressing the
+/// dependency this narrowly is what lets the backend be exercised against a local `URLProtocol` stub with no SSH at
+/// all.
+protocol LoopbackForwarder: Sendable {
+    /// Binds a local port on 127.0.0.1 and forwards it to `remotePort` on the far side. Returns the local port.
+    func start(remotePort: UInt16) async throws -> UInt16
+    func stop() async
+}
+
+/// `OpenPawBackend` over `HostClient`, reached through an SSH port forward.
+///
+/// The daemon never listens on a routable address. It binds loopback on the machine it runs on, and this object talks
+/// to it through a `direct-tcpip` channel on the SSH connection the terminal already established. That is the whole
+/// security model of the structured side: there is no port to scan, no certificate to get wrong, and no path that
+/// works when the SSH connection is down.
+final class HostAPIBackend: OpenPawBackend {
+
+    /// The port `openpaw-host` binds on the remote machine. Configurable because a user may run two hosts, and
+    /// defaulted because almost nobody does.
+    static let defaultRemotePort: UInt16 = 8_787
+
+    private let forwarder: any LoopbackForwarder
+    private let credentials: DeviceCredentialStore
+    private let remotePort: UInt16
+    private let urlSession: URLSession
+
+    private let state = State()
+    /// Read without awaiting by `previewURL`, which the protocol declares synchronous because a URL for a WebView is
+    /// not worth an actor hop.
+    private let localPort = LockedBox<UInt16?>(nil)
+
+    init(
+        forwarder: any LoopbackForwarder,
+        credentials: DeviceCredentialStore = DeviceCredentialStore(),
+        remotePort: UInt16 = HostAPIBackend.defaultRemotePort,
+        urlSession: URLSession = .shared
+    ) {
+        self.forwarder = forwarder
+        self.credentials = credentials
+        self.remotePort = remotePort
+        self.urlSession = urlSession
+    }
+
+    // MARK: Lifecycle
+
+    /// Opens the tunnel and restores the stored pairing, if there is one. Idempotent: calling it again after the SSH
+    /// connection dropped rebuilds the tunnel on a fresh local port.
+    func connect() async throws {
+        let port = try await forwarder.start(remotePort: remotePort)
+        localPort.set(port)
+        guard let base = URL(string: "http://127.0.0.1:\(port)") else {
+            throw HostClientError.transport(URLError(.badURL))
+        }
+        let client = HostClient(baseURL: base, session: urlSession)
+        if let signer = credentials.loadSigner() {
+            await client.setSigner(signer)
+        }
+        await state.install(client: client)
+    }
+
+    func disconnect() async {
+        await state.install(client: nil)
+        localPort.set(nil)
+        await forwarder.stop()
+    }
+
+    /// Exchanges a pairing code shown by `openpaw-host pairing-code` for a device token and HMAC key, then persists
+    /// both in the keychain so the device stays paired across launches.
+    ///
+    /// The token alone is not enough to talk to the host: every authenticated route is also HMAC-signed over method,
+    /// path, query, timestamp, nonce and body, so a token lifted from a backup is useless without the key, and a
+    /// replayed request is rejected on the nonce.
+    @discardableResult
+    func pair(pairingCode: String, deviceName: String) async throws -> PairingResult {
+        let client = try await state.requireClient()
+        let result = try await client.pair(
+            pairingCode: pairingCode,
+            deviceName: deviceName,
+            platform: "ios"
+        )
+        guard let signer = result.signer else {
+            throw HostClientError.decoding(
+                DecodingError.dataCorrupted(
+                    .init(codingPath: [], debugDescription: "the host sent an HMAC key this build cannot read")
+                )
+            )
+        }
+        try credentials.save(result)
+        await client.setSigner(signer)
+        return result
+    }
+
+    /// Forgets the pairing on this device. The host keeps its own record until the user revokes it there, which is
+    /// why the copy says "this device" rather than "revoke".
+    func unpair() async throws {
+        try credentials.clear()
+        if let client = await state.client {
+            await client.setSigner(nil)
+        }
+    }
+
+    var isPaired: Bool { credentials.loadSigner() != nil }
+
+    // MARK: OpenPawBackend
+
+    func health() async throws -> HealthInfo {
+        try await state.requireClient().health()
+    }
+
+    func sessions() async throws -> [SessionSummary] {
+        try await state.requireClient().sessions()
+    }
+
+    func inbox(status: InboxStatus?) async throws -> [InboxItem] {
+        try await state.requireClient().inbox(status: status)
+    }
+
+    /// Sends a decision.
+    ///
+    /// `detailAcknowledged` is forwarded rather than assumed. The host rejects an approval on a
+    /// detail-expansion-required item with a 400 when the flag is false, and it writes the flag to its audit log, so
+    /// the record of *who saw the full command before approving it* is kept on the machine that ran the command
+    /// rather than on the phone that tapped the button.
+    func resolve(
+        item: InboxItem,
+        action: ActionID,
+        answer: String?,
+        detailAcknowledged: Bool
+    ) async throws -> ResolveResult {
+        try await state.requireClient().resolve(
+            itemID: item.id,
+            action: action,
+            actionToken: item.actionToken,
+            answer: answer,
+            detailAcknowledged: detailAcknowledged
+        )
+    }
+
+    func events(session: String?, afterSeq: UInt64?) -> AsyncThrowingStream<Event, any Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task { [state] in
+                do {
+                    let client = try await state.requireClient()
+                    let stream = try await client.events(session: session, afterSeq: afterSeq)
+                    for try await event in stream {
+                        continuation.yield(event)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    func repos() async throws -> [RepoSummary] {
+        try await state.requireClient().repos()
+    }
+
+    func repoStatus(_ repo: String) async throws -> RepoStatus {
+        try await state.requireClient().repoStatus(repo)
+    }
+
+    func diff(repo: String, mode: DiffMode, path: String?) async throws -> Diff {
+        try await state.requireClient().diff(repo: repo, mode: mode, path: path)
+    }
+
+    func tree(repo: String, ref: String, path: String) async throws -> [TreeEntry] {
+        try await state.requireClient().tree(repo: repo, ref: ref, path: path)
+    }
+
+    func blob(repo: String, ref: String, path: String) async throws -> Blob {
+        try await state.requireClient().blob(repo: repo, ref: ref, path: path)
+    }
+
+    func search(repo: String, query: String, path: String?) async throws -> [ContentMatch] {
+        try await state.requireClient().search(repo: repo, query: query, path: path)
+    }
+
+    func upload(data: Data, filename: String) async throws -> UploadResult {
+        try await state.requireClient().upload(data: data, filename: filename)
+    }
+
+    /// The forwarded proxy URL for a remote dev server.
+    ///
+    /// Never a public address: the returned URL always points at 127.0.0.1 on this device, and the host proxies from
+    /// there to the port the dev server bound on its own loopback. So a preview works over cellular with no exposed
+    /// service anywhere, and if the tunnel is down there is simply no URL to hand out.
+    func previewURL(port: Int, path: String) throws -> URL {
+        guard let localPort = localPort.get() else {
+            throw HostClientError.transport(URLError(.notConnectedToInternet))
+        }
+        guard port > 0, port <= 65_535 else {
+            throw HostClientError.badRequest("\(port) is not a port a dev server can listen on")
+        }
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = Int(localPort)
+        let trimmed = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        components.path = "/v1/preview/\(port)/" + trimmed
+        guard let url = components.url else {
+            throw HostClientError.badRequest("\(path) is not a path that can be previewed")
+        }
+        return url
+    }
+
+    func audit(limit: Int) async throws -> [AuditEntry] {
+        try await state.requireClient().audit(limit: limit)
+    }
+
+    // MARK: State
+
+    /// The client, replaced whenever the tunnel is rebuilt on a new local port.
+    private actor State {
+        var client: HostClient?
+
+        func install(client: HostClient?) {
+            self.client = client
+        }
+
+        func requireClient() throws -> HostClient {
+            guard let client else { throw HostClientError.transport(URLError(.networkConnectionLost)) }
+            return client
+        }
+    }
+}
+
+// MARK: - SSH forwarder
+
+/// `LoopbackForwarder` over `OpenPawSSH.PortForwarder`.
+///
+/// The forwarder rides the SSH connection the terminal already opened rather than dialling its own. That is not an
+/// optimisation: a second connection would need a second authentication, a second host-key decision, and would leave
+/// the structured side working while the terminal is down, which would let the UI claim a session is live when the
+/// user cannot type into it.
+actor SSHLoopbackForwarder: LoopbackForwarder {
+
+    /// Supplies the live connection. A closure rather than a stored `SSHConnection`, because the connection is
+    /// replaced on every reconnect and a captured stale one would forward into a closed channel.
+    private let connection: @Sendable () async -> SSHConnection?
+    private var forwarder: PortForwarder?
+
+    init(connection: @escaping @Sendable () async -> SSHConnection?) {
+        self.connection = connection
+    }
+
+    func start(remotePort: UInt16) async throws -> UInt16 {
+        await stop()
+        guard let connection = await connection() else { throw TransportError.notConnected }
+        let forwarder = PortForwarder(connection: connection)
+        self.forwarder = forwarder
+        // An ephemeral local port, always. A fixed one collides with whatever else the user is running and, worse,
+        // makes the tunnel guessable by any other app on the device that can reach loopback.
+        return try await forwarder.start(remotePort: remotePort)
+    }
+
+    func stop() async {
+        guard let forwarder else { return }
+        self.forwarder = nil
+        await forwarder.stop()
+    }
+}
+
+// MARK: - Device credentials
+
+/// The device token and HMAC key from pairing, in the keychain.
+///
+/// `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` on purpose: these credentials authorise approving a destructive
+/// command on someone's workstation, so they must not travel in an iCloud keychain to a device the user has not
+/// paired, and they must not be readable while the phone is locked in a stranger's hand.
+struct DeviceCredentialStore: Sendable {
+
+    static let defaultService = "dev.openpaw.app.pairing"
+
+    private let service: String
+
+    init(service: String = DeviceCredentialStore.defaultService) {
+        self.service = service
+    }
+
+    private enum Account: String {
+        case deviceID = "device_id"
+        case token = "token"
+        case hmacKey = "hmac_key_b64"
+    }
+
+    func save(_ result: PairingResult) throws {
+        try write(result.deviceID, to: .deviceID)
+        try write(result.token, to: .token)
+        try write(result.hmacKeyB64, to: .hmacKey)
+    }
+
+    func loadSigner() -> RequestSigner? {
+        guard
+            let deviceID = read(.deviceID),
+            let token = read(.token),
+            let hmacKey = read(.hmacKey)
+        else { return nil }
+        return RequestSigner(deviceID: deviceID, token: token, hmacKeyBase64: hmacKey)
+    }
+
+    func clear() throws {
+        for account in [Account.deviceID, .token, .hmacKey] {
+            let status = SecItemDelete(query(for: account) as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw KeychainError(status: status, operation: "deleting \(account.rawValue)")
+            }
+        }
+    }
+
+    // MARK: Keychain
+
+    private func query(for account: Account) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account.rawValue,
+        ]
+    }
+
+    private func write(_ value: String, to account: Account) throws {
+        var attributes = query(for: account)
+        SecItemDelete(attributes as CFDictionary)
+        attributes[kSecValueData as String] = Data(value.utf8)
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let status = SecItemAdd(attributes as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw KeychainError(status: status, operation: "storing \(account.rawValue)")
+        }
+    }
+
+    private func read(_ account: Account) -> String? {
+        var attributes = query(for: account)
+        attributes[kSecReturnData as String] = true
+        attributes[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(attributes as CFDictionary, &item) == errSecSuccess,
+            let data = item as? Data
+        else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+struct KeychainError: LocalizedError {
+    let status: OSStatus
+    let operation: String
+
+    var errorDescription: String? {
+        let detail = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
+        return "The keychain refused \(operation): \(detail). Pair the device again."
+    }
+}
+
+// MARK: - Locked box
+
+/// One value behind one lock. Used where a `Sendable` type needs a synchronous read of state that an actor would
+/// otherwise force every caller to await.
+final class LockedBox<Value: Sendable>: @unchecked Sendable {
+    private var value: Value
+    private let lock = NSLock()
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func get() -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ newValue: Value) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
+    }
+}

@@ -1,0 +1,11 @@
+{
+ "id": "prt_u1",
+ "sessionID": "ses_2f64fc11cffegKaJScI4Md0FTX",
+ "messageID": "msg_c460d2f9c0017ChTxn92m4Fae2",
+ "type": "text",
+ "text": "Add the websocket upgrade path to the preview proxy.",
+ "time": {
+  "start": 1787245200000,
+  "end": 1787245200000
+ }
+}

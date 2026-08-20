@@ -1,0 +1,49 @@
+{
+  "$comment": "OpenPaw hook wiring for Claude Code. Merge the `hooks` object into ~/.claude/settings.json (or .claude/settings.json inside a project) — do not replace the whole file, it holds your other settings too. Each command reads the hook payload from stdin, posts it to the loopback daemon, and writes the daemon's reply to stdout, which is where Claude Code reads a decision from. The trailing `|| echo '{}'` is the important part: if openpaw-host is not running, or is slow, or answers with an error, the hook still prints a valid empty reply and Claude Code falls back to its own terminal prompt. Installing OpenPaw must never be able to wedge your CLI.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sS --max-time 5 -X POST \"http://127.0.0.1:${OPENPAW_PORT:-8787}/v1/hooks/claude-code\" -H \"X-OpenPaw-Hook-Token: $(cat \"${OPENPAW_STATE_DIR:-$HOME/.openpaw}/hook-token\")\" -H 'content-type: application/json' --data-binary @- || echo '{}'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sS --max-time 5 -X POST \"http://127.0.0.1:${OPENPAW_PORT:-8787}/v1/hooks/claude-code\" -H \"X-OpenPaw-Hook-Token: $(cat \"${OPENPAW_STATE_DIR:-$HOME/.openpaw}/hook-token\")\" -H 'content-type: application/json' --data-binary @- > /dev/null || true"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sS --max-time 5 -X POST \"http://127.0.0.1:${OPENPAW_PORT:-8787}/v1/hooks/claude-code\" -H \"X-OpenPaw-Hook-Token: $(cat \"${OPENPAW_STATE_DIR:-$HOME/.openpaw}/hook-token\")\" -H 'content-type: application/json' --data-binary @- > /dev/null || true"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sS --max-time 5 -X POST \"http://127.0.0.1:${OPENPAW_PORT:-8787}/v1/hooks/claude-code\" -H \"X-OpenPaw-Hook-Token: $(cat \"${OPENPAW_STATE_DIR:-$HOME/.openpaw}/hook-token\")\" -H 'content-type: application/json' --data-binary @- > /dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

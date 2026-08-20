@@ -1,0 +1,29 @@
+{
+ "id": "msg_c4b2186d8001ILwDoNkyZur5tU",
+ "sessionID": "ses_2f64fc11cffegKaJScI4Md0FTX",
+ "role": "assistant",
+ "time": {
+  "created": 1787245210000,
+  "completed": 1787245380000
+ },
+ "parentID": "msg_c460d2f9c0017ChTxn92m4Fae2",
+ "modelID": "claude-opus-4-8",
+ "providerID": "anthropic",
+ "mode": "build",
+ "agent": "build",
+ "path": {
+  "cwd": "/Users/dev/src/openpaw",
+  "root": "/Users/dev/src/openpaw"
+ },
+ "cost": 0.184,
+ "finish": "stop",
+ "tokens": {
+  "input": 18400,
+  "output": 920,
+  "reasoning": 0,
+  "cache": {
+   "read": 16000,
+   "write": 1200
+  }
+ }
+}

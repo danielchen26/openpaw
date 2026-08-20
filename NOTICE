@@ -1,0 +1,23 @@
+OpenPaw
+Copyright 2026 OpenPaw contributors
+
+This product includes software developed as part of the OpenPaw project
+(https://github.com/danielchen26/openpaw), licensed under the Apache License,
+Version 2.0.
+
+Documentation under docs/ is licensed CC BY 4.0.
+
+The "OpenPaw" name and the OpenPaw logo are not licensed under Apache-2.0. You
+may build, modify and redistribute this software freely, but not present a
+modified build as an official OpenPaw release.
+
+OpenPaw is an independent project. It is not affiliated with or endorsed by any
+commercial mobile agent client, nor by Anthropic, OpenAI, or the OpenCode
+project. Claude Code, Codex and OpenCode are products of their respective
+owners; OpenPaw only reads the logs those tools write into your own home
+directory, using formats that are observable on your own machine.
+
+Third-party dependencies retain their own licenses:
+  swift-nio, swift-nio-ssh   Apache-2.0   Apple Inc.
+  SwiftTerm                  MIT          Miguel de Icaza
+  axum, tokio, serde, hyper  MIT          respective authors

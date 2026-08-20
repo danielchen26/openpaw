@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: host (rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: host
+      - name: fmt
+        run: cargo fmt --all --check
+        working-directory: host
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: host
+      - name: test
+        run: cargo test --workspace
+        working-directory: host
+        env:
+          GIT_AUTHOR_NAME: ci
+          GIT_AUTHOR_EMAIL: ci@example.com
+          GIT_COMMITTER_NAME: ci
+          GIT_COMMITTER_EMAIL: ci@example.com
+
+  schema:
+    name: protocol schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: goldens match the schema and are up to date
+        run: |
+          cd host
+          cargo test -p openpaw-protocol --test schema_conformance
+          cargo test -p openpaw-agents --test golden
+          git diff --exit-code -- ../protocol/fixtures/normalized
+
+  packages:
+    name: swift packages
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [swift-agent-protocol, swift-terminal-core, swift-ssh-transport, swift-openpaw-ui]
+    steps:
+      - uses: actions/checkout@v5
+      - name: test
+        run: swift test
+        working-directory: packages/${{ matrix.package }}
+
+  app:
+    name: ios app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: build
+        run: |
+          xcodebuild -project OpenPaw.xcodeproj -scheme OpenPaw \
+            -destination 'generic/platform=iOS Simulator' \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO build
+        working-directory: apps/ios
+
+  snapshots:
+    name: ui snapshots
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: render
+        run: swift run openpaw-snapshot --output "$RUNNER_TEMP/snapshots"
+        working-directory: tools/openpaw-snapshot
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-snapshots
+          path: ${{ runner.temp }}/snapshots

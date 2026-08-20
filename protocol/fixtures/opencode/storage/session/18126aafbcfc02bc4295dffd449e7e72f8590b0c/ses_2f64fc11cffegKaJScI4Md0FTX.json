@@ -1,0 +1,17 @@
+{
+ "id": "ses_2f64fc11cffegKaJScI4Md0FTX",
+ "slug": "openpaw-host",
+ "version": "0.16.4",
+ "projectID": "18126aafbcfc02bc4295dffd449e7e72f8590b0c",
+ "directory": "/Users/dev/src/openpaw",
+ "title": "Wire the preview proxy",
+ "time": {
+  "created": 1787245200000,
+  "updated": 1787245380000
+ },
+ "summary": {
+  "additions": 42,
+  "deletions": 8,
+  "files": 3
+ }
+}

@@ -1,0 +1,17 @@
+{
+ "id": "prt_a7",
+ "sessionID": "ses_2f64fc11cffegKaJScI4Md0FTX",
+ "messageID": "msg_c4b2186d8001ILwDoNkyZur5tU",
+ "type": "step-finish",
+ "reason": "stop",
+ "cost": 0.184,
+ "tokens": {
+  "input": 18400,
+  "output": 920,
+  "reasoning": 0,
+  "cache": {
+   "read": 16000,
+   "write": 1200
+  }
+ }
+}

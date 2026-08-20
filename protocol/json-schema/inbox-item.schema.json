@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openpaw.dev/schema/v1/inbox-item.schema.json",
+  "title": "OpenPaw inbox item",
+  "description": "Projection of one or more events into an actionable item. Actions carry a one-time token; a push notification alone is never sufficient to authorize a decision.",
+  "type": "object",
+  "required": [
+    "id",
+    "session_id",
+    "agent",
+    "category",
+    "title",
+    "actions",
+    "created_at",
+    "status",
+    "source_event_id"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^inb_[0-9a-f]{24}$"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "agent": {
+      "$ref": "event.schema.json#/$defs/agentKind"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "permission",
+        "question",
+        "plan",
+        "tool_failure",
+        "completion",
+        "context_warning",
+        "rate_limit",
+        "background_job"
+      ]
+    },
+    "title": {
+      "type": "string"
+    },
+    "detail": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "command": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "risk": {
+      "$ref": "event.schema.json#/$defs/risk"
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "$ref": "event.schema.json#/$defs/action"
+      }
+    },
+    "action_token": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "One-time bearer for POST /v1/inbox/{id}/resolve. Issued only over an authenticated tunnel, never inside a push payload."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "resolved",
+        "dismissed",
+        "expired"
+      ]
+    },
+    "resolution": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_event_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Underlying permission/question request id, so a later permission.resolved can be correlated back to this item."
+    }
+  }
+}

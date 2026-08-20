@@ -1,0 +1,63 @@
+; systemd *user* unit for openpaw-host.
+;
+; A user unit, not a system one, and that is deliberate: the daemon reads the
+; agent transcripts under your own home directory and writes decisions that act on
+; your behalf. Running it as root or as a shared service account would mean a
+; process with more authority than the person it answers for.
+;
+; Install:
+;   mkdir -p ~/.config/systemd/user
+;   cp openpaw-host.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now openpaw-host
+;   systemctl --user status openpaw-host
+;
+; Keep it running after you log out:
+;   sudo loginctl enable-linger "$USER"
+
+[Unit]
+Description=OpenPaw host — local control plane for terminal coding agents
+Documentation=https://github.com/danielchen26/openpaw
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/openpaw-host serve
+Restart=on-failure
+RestartSec=2
+; A crash loop from a bad config should stop, not hammer the machine.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+Environment=OPENPAW_LOG=info
+; Uncomment to relocate state away from ~/.openpaw.
+; Environment=OPENPAW_STATE_DIR=%h/.local/state/openpaw
+
+; The daemon binds loopback only, so it needs no network privileges beyond that.
+; If you have set a non-loopback bind you have already accepted the risk that
+; comes with it; this unit does not re-grant anything.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+; Loopback plus, for a non-loopback bind, ordinary IP.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+; ProtectSystem=strict makes everything read-only except what is listed here.
+; The daemon needs its own state directory writable, and needs to *read* the agent
+; transcript directories. It never writes to them.
+ReadWritePaths=%h/.openpaw
+ReadOnlyPaths=%h/.claude %h/.codex %h/.local/share/opencode
+
+[Install]
+WantedBy=default.target

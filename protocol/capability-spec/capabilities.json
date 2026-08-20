@@ -1,0 +1,73 @@
+{
+  "version": "1",
+  "capabilities": {
+    "sessions.read": {
+      "description": "List agent sessions and multiplexer targets.",
+      "read_only": true
+    },
+    "events.read": {
+      "description": "Subscribe to the normalized event stream.",
+      "read_only": true
+    },
+    "inbox.read": {
+      "description": "Read pending inbox items including command detail.",
+      "read_only": true
+    },
+    "approvals.write": {
+      "description": "Resolve permission/question items. Requires a one-time action token per decision.",
+      "read_only": false
+    },
+    "repos.read": {
+      "description": "Read git status, diffs, trees and blobs inside allowlisted repository roots.",
+      "read_only": true
+    },
+    "files.read": {
+      "description": "Read file contents inside allowlisted roots.",
+      "read_only": true
+    },
+    "preview.proxy": {
+      "description": "Proxy HTTP/WebSocket/SSE to allowlisted loopback ports.",
+      "read_only": false
+    },
+    "uploads.write": {
+      "description": "Write image/file attachments into the upload directory only.",
+      "read_only": false
+    }
+  },
+  "profiles": {
+    "observer": [
+      "sessions.read",
+      "events.read",
+      "inbox.read",
+      "repos.read",
+      "files.read"
+    ],
+    "operator": [
+      "sessions.read",
+      "events.read",
+      "inbox.read",
+      "approvals.write",
+      "repos.read",
+      "files.read",
+      "preview.proxy",
+      "uploads.write"
+    ]
+  },
+  "non_capabilities": [
+    "There is no arbitrary command execution endpoint. The app already owns an authenticated SSH/PTY channel; adding remote exec to the structured daemon would only widen the blast radius."
+  ],
+  "request_signing": {
+    "algorithm": "HMAC-SHA256",
+    "headers": [
+      "X-OpenPaw-Device",
+      "X-OpenPaw-Timestamp",
+      "X-OpenPaw-Nonce",
+      "X-OpenPaw-Signature"
+    ],
+    "canonical_string": "METHOD\\nPATH_WITH_QUERY\\nTIMESTAMP\\nNONCE\\nSHA256_HEX(BODY)",
+    "signature_encoding": "lowercase hex",
+    "clock_skew_seconds": 300,
+    "nonce_cache_seconds": 600,
+    "notes": "Timestamp outside the skew window or a replayed nonce is rejected with 401. The device token authenticates; the signature binds the request."
+  }
+}

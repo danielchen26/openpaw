@@ -1,0 +1,499 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1A2B3C000000000000000030 /* OpenPawApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000020 /* OpenPawApp.swift */; };
+		1A2B3C000000000000000031 /* TerminalSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000021 /* TerminalSurface.swift */; };
+		1A2B3C000000000000000032 /* SSHTerminalBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000022 /* SSHTerminalBackend.swift */; };
+		1A2B3C000000000000000033 /* HostAPIBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000023 /* HostAPIBackend.swift */; };
+		1A2B3C000000000000000034 /* SpeechDictation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000024 /* SpeechDictation.swift */; };
+		1A2B3C000000000000000035 /* ImageAttachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000025 /* ImageAttachment.swift */; };
+		1A2B3C000000000000000036 /* BiometricGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000026 /* BiometricGate.swift */; };
+		1A2B3C000000000000000037 /* MarkedTextComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000027 /* MarkedTextComposer.swift */; };
+		1A2B3C000000000000000038 /* Redaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000028 /* Redaction.swift */; };
+		1A2B3C000000000000000040 /* BiometricGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000026 /* BiometricGate.swift */; };
+		1A2B3C000000000000000041 /* MarkedTextComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000027 /* MarkedTextComposer.swift */; };
+		1A2B3C000000000000000042 /* Redaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000028 /* Redaction.swift */; };
+		1A2B3C000000000000000043 /* BiometricGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002A /* BiometricGateTests.swift */; };
+		1A2B3C000000000000000044 /* MarkedTextComposerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */; };
+		1A2B3C000000000000000045 /* RedactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002C /* RedactionTests.swift */; };
+		1A2B3C000000000000000070 /* OpenPawProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000060 /* OpenPawProtocol */; };
+		1A2B3C000000000000000071 /* OpenPawTerminalCore in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000061 /* OpenPawTerminalCore */; };
+		1A2B3C000000000000000072 /* OpenPawSSH in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000062 /* OpenPawSSH */; };
+		1A2B3C000000000000000073 /* OpenPawUI in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000063 /* OpenPawUI */; };
+		1A2B3C000000000000000074 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000064 /* SwiftTerm */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		1A2B3C000000000000000008 /* OpenPaw.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OpenPaw.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A2B3C000000000000000009 /* OpenPawAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenPawAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A2B3C000000000000000020 /* OpenPawApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenPawApp.swift; sourceTree = "<group>"; };
+		1A2B3C000000000000000021 /* TerminalSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSurface.swift; sourceTree = "<group>"; };
+		1A2B3C000000000000000022 /* SSHTerminalBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHTerminalBackend.swift; sourceTree = "<group>"; };
+		1A2B3C000000000000000023 /* HostAPIBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAPIBackend.swift; sourceTree = "<group>"; };
+		1A2B3C000000000000000024 /* SpeechDictation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechDictation.swift; sourceTree = "<group>"; };
+		1A2B3C000000000000000025 /* ImageAttachment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageAttachment.swift; sourceTree = "<group>"; };
+		1A2B3C000000000000000026 /* BiometricGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricGate.swift; sourceTree = "<group>"; };
+		1A2B3C000000000000000027 /* MarkedTextComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkedTextComposer.swift; sourceTree = "<group>"; };
+		1A2B3C000000000000000028 /* Redaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Redaction.swift; sourceTree = "<group>"; };
+		1A2B3C000000000000000029 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		1A2B3C00000000000000002A /* BiometricGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricGateTests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkedTextComposerTests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000002C /* RedactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedactionTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		1A2B3C000000000000000014 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A2B3C000000000000000070 /* OpenPawProtocol in Frameworks */,
+				1A2B3C000000000000000071 /* OpenPawTerminalCore in Frameworks */,
+				1A2B3C000000000000000072 /* OpenPawSSH in Frameworks */,
+				1A2B3C000000000000000073 /* OpenPawUI in Frameworks */,
+				1A2B3C000000000000000074 /* SwiftTerm in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A2B3C000000000000000017 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		1A2B3C000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				1A2B3C000000000000000004 /* OpenPawApp */,
+				1A2B3C000000000000000005 /* OpenPawAppTests */,
+				1A2B3C000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		1A2B3C000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1A2B3C000000000000000008 /* OpenPaw.app */,
+				1A2B3C000000000000000009 /* OpenPawAppTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		1A2B3C000000000000000004 /* OpenPawApp */ = {
+			isa = PBXGroup;
+			children = (
+				1A2B3C000000000000000020 /* OpenPawApp.swift */,
+				1A2B3C000000000000000021 /* TerminalSurface.swift */,
+				1A2B3C000000000000000022 /* SSHTerminalBackend.swift */,
+				1A2B3C000000000000000023 /* HostAPIBackend.swift */,
+				1A2B3C000000000000000024 /* SpeechDictation.swift */,
+				1A2B3C000000000000000025 /* ImageAttachment.swift */,
+				1A2B3C000000000000000026 /* BiometricGate.swift */,
+				1A2B3C000000000000000027 /* MarkedTextComposer.swift */,
+				1A2B3C000000000000000028 /* Redaction.swift */,
+				1A2B3C000000000000000029 /* Info.plist */,
+			);
+			path = OpenPawApp;
+			sourceTree = "<group>";
+		};
+		1A2B3C000000000000000005 /* OpenPawAppTests */ = {
+			isa = PBXGroup;
+			children = (
+				1A2B3C00000000000000002A /* BiometricGateTests.swift */,
+				1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */,
+				1A2B3C00000000000000002C /* RedactionTests.swift */,
+			);
+			path = OpenPawAppTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1A2B3C000000000000000006 /* OpenPaw */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A2B3C00000000000000000D /* Build configuration list for PBXNativeTarget "OpenPaw" */;
+			buildPhases = (
+				1A2B3C000000000000000013 /* Sources */,
+				1A2B3C000000000000000014 /* Frameworks */,
+				1A2B3C000000000000000015 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = OpenPaw;
+			packageProductDependencies = (
+				1A2B3C000000000000000060 /* OpenPawProtocol */,
+				1A2B3C000000000000000061 /* OpenPawTerminalCore */,
+				1A2B3C000000000000000062 /* OpenPawSSH */,
+				1A2B3C000000000000000063 /* OpenPawUI */,
+				1A2B3C000000000000000064 /* SwiftTerm */,
+			);
+			productName = OpenPaw;
+			productReference = 1A2B3C000000000000000008 /* OpenPaw.app */;
+			productType = "com.apple.product-type.application";
+		};
+		1A2B3C000000000000000007 /* OpenPawAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A2B3C000000000000000010 /* Build configuration list for PBXNativeTarget "OpenPawAppTests" */;
+			buildPhases = (
+				1A2B3C000000000000000016 /* Sources */,
+				1A2B3C000000000000000017 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = OpenPawAppTests;
+			packageProductDependencies = (
+			);
+			productName = OpenPawAppTests;
+			productReference = 1A2B3C000000000000000009 /* OpenPawAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		1A2B3C000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2600;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					1A2B3C000000000000000006 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					1A2B3C000000000000000007 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+				};
+			};
+			buildConfigurationList = 1A2B3C00000000000000000A /* Build configuration list for PBXProject "OpenPaw" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 1A2B3C000000000000000002;
+			packageReferences = (
+				1A2B3C000000000000000050 /* XCLocalSwiftPackageReference "../../packages/swift-agent-protocol" */,
+				1A2B3C000000000000000051 /* XCLocalSwiftPackageReference "../../packages/swift-terminal-core" */,
+				1A2B3C000000000000000052 /* XCLocalSwiftPackageReference "../../packages/swift-ssh-transport" */,
+				1A2B3C000000000000000053 /* XCLocalSwiftPackageReference "../../packages/swift-openpaw-ui" */,
+				1A2B3C000000000000000054 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+			);
+			productRefGroup = 1A2B3C000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1A2B3C000000000000000006 /* OpenPaw */,
+				1A2B3C000000000000000007 /* OpenPawAppTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		1A2B3C000000000000000015 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1A2B3C000000000000000013 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A2B3C000000000000000030 /* OpenPawApp.swift in Sources */,
+				1A2B3C000000000000000031 /* TerminalSurface.swift in Sources */,
+				1A2B3C000000000000000032 /* SSHTerminalBackend.swift in Sources */,
+				1A2B3C000000000000000033 /* HostAPIBackend.swift in Sources */,
+				1A2B3C000000000000000034 /* SpeechDictation.swift in Sources */,
+				1A2B3C000000000000000035 /* ImageAttachment.swift in Sources */,
+				1A2B3C000000000000000036 /* BiometricGate.swift in Sources */,
+				1A2B3C000000000000000037 /* MarkedTextComposer.swift in Sources */,
+				1A2B3C000000000000000038 /* Redaction.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A2B3C000000000000000016 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A2B3C000000000000000040 /* BiometricGate.swift in Sources */,
+				1A2B3C000000000000000041 /* MarkedTextComposer.swift in Sources */,
+				1A2B3C000000000000000042 /* Redaction.swift in Sources */,
+				1A2B3C000000000000000043 /* BiometricGateTests.swift in Sources */,
+				1A2B3C000000000000000044 /* MarkedTextComposerTests.swift in Sources */,
+				1A2B3C000000000000000045 /* RedactionTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		1A2B3C00000000000000000B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		1A2B3C00000000000000000C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		1A2B3C00000000000000000E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = OpenPawApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.openpaw.app;
+				PRODUCT_NAME = OpenPaw;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		1A2B3C00000000000000000F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = OpenPawApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.openpaw.app;
+				PRODUCT_NAME = OpenPaw;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		1A2B3C000000000000000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.openpaw.app.logic-tests;
+				PRODUCT_NAME = OpenPawAppTests;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		1A2B3C000000000000000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.openpaw.app.logic-tests;
+				PRODUCT_NAME = OpenPawAppTests;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1A2B3C00000000000000000A /* Build configuration list for PBXProject "OpenPaw" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A2B3C00000000000000000B /* Debug */,
+				1A2B3C00000000000000000C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1A2B3C00000000000000000D /* Build configuration list for PBXNativeTarget "OpenPaw" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A2B3C00000000000000000E /* Debug */,
+				1A2B3C00000000000000000F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1A2B3C000000000000000010 /* Build configuration list for PBXNativeTarget "OpenPawAppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A2B3C000000000000000011 /* Debug */,
+				1A2B3C000000000000000012 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		1A2B3C000000000000000050 /* XCLocalSwiftPackageReference "../../packages/swift-agent-protocol" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../packages/swift-agent-protocol;
+		};
+		1A2B3C000000000000000051 /* XCLocalSwiftPackageReference "../../packages/swift-terminal-core" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../packages/swift-terminal-core;
+		};
+		1A2B3C000000000000000052 /* XCLocalSwiftPackageReference "../../packages/swift-ssh-transport" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../packages/swift-ssh-transport;
+		};
+		1A2B3C000000000000000053 /* XCLocalSwiftPackageReference "../../packages/swift-openpaw-ui" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../packages/swift-openpaw-ui;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		1A2B3C000000000000000054 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 1.20.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		1A2B3C000000000000000060 /* OpenPawProtocol */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OpenPawProtocol;
+		};
+		1A2B3C000000000000000061 /* OpenPawTerminalCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OpenPawTerminalCore;
+		};
+		1A2B3C000000000000000062 /* OpenPawSSH */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OpenPawSSH;
+		};
+		1A2B3C000000000000000063 /* OpenPawUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = OpenPawUI;
+		};
+		1A2B3C000000000000000064 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1A2B3C000000000000000054 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 1A2B3C000000000000000001 /* Project object */;
+}

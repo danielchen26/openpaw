@@ -1,0 +1,19 @@
+{
+ "id": "prt_a5",
+ "sessionID": "ses_2f64fc11cffegKaJScI4Md0FTX",
+ "messageID": "msg_c4b2186d8001ILwDoNkyZur5tU",
+ "type": "tool",
+ "callID": "call_9f2a1d",
+ "tool": "edit",
+ "state": {
+  "status": "error",
+  "input": {
+   "filePath": "/Users/dev/src/openpaw/host/crates/openpaw-preview/src/ws.rs"
+  },
+  "error": "file not found",
+  "time": {
+   "start": 1787245265000,
+   "end": 1787245265500
+  }
+ }
+}

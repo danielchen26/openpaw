@@ -1,0 +1,691 @@
+import Foundation
+import OpenPawProtocol
+import OpenPawTerminalCore
+import Testing
+
+@testable import OpenPawUI
+
+// MARK: - Host draft validation
+
+/// The editor's validation is the one piece of the shell that is worth testing without a screen: it decides whether
+/// a host can be saved at all, and every rule below corresponds to a mistake a person actually makes.
+@Suite("Host draft validation")
+struct HostDraftValidationTests {
+
+    /// A host that should save without complaint. Every rejection test below is this value with one field spoiled,
+    /// so a failure names the rule that broke rather than a fixture that drifted.
+    private func draft(
+        hostname: String = "10.0.0.4",
+        port: Int = 22,
+        username: String = "chet"
+    ) -> HostDraft {
+        HostDraft(nickname: "workshop", hostname: hostname, port: port, username: username)
+    }
+
+    @Test("A complete draft has nothing to report")
+    func acceptsANormalRecord() {
+        #expect(draft().validate().isEmpty)
+        #expect(draft().isValid)
+    }
+
+    @Test("Port zero is rejected, and the message names the range")
+    func rejectsPortZero() {
+        let issues = draft(port: 0).validate()
+        #expect(issues.contains { $0.field == .port })
+        #expect(issues.first { $0.field == .port }?.message.contains("1 and 65535") == true)
+    }
+
+    @Test("A port above the 16-bit range is rejected")
+    func rejectsPortAbove65535() {
+        #expect(draft(port: 70_000).validate().contains { $0.field == .port })
+        // The boundary itself is legal: 65535 is a port, 65536 is not.
+        #expect(draft(port: 65_535).validate().isEmpty)
+        #expect(draft(port: 65_536).validate().contains { $0.field == .port })
+        #expect(draft(port: 1).validate().isEmpty)
+    }
+
+    @Test("An empty hostname is rejected")
+    func rejectsAnEmptyHostname() {
+        #expect(draft(hostname: "").validate().contains { $0.field == .hostname })
+        // Whitespace is not a hostname either, which is the mistake a paste makes.
+        #expect(draft(hostname: "   ").validate().contains { $0.field == .hostname })
+    }
+
+    @Test("A username containing a space is rejected")
+    func rejectsAUsernameWithASpace() {
+        let issues = draft(username: "chet ian").validate()
+        #expect(issues.contains { $0.field == .username })
+        #expect(issues.first { $0.field == .username }?.message.contains("cannot contain spaces") == true)
+    }
+
+    @Test("An empty username is rejected separately from a spaced one")
+    func rejectsAnEmptyUsername() {
+        #expect(draft(username: "").validate().contains { $0.field == .username })
+    }
+
+    @Test("Every complaint is reported at once, not one per save")
+    func reportsEveryProblemTogether() {
+        let issues = draft(hostname: "", port: 0, username: "no one").validate()
+        #expect(issues.filter { $0.field == .hostname }.count == 1)
+        #expect(issues.filter { $0.field == .port }.count == 1)
+        #expect(issues.filter { $0.field == .username }.count == 1)
+    }
+
+    @Test("Geometry and keepalive are bounded")
+    func rejectsImpossibleSessionMechanics() {
+        var wide = draft()
+        wide.profile.columns = 5_000
+        #expect(wide.validate().contains { $0.field == .geometry })
+
+        var negative = draft()
+        negative.profile.keepaliveSeconds = -1
+        #expect(negative.validate().contains { $0.field == .keepalive })
+
+        var off = draft()
+        off.profile.keepaliveSeconds = 0
+        #expect(off.validate().isEmpty)
+    }
+
+    @Test("A jump hop is held to the same rules as the host")
+    func rejectsABrokenJumpHop() {
+        var withHop = draft()
+        withHop.jumpHosts = [JumpHop(hostname: "", port: 0, username: "bad name")]
+        let issues = withHop.validate().filter { $0.field == .jumpHost }
+        #expect(issues.count == 3)
+        #expect(issues.allSatisfy { $0.hopIndex == 0 })
+        #expect(issues.contains { $0.message.contains("Hop 1") })
+    }
+
+    @Test("A credential kind that needs a keychain name says so")
+    func rejectsAMissingKeychainReference() {
+        var key = draft()
+        key.authKind = .privateKey
+        #expect(key.validate().contains { $0.field == .credential })
+        key.keyReference = "id_ed25519"
+        #expect(key.validate().isEmpty)
+    }
+
+    @Test("A blank nickname falls back to the hostname instead of failing")
+    func nicknameIsOptional() {
+        var anonymous = draft()
+        anonymous.nickname = ""
+        #expect(anonymous.validate().isEmpty)
+        #expect(anonymous.resolvedNickname == "10.0.0.4")
+    }
+
+    @Test("A draft survives the trip through a record and back")
+    func roundTripsThroughARecord() throws {
+        var original = draft()
+        original.tags = ["work"]
+        original.multiplexer = .tmux
+        original.preferredTransport = .ssh
+        original.profile.columns = 120
+        original.profile.rows = 40
+
+        let record = try original.record()
+        let reread = HostDraft(record: record, profile: original.profile)
+
+        #expect(reread.hostname == original.hostname)
+        #expect(reread.port == original.port)
+        #expect(reread.username == original.username)
+        #expect(reread.nickname == original.resolvedNickname)
+        #expect(reread.tags == original.tags)
+        #expect(reread.multiplexer == .tmux)
+        #expect(reread.preferredTransport == .ssh)
+        #expect(reread.profile.columns == 120)
+        #expect(reread.profile.rows == 40)
+    }
+
+    @Test("Editing an existing host keeps its pinned keys")
+    func editingPreservesPinnedKeys() throws {
+        let pin = KnownHostEntry(keyType: "ssh-ed25519", fingerprint: "SHA256:abc", addedAt: Date())
+        let existing = HostRecord(
+            nickname: "workshop", hostname: "10.0.0.4", username: "chet", auth: .agentForwarding,
+            knownHosts: [pin])
+        var edited = HostDraft(record: existing)
+        edited.nickname = "workshop mk2"
+
+        let saved = try edited.record(id: existing.id, existing: existing)
+        #expect(saved.id == existing.id)
+        #expect(saved.knownHosts == [pin])
+        #expect(saved.nickname == "workshop mk2")
+    }
+
+    @Test("The session profile reaches the connection configuration")
+    func configurationCarriesTheProfile() throws {
+        var source = draft()
+        source.profile.terminalType = "xterm-kitty"
+        source.profile.columns = 200
+        source.profile.rows = 50
+        source.profile.keepaliveSeconds = 45
+        source.jumpHosts = [JumpHop(hostname: "bastion.example.com", port: 2_222, username: "")]
+
+        let configuration = try source.configuration()
+        #expect(configuration.terminalType == "xterm-kitty")
+        #expect(configuration.initialSize.columns == 200)
+        #expect(configuration.initialSize.rows == 50)
+        #expect(configuration.keepaliveInterval == .seconds(45))
+        #expect(configuration.jumpHosts.count == 1)
+        #expect(configuration.jumpHosts[0].host == "bastion.example.com")
+        #expect(configuration.jumpHosts[0].port == 2_222)
+        // A hop with no username of its own inherits the host's, rather than dialling as root by accident.
+        #expect(configuration.jumpHosts[0].username == "chet")
+    }
+
+    @Test("Keepalive off means no interval at all, not a zero one")
+    func keepaliveOffProducesNoInterval() throws {
+        var source = draft()
+        source.profile.keepaliveSeconds = 0
+        #expect(try source.configuration().keepaliveInterval == nil)
+    }
+
+    @Test("A pasted private key is refused rather than persisted")
+    func refusesInlinedKeyMaterial() {
+        var pasted = draft()
+        pasted.authKind = .privateKey
+        pasted.keyReference = "-----BEGIN OPENSSH PRIVATE KEY-----"
+        // Validation passes: the field is non-empty. The keychain reference is what refuses it.
+        #expect(pasted.validate().isEmpty)
+        #expect(throws: (any Error).self) { try pasted.record() }
+    }
+}
+
+// MARK: - Host key gate
+
+@Suite("Host key prompt")
+struct HostKeyPromptTests {
+
+    @Test("An unknown key can be trusted after the user compares it")
+    func unknownAllowsTrust() {
+        let prompt = HostKeyPrompt(host: "workshop:22", verdict: .unknown(fingerprint: "SHA256:abc"))
+        #expect(prompt.allowsTrust)
+    }
+
+    @Test("A changed key can never be trusted from inside the app")
+    func changedNeverAllowsTrust() {
+        let prompt = HostKeyPrompt(
+            host: "workshop:22", verdict: .changed(expected: "SHA256:abc", actual: "SHA256:def"))
+        #expect(prompt.allowsTrust == false)
+        // The transport agrees: this is a block, not a warning.
+        #expect(prompt.verdict.isBlocking)
+    }
+
+    @Test("An already trusted key has nothing to accept")
+    func trustedOffersNoDecision() {
+        #expect(HostKeyPrompt(host: "workshop:22", verdict: .trusted).allowsTrust == false)
+    }
+}
+
+// MARK: - Navigation
+
+@Suite("Root navigation")
+struct RootNavigationTests {
+
+    @Test("A compact width gets a tab bar")
+    func compactUsesTabs() {
+        #expect(RootNavigationStyle.style(for: .compact) == .tabs)
+    }
+
+    @Test("A regular width gets a sidebar and a detail pane")
+    func regularUsesSplit() {
+        #expect(RootNavigationStyle.style(for: .regular) == .split)
+    }
+
+    @Test("The five destinations are stable and complete")
+    func destinationsAreComplete() {
+        #expect(ShellDestination.allCases.count == 5)
+        #expect(ShellDestination.allCases.map(\.rawValue) == ["terminal", "chat", "inbox", "repo", "settings"])
+        #expect(RepoPane.allCases.map(\.rawValue) == ["diff", "files", "preview", "status"])
+    }
+
+    @MainActor
+    @Test("A deep link selects the inbox and remembers the item")
+    func deepLinkOpensTheInbox() {
+        let router = ShellRouter()
+        router.destination = .terminal
+        router.openApproval(itemID: "inb_abc")
+        #expect(router.destination == .inbox)
+        #expect(router.approvalItemID == "inb_abc")
+    }
+}
+
+// MARK: - Shortcut bar
+
+@Suite("Shortcut bar")
+struct ShortcutBarTests {
+
+    @Test("The shipped set carries the keys a touch keyboard cannot produce")
+    func defaultSetCarriesTheEssentialKeys() {
+        for id in ["esc", "ctrl", "alt", "tab", "pipe", "slash"] {
+            #expect(ShortcutSet.default[id] != nil, "\(id) is missing from the default set")
+        }
+        #expect(ShortcutSet.default["esc"]?.label == "esc")
+        #expect(ShortcutSet.default["pipe"]?.label == "|")
+        #expect(ShortcutSet.default["slash"]?.label == "/")
+        // ctrl and alt arm, they do not send.
+        if case .modifierLatch(let modifiers) = ShortcutSet.default["ctrl"]?.payload {
+            #expect(modifiers == .control)
+        } else {
+            Issue.record("ctrl should be a modifier latch")
+        }
+        if case .modifierLatch(let modifiers) = ShortcutSet.default["alt"]?.payload {
+            #expect(modifiers == .alt)
+        } else {
+            Issue.record("alt should be a modifier latch")
+        }
+    }
+
+    @Test("ctrl+c is the interrupt byte")
+    func controlCProducesTheInterruptByte() {
+        let chord = KeyChord(.text("c"), modifiers: .control)
+        #expect(Array(OpenPawTerminalCore.bytes(for: chord)) == [0x03])
+        #expect(Array(ShortcutSet.default.bytes(for: "ctrl-c") ?? []) == [0x03])
+        // Round-trips through the chord's own string form, which is what the shortcut JSON stores.
+        #expect(chord.description == "ctrl+c")
+        #expect(KeyChord(parsing: "ctrl+c") == chord)
+    }
+
+    @Test("A latched modifier folds into the next chord and nothing else")
+    func latchedControlFoldsIntoTheNextChord() throws {
+        let tab = try #require(ShortcutSet.default["tab"])
+        guard case .send(let plain) = ShortcutBarLayout.action(for: tab, latched: []) else {
+            Issue.record("tab should send a chord")
+            return
+        }
+        #expect(plain.modifiers.isEmpty)
+
+        guard case .send(let modified) = ShortcutBarLayout.action(for: tab, latched: .control) else {
+            Issue.record("tab should still send a chord when control is armed")
+            return
+        }
+        #expect(modified.modifiers.contains(.control))
+        #expect(modified.key == .tab)
+    }
+
+    @Test("Command is never transmitted to a PTY")
+    func commandIsNeverFoldedIn() throws {
+        let tab = try #require(ShortcutSet.default["tab"])
+        guard case .send(let chord) = ShortcutBarLayout.action(for: tab, latched: [.command]) else {
+            Issue.record("tab should send a chord")
+            return
+        }
+        #expect(chord.modifiers.isEmpty)
+    }
+
+    @Test("Tapping a modifier arms it rather than sending anything")
+    func modifierTapsLatch() throws {
+        let control = try #require(ShortcutSet.default["ctrl"])
+        guard case .latch(let modifiers) = ShortcutBarLayout.action(for: control, latched: []) else {
+            Issue.record("ctrl should latch")
+            return
+        }
+        #expect(modifiers == .control)
+        #expect(ShortcutBarLayout.isLatched(control, in: .control))
+        #expect(ShortcutBarLayout.isLatched(control, in: []) == false)
+        #expect(ShortcutBarLayout.isLatched(control, in: .alt) == false)
+    }
+
+    @Test("A user shortcut types its text verbatim")
+    func literalShortcutsType() {
+        let shortcut = Shortcut(id: "gst", label: "gst", payload: .literal("git status\n"), order: 100)
+        guard case .type(let text) = ShortcutBarLayout.action(for: shortcut, latched: .control) else {
+            Issue.record("a literal shortcut should type text")
+            return
+        }
+        // Arming ctrl does not turn a macro into a control sequence.
+        #expect(text == "git status\n")
+    }
+
+    @Test("Arrows are drawn as one cluster and never also as loose keys")
+    func arrowsCollapseIntoACluster() {
+        let items = ShortcutBarLayout.items(for: .default)
+        let clusters = items.compactMap { item -> [Shortcut]? in
+            if case .cluster(let arrows) = item { return arrows }
+            return nil
+        }
+        #expect(clusters.count == 1)
+        #expect(clusters.first?.map(\.id) == ["left", "up", "down", "right"])
+
+        let looseArrows = items.compactMap { item -> String? in
+            guard case .key(let shortcut) = item else { return nil }
+            return ShortcutBarLayout.arrowIDs.contains(shortcut.id) ? shortcut.id : nil
+        }
+        #expect(looseArrows.isEmpty)
+    }
+
+    @Test("One row keeps everything; two rows break after the arrows")
+    func rowSplitFollowsTheCluster() {
+        let single = ShortcutBarLayout.rows(for: .default, count: 1)
+        #expect(single.count == 1)
+        #expect(single[0].count == ShortcutBarLayout.items(for: .default).count)
+
+        let double = ShortcutBarLayout.rows(for: .default, count: 2)
+        #expect(double.count == 2)
+        if case .cluster = double[0].last {
+            // Expected: the arrow cluster closes the first row.
+        } else {
+            Issue.record("the first row should end with the arrow cluster")
+        }
+        #expect(double[1].contains { $0.id == "home" })
+        #expect(double.reduce(0) { $0 + $1.count } == single[0].count)
+    }
+
+    @Test("An empty set produces an empty bar rather than a crash")
+    func emptySetIsHandled() {
+        let empty = ShortcutSet(shortcuts: [])
+        #expect(ShortcutBarLayout.items(for: empty).isEmpty)
+        #expect(ShortcutBarLayout.rows(for: empty, count: 2) == [[]])
+    }
+}
+
+// MARK: - Diagnostics
+
+@Suite("Diagnostics")
+struct DiagnosticsTests {
+
+    private func health() -> HealthInfo {
+        HealthInfo(
+            version: "0.4.1",
+            protocolVersion: "1.0",
+            agents: [.claudeCode, .codex],
+            capabilities: ["approve", "read"],
+            previewPorts: [3_000, 5_173],
+            adapterVersions: ["claude-code": "claude-code/transcript-v1"]
+        )
+    }
+
+    private func sessions() -> [SessionSummary] {
+        [
+            SessionSummary(
+                sessionID: "sess_cc-alpha", agent: .claudeCode, state: .working,
+                lastEventAt: Date(timeIntervalSince1970: 100), lastSeq: 42),
+            SessionSummary(
+                sessionID: "sess_cc-beta", agent: .claudeCode, state: .idle,
+                lastEventAt: Date(timeIntervalSince1970: 200), lastSeq: 17),
+        ]
+    }
+
+    @Test("Adapter rows merge what the host reports with what this device has read")
+    func adapterRowsMergeHealthAndSessions() {
+        let rows = AdapterDiagnostic.rows(health: health(), sessions: sessions())
+        #expect(rows.map(\.name) == ["claude-code", "codex"])
+
+        let claude = rows[0]
+        #expect(claude.agent == .claudeCode)
+        #expect(claude.formatVersion == "claude-code/transcript-v1")
+        // Highest sequence across that adapter's sessions, not the first one found.
+        #expect(claude.lastSeq == 42)
+        #expect(claude.lastEventAt == Date(timeIntervalSince1970: 200))
+
+        // An enabled adapter with no reported version is still listed, and says so rather than vanishing.
+        #expect(rows[1].formatVersion == nil)
+        #expect(rows[1].lastSeq == nil)
+    }
+
+    @Test("An adapter this build predates is still shown")
+    func unknownAdaptersSurvive() {
+        let future = HealthInfo(
+            version: "9.0", protocolVersion: "2.0", agents: [], capabilities: [],
+            adapterVersions: ["hypothetical-cli": "hypothetical/v3"])
+        let rows = AdapterDiagnostic.rows(health: future, sessions: [])
+        #expect(rows.count == 1)
+        #expect(rows[0].agent == nil)
+        #expect(rows[0].displayName == "hypothetical-cli")
+        #expect(rows[0].formatVersion == "hypothetical/v3")
+    }
+
+    @Test("No health means no adapter rows rather than invented ones")
+    func missingHealthProducesNoRows() {
+        #expect(AdapterDiagnostic.rows(health: nil, sessions: sessions()).isEmpty)
+    }
+
+    @Test("The bug report carries the values a maintainer asks for first")
+    func reportCarriesTheEssentials() {
+        let text = DiagnosticsReport.text(
+            health: health(),
+            connection: .connected(.ssh),
+            sessions: sessions(),
+            repos: [RepoSummary(name: "openpaw", path: "/src/openpaw", branch: "main", dirty: true, ahead: 1, behind: 0)],
+            forwardedPort: 8_787,
+            generatedAt: Date(timeIntervalSince1970: 0)
+        )
+        #expect(text.contains("host version: 0.4.1"))
+        #expect(text.contains("protocol: 1.0"))
+        #expect(text.contains("connection: connected"))
+        #expect(text.contains("transport: SSH"))
+        #expect(text.contains("forwarded port: 8787"))
+        #expect(text.contains("preview ports: 3000,5173"))
+        #expect(text.contains("adapter claude-code: format_version=claude-code/transcript-v1 last_seq=42"))
+        #expect(text.contains("session sess_cc-alpha: agent=claude-code state=working last_seq=42 pending=0"))
+        #expect(text.contains("repo openpaw: branch=main dirty=true ahead=1 behind=0"))
+    }
+
+    @Test("A report with nothing connected still says what is missing")
+    func reportHandlesAnEmptyDevice() {
+        let text = DiagnosticsReport.text(
+            health: nil, connection: .idle, sessions: [], repos: [], forwardedPort: nil,
+            generatedAt: Date(timeIntervalSince1970: 0))
+        #expect(text.contains("host version: unknown"))
+        #expect(text.contains("forwarded port: not forwarded"))
+        #expect(text.contains("preview ports: none"))
+        #expect(text.contains("transport: none"))
+    }
+
+    @Test("A reconnecting state carries its reason into the report")
+    func reportExplainsAFallback() {
+        let text = DiagnosticsReport.text(
+            health: nil,
+            connection: .reconnecting(attempt: 2, reason: "mosh-server is not installed on the host"),
+            sessions: [], repos: [], forwardedPort: nil)
+        #expect(text.contains("connection: reconnecting"))
+        #expect(text.contains("Attempt 2. mosh-server is not installed on the host"))
+    }
+}
+
+// MARK: - Paired devices
+
+@Suite("Paired devices")
+struct PairedDeviceTests {
+
+    @Test("Audit entries collapse into one row per device, most recent first")
+    func devicesCollapseFromAudit() {
+        let entries = [
+            AuditEntry(
+                at: Date(timeIntervalSince1970: 10), deviceID: "dev_phone", action: "resolve",
+                target: "inb_1", result: "ok"),
+            AuditEntry(
+                at: Date(timeIntervalSince1970: 30), deviceID: "dev_phone", action: "resolve",
+                target: "inb_2", result: "ok"),
+            AuditEntry(
+                at: Date(timeIntervalSince1970: 20), deviceID: "dev_pad", action: "pair", target: nil,
+                result: "ok"),
+            // Host-side actions have no device and must not invent one.
+            AuditEntry(
+                at: Date(timeIntervalSince1970: 40), deviceID: nil, action: "policy", target: nil, result: "ok"),
+        ]
+
+        let devices = PairedDevice.derive(from: entries)
+        #expect(devices.map(\.id) == ["dev_phone", "dev_pad"])
+        #expect(devices[0].actions == 2)
+        #expect(devices[0].lastSeen == Date(timeIntervalSince1970: 30))
+        #expect(devices[1].actions == 1)
+    }
+
+    @Test("An empty audit log names no devices")
+    func emptyAuditProducesNoDevices() {
+        #expect(PairedDevice.derive(from: []).isEmpty)
+    }
+}
+
+// MARK: - Connection presentation
+
+@Suite("Connection presentation")
+struct ConnectionPresentationTests {
+
+    @Test("Reconnecting always explains itself")
+    func reconnectingCarriesTheReason() {
+        let status = ConnectionPresentation.make(
+            .reconnecting(attempt: 3, reason: "the link dropped"))
+        #expect(status.label == "reconnecting")
+        #expect(status.detail == "Attempt 3. the link dropped")
+    }
+
+    @Test("A recoverable failure says what happens next")
+    func recoverableFailureNamesTheFallback() {
+        let status = ConnectionPresentation.make(.failed(.remoteBinaryMissing(.mosh, command: "mosh-server")))
+        #expect(status.label == "failed")
+        #expect(status.detail?.contains("try the next transport") == true)
+    }
+
+    @Test("An unrecoverable failure promises nothing")
+    func unrecoverableFailureDoesNotPromiseARetry() {
+        let status = ConnectionPresentation.make(.failed(.authenticationFailed(reason: "no such user")))
+        #expect(status.detail?.contains("try the next transport") == false)
+    }
+
+    @Test("The transport is only named once there is one")
+    func transportLabelFollowsTheConnection() {
+        #expect(ConnectionPresentation.transportLabel(.connected(.mosh)) == "Mosh")
+        #expect(ConnectionPresentation.transportLabel(.connecting) == nil)
+    }
+}
+
+// MARK: - Session state
+
+@Suite("Session state presentation")
+struct SessionStatePresentationTests {
+
+    @Test("Every state has a word, a glyph and a tone")
+    func everyStateIsNamed() {
+        for state in SessionState.allCases {
+            let presentation = SessionStatePresentation.make(state)
+            #expect(presentation.label.isEmpty == false)
+            #expect(presentation.glyph.isEmpty == false)
+        }
+    }
+
+    @Test("Waiting says who it is waiting for")
+    func waitingIsUnambiguous() {
+        #expect(SessionStatePresentation.make(.waiting).label == "waiting for you")
+    }
+}
+
+// MARK: - Transport availability
+
+@Suite("Transport availability")
+struct TransportAvailabilityTests {
+
+    @Test("Automatic is always offerable")
+    func automaticIsAlwaysAvailable() {
+        #expect(TransportAvailability.isBuilt(nil))
+        #expect(TransportAvailability.note(for: nil) == nil)
+    }
+
+    @Test("Transports that are not written yet are marked, not silently offered")
+    func unbuiltTransportsAreMarked() {
+        #expect(TransportAvailability.isBuilt(.ssh))
+        #expect(TransportAvailability.note(for: .ssh) == nil)
+        #expect(TransportAvailability.isBuilt(.mosh) == false)
+        #expect(TransportAvailability.note(for: .mosh) == "not built yet")
+        #expect(TransportAvailability.isBuilt(.eternalTerminal) == false)
+        #expect(TransportAvailability.note(for: .eternalTerminal) == "not built yet")
+    }
+}
+
+// MARK: - Settings round trip
+
+@Suite("Settings")
+struct SettingsTests {
+
+    private func volatileDefaults(_ name: String) -> UserDefaults {
+        let suite = "openpaw.tests.\(name)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }
+
+    @MainActor
+    @Test("Preferences survive a relaunch")
+    func settingsPersist() {
+        let defaults = volatileDefaults("persist")
+        let first = OpenPawSettings(defaults: defaults)
+        first.terminalFontSize = 17
+        first.terminalTheme = .warm
+        first.dictationMode = .terminal
+        first.scrollbackLines = 25_000
+        first.isShortcutBarVisible = false
+
+        let second = OpenPawSettings(defaults: defaults)
+        #expect(second.terminalFontSize == 17)
+        #expect(second.terminalTheme == .warm)
+        #expect(second.dictationMode == .terminal)
+        #expect(second.scrollbackLines == 25_000)
+        #expect(second.isShortcutBarVisible == false)
+    }
+
+    @MainActor
+    @Test("A fresh device gets the shipped shortcut set, not an empty bar")
+    func freshDeviceHasDefaultShortcuts() {
+        let settings = OpenPawSettings(defaults: volatileDefaults("fresh"))
+        #expect(settings.shortcuts.shortcuts.isEmpty == false)
+        #expect(settings.shortcuts["esc"] != nil)
+        #expect(settings.isShortcutBarVisible)
+    }
+
+    @MainActor
+    @Test("Session profiles are per host and survive a relaunch")
+    func profilesAreKeyedByHost() {
+        let defaults = volatileDefaults("profiles")
+        let host = UUID()
+        let other = UUID()
+        let first = OpenPawSettings(defaults: defaults)
+        first.setProfile(SessionProfile(terminalType: "xterm-kitty", columns: 200, rows: 50), for: host)
+        first.recordConnection(to: host, at: Date(timeIntervalSince1970: 500))
+
+        let second = OpenPawSettings(defaults: defaults)
+        #expect(second.profile(for: host).columns == 200)
+        #expect(second.profile(for: host).terminalType == "xterm-kitty")
+        #expect(second.profile(for: host).lastConnectedAt == Date(timeIntervalSince1970: 500))
+        // An unknown host gets defaults rather than another host's geometry.
+        #expect(second.profile(for: other).columns == 80)
+        #expect(second.profile(for: other).lastConnectedAt == nil)
+
+        second.forgetProfile(for: host)
+        #expect(second.profile(for: host).columns == 80)
+    }
+
+    @MainActor
+    @Test("An exported snapshot restores everything it carried")
+    func snapshotRoundTrips() throws {
+        let source = OpenPawSettings(defaults: volatileDefaults("export"))
+        let host = UUID()
+        source.terminalFontSize = 21
+        source.terminalTheme = .well
+        source.previewPort = 5_173
+        source.applicationCursorKeys = true
+        source.setProfile(SessionProfile(columns: 132, rows: 43), for: host)
+
+        let data = try JSONEncoder().encode(source.snapshot(eventBudget: 5_000))
+        let decoded = try JSONDecoder().decode(SettingsSnapshot.self, from: data)
+
+        let target = OpenPawSettings(defaults: volatileDefaults("import"))
+        let budget = target.apply(decoded)
+        #expect(budget == 5_000)
+        #expect(target.terminalFontSize == 21)
+        #expect(target.terminalTheme == .well)
+        #expect(target.previewPort == 5_173)
+        #expect(target.applicationCursorKeys)
+        #expect(target.profile(for: host).columns == 132)
+        #expect(target.profile(for: host).rows == 43)
+    }
+
+    @MainActor
+    @Test("An import with an absurd cell size is clamped rather than trusted")
+    func importClampsFontSize() {
+        let settings = OpenPawSettings(defaults: volatileDefaults("clamp"))
+        var snapshot = settings.snapshot(eventBudget: 2_000)
+        snapshot.terminalFontSize = 400
+        settings.apply(snapshot)
+        #expect(settings.terminalFontSize == OpenPawSettings.fontSizeRange.upperBound)
+    }
+}
