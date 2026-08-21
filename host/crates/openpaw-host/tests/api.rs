@@ -1435,6 +1435,8 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
         (br#"{"Peer":{"nodekey:abc":{"ID":"n1","HostName":"mac","TailscaleIP":"100.64.0.2"}}}"#.as_slice(), "missing BackendState"),
         (br#"{"BackendState":true,"Peer":{"nodekey:abc":{"ID":"n1","HostName":"mac","TailscaleIP":"100.64.0.2"}}}"#.as_slice(), "non-string BackendState"),
         (br#"{"BackendState":"Starting","Peer":{"nodekey:abc":{"ID":"n1","HostName":"mac","TailscaleIP":"100.64.0.2"}}}"#.as_slice(), "unknown BackendState"),
+        (br#"{"BackendState":"Stopped"}"#.as_slice(), "stopped BackendState"),
+        (br#"{"BackendState":"no_state","Peer":{}}"#.as_slice(), "no_state BackendState"),
     ] {
         let runner = Arc::new(FakeTailscaleRunner {
             result: Ok(fixture.to_vec()),

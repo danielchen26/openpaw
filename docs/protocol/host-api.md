@@ -150,9 +150,9 @@ Response data is sanitized candidate metadata only:
 
 The response never includes raw `tailscale status` JSON, users, keys, route advertisements, credentials, or command output. Candidates are metadata only. They are not SSH-ready, trusted, or verified, and clients must not label them that way. Candidate strings are bounded and control-character-free, optional fields with wrong types are rejected, `last_seen` must be valid RFC3339 when present, and reported addresses must be in Tailscale ranges (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`).
 
-Typed unavailable states include missing Tailscale CLI, logged-out Tailscale from parsed `BackendState`, generic process/CLI unavailable failures, timeout, output limit, busy when
+Typed unavailable states include missing Tailscale CLI, logged-out Tailscale only from parsed `BackendState` `NeedsLogin`/`needs_login`, generic process/CLI unavailable failures, timeout, output limit, busy when
 another process-backed discovery is already running, and `unavailable_state` when `BackendState` is absent,
-non-string, unknown, or otherwise not a known running state. Malformed or unsupported CLI JSON after a supported
+non-string, unknown, stopped, `no_state`, or otherwise not a known running state. Process-backed discovery currently requires Unix process-group cleanup; unsupported non-Unix hosts fail closed with typed `unavailable` instead of launching an incompletely-contained child. Malformed or unsupported CLI JSON after a supported
 running state is a hard server error with safe user text.
 
 ### `POST /v1/uploads` — `uploads.write`

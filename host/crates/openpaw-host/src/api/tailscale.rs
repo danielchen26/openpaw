@@ -8,6 +8,7 @@ use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+#[cfg(unix)]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,9 +19,12 @@ use serde::Serialize;
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+#[cfg(unix)]
 use tokio::io::AsyncReadExt;
+#[cfg(unix)]
 use tokio::process::Command;
 use tokio::sync::Semaphore;
+#[cfg(unix)]
 use tokio::time::{Instant, timeout_at};
 
 use super::ApiError;
@@ -294,7 +298,10 @@ fn backend_state(value: &Value) -> Result<BackendState, TailscaleParseError> {
     };
     match state.to_ascii_lowercase().as_str() {
         "running" => Ok(BackendState::Running),
-        "needslogin" | "needs_login" | "stopped" | "no_state" => Ok(BackendState::LoggedOut),
+        "needslogin" | "needs_login" => Ok(BackendState::LoggedOut),
+        "stopped" | "no_state" => Err(TailscaleParseError::Unavailable(
+            TailscaleUnavailable::unavailable_state("BackendState is not running"),
+        )),
         _ => Err(TailscaleParseError::Unavailable(
             TailscaleUnavailable::unavailable_state("unsupported BackendState"),
         )),
@@ -455,6 +462,18 @@ fn ipv6_in_tailscale_ula(ip: Ipv6Addr) -> bool {
     segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
 }
 
+#[cfg(not(unix))]
+async fn run_status_command(
+    _executable: &Path,
+    _max_bytes: usize,
+    _timeout: Duration,
+) -> Result<Vec<u8>, TailscaleUnavailable> {
+    Err(TailscaleUnavailable::Unavailable(
+        "Tailscale process discovery is unavailable on this host platform.".to_owned(),
+    ))
+}
+
+#[cfg(unix)]
 async fn run_status_command(
     executable: &Path,
     max_bytes: usize,
@@ -469,7 +488,6 @@ async fn run_status_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    #[cfg(unix)]
     make_process_group(&mut command);
     let mut child = command.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -518,8 +536,8 @@ fn make_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
+#[cfg(unix)]
 async fn cleanup_child(child: &mut tokio::process::Child) {
-    #[cfg(unix)]
     if let Some(pid) = child.id() {
         let _ = tokio::process::Command::new("/bin/kill")
             .arg("-KILL")
@@ -530,9 +548,6 @@ async fn cleanup_child(child: &mut tokio::process::Child) {
             .status()
             .await;
     }
-    #[cfg(not(unix))]
-    let _ = child.kill().await;
-
     let reap_deadline = Instant::now() + POST_KILL_REAP_GRACE;
     let _ = timeout_at(reap_deadline, child.wait()).await;
 }
@@ -547,6 +562,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     use std::time::Instant;
 
     #[test]
@@ -611,6 +627,19 @@ mod tests {
             err,
             TailscaleParseError::Unavailable(TailscaleUnavailable::LoggedOut(_))
         ));
+    }
+
+    #[test]
+    fn backend_state_stopped_and_no_state_are_unavailable_not_logged_out() {
+        for json in [
+            br#"{"BackendState":"Stopped"}"#.as_slice(),
+            br#"{"BackendState":"no_state","Peer":{}}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                parse_status_json(json).unwrap_err(),
+                TailscaleParseError::Unavailable(TailscaleUnavailable::UnavailableState(_))
+            ));
+        }
     }
 
     #[test]
