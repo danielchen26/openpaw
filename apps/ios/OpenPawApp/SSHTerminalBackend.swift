@@ -103,16 +103,20 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner {
         guard let transport else { throw TransportError.notConnected }
         guard lastState.isConnected else { throw TransportError.notConnected }
         guard capture == nil else { throw TransportError.connectionFailed("another command probe is already running") }
-        let marker = "__openpaw_" + UUID().uuidString.replacingOccurrences(of: "-", with: "") + "__"
-        let capture = Capture(marker: marker, command: command)
+        let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let startMarker = "__openpaw_start_\(nonce)__"
+        let endMarker = "__openpaw_end_\(nonce)__"
+        let capture = Capture(startMarker: startMarker, endMarker: endMarker, command: command)
         self.capture = capture
         defer { self.capture = nil }
 
         // Echo is disabled before the probe command is sent, then restored in a separate write on every exit path.
-        // Batching stty/probe/stty in one write can race with remote echo and can leave no recovery point on timeout.
+        // A bounded start marker is printed only after that point. Real PTYs can still deliver an echoed `stty -echo`
+        // and a prompt before echo takes effect, so capture discards every byte until this nonce start marker arrives.
         try await transport.write(Data("stty -echo\n".utf8))
         do {
-            try await transport.write(Data("{ \(command); __openpaw_rc=$?; printf '\\n%s:%s\\n' \(shellQuoted(marker)) \"$__openpaw_rc\"; unset __openpaw_rc; } 2>&1\n".utf8))
+            let probe = "printf '%s\\n' \(shellQuoted(startMarker)); { \(command); __openpaw_rc=$?; printf '\\n%s:%s\\n' \(shellQuoted(endMarker)) \"$__openpaw_rc\"; unset __openpaw_rc; } 2>&1\n"
+            try await transport.write(Data(probe.utf8))
             let result = try await capture.wait(timeout: .seconds(3))
             try? await transport.write(Data("stty echo\n".utf8))
             return result
@@ -229,26 +233,61 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner {
 /// Collects PTY output until the nonce marker arrives, then hands back everything before it.
 private final class Capture: @unchecked Sendable {
 
-    private let marker: String
+    private enum Phase {
+        case awaitingStart
+        case capturing
+        case finished
+    }
+
+    private let startMarker: Data
+    private let endMarker: Data
     private let command: String
     private let maxBytes = 64 * 1024
     private let scanSlack = 256
+    private var phase: Phase = .awaitingStart
+    private var preStartBuffer = Data()
     private var buffer = Data()
     private var result: Result<String, any Error>?
     private var continuation: CheckedContinuation<String, any Error>?
     private let lock = NSLock()
 
-    init(marker: String, command: String) {
-        self.marker = marker
+    init(startMarker: String, endMarker: String, command: String) {
+        self.startMarker = Data(startMarker.utf8)
+        self.endMarker = Data("\n\(endMarker):".utf8)
         self.command = command
     }
 
     func ingest(_ chunk: Data) -> Data {
         lock.lock()
-        buffer.append(chunk)
+        guard result == nil else {
+            lock.unlock()
+            return chunk
+        }
+
+        switch phase {
+        case .awaitingStart:
+            preStartBuffer.append(chunk)
+            if preStartBuffer.count > maxBytes + scanSlack { preStartBuffer.removeFirst(preStartBuffer.count - maxBytes - scanSlack) }
+            guard let startRange = startLineRange(in: preStartBuffer) else {
+                keepPossibleStartSuffix()
+                lock.unlock()
+                return Data()
+            }
+            phase = .capturing
+            let afterStart = preStartBuffer[startRange.upperBound...]
+            buffer.append(afterStart)
+            preStartBuffer.removeAll(keepingCapacity: false)
+
+        case .capturing:
+            buffer.append(chunk)
+
+        case .finished:
+            lock.unlock()
+            return chunk
+        }
+
         if buffer.count > maxBytes + scanSlack { buffer.removeFirst(buffer.count - maxBytes - scanSlack) }
-        let markerBytes = Data("\n\(marker):".utf8)
-        guard let markerRange = buffer.range(of: markerBytes) else {
+        guard let markerRange = buffer.range(of: endMarker) else {
             lock.unlock()
             return Data()
         }
@@ -265,12 +304,32 @@ private final class Capture: @unchecked Sendable {
         let nextResult: Result<String, any Error> = exitCode == 0
             ? .success(output)
             : .failure(CommandFailure(command: command, exitCode: exitCode, output: output))
+        phase = .finished
         result = nextResult
         let resumed = continuation
         continuation = nil
         lock.unlock()
         if let resumed { resumed.resume(with: nextResult) }
         return remainder
+    }
+
+    private func startLineRange(in data: Data) -> Range<Data.Index>? {
+        var searchStart = data.startIndex
+        while searchStart < data.endIndex, let markerRange = data[searchStart...].range(of: startMarker) {
+            var after = markerRange.upperBound
+            if after < data.endIndex, data[after] == UInt8(ascii: "\r") { after = data.index(after: after) }
+            let hasLineEnd = after < data.endIndex && data[after] == UInt8(ascii: "\n")
+            if hasLineEnd {
+                return markerRange.lowerBound..<data.index(after: after)
+            }
+            searchStart = markerRange.upperBound
+        }
+        return nil
+    }
+
+    private func keepPossibleStartSuffix() {
+        let keep = max(0, startMarker.count - 1)
+        if preStartBuffer.count > keep { preStartBuffer.removeFirst(preStartBuffer.count - keep) }
     }
 
     func fail(_ error: any Error) {

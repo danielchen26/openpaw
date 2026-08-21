@@ -13,7 +13,8 @@ final class SSHTerminalBackendTests: XCTestCase {
         async let output = backend.run(command: "printf ok")
         let written = await transport.waitForWrite(containing: "printf ok")
         let marker = try XCTUnwrap(Self.marker(in: written))
-        await transport.emitOutput("ok\n\(marker):0\nafter")
+        let startMarker = try XCTUnwrap(Self.startMarker(in: written))
+        await transport.emitOutput("\(startMarker)\nok\n\(marker):0\nafter")
         let captured = try await output
 
         XCTAssertEqual(captured, "ok")
@@ -22,7 +23,7 @@ final class SSHTerminalBackendTests: XCTestCase {
         XCTAssertEqual(writes[0], "stty -echo\n")
         XCTAssertTrue(writes[1].contains("printf ok"))
         XCTAssertEqual(writes.last, "stty echo\n")
-        let visible = await firstVisibleOutput(from: backend)
+        let visible = await Self.firstVisibleOutput(from: backend)
         XCTAssertEqual(visible, "after")
     }
 
@@ -34,19 +35,68 @@ final class SSHTerminalBackendTests: XCTestCase {
         async let output = backend.run(command: "printf split")
         let commandWrite = await transport.waitForWrite(containing: "printf split")
         let marker = try XCTUnwrap(Self.marker(in: commandWrite))
+        let startMarker = try XCTUnwrap(Self.startMarker(in: commandWrite))
         await transport.emitOutput(Data(commandWrite.utf8))
+        await transport.emitOutput(Data("\(startMarker)\n".utf8))
         await transport.emitOutput(Data("spl".utf8))
         await transport.emitOutput(Data("it\n\(marker)".utf8))
         await transport.emitOutput(Data(":0\nvisible".utf8))
 
-        XCTAssertEqual(try await output, "split")
-        XCTAssertEqual(await firstVisibleOutput(from: backend), "visible")
+        let captured = try await output
+        let visible = await Self.firstVisibleOutput(from: backend)
+        XCTAssertEqual(captured, "split")
+        XCTAssertEqual(visible, "visible")
+    }
+
+    func testRunCommandDiscardsEchoedSttyPromptAndDiscoveryPreambleBeforeStartMarker() async throws {
+        let transport = ControlledTransport()
+        let backend = makeBackend(transport)
+        try await backend.connect(host: host())
+
+        async let output = backend.run(command: "printf clean")
+        _ = await transport.waitForWrite(containing: "stty -echo")
+        let commandWrite = await transport.waitForWrite(containing: "printf clean")
+        let marker = try XCTUnwrap(Self.marker(in: commandWrite))
+        let startMarker = try XCTUnwrap(Self.startMarker(in: commandWrite))
+        await transport.emitOutput("stty -echo\r\nprompt$ ")
+        await transport.emitOutput("\(startMarker)\n")
+        await transport.emitOutput("clean\n\(marker):0\nvisible")
+
+        let captured = try await output
+        let visible = await Self.firstVisibleOutput(from: backend)
+        XCTAssertEqual(captured, "clean")
+        XCTAssertEqual(visible, "visible")
+    }
+
+    func testRunCommandParsesStartAndEndMarkersSplitAcrossChunks() async throws {
+        let transport = ControlledTransport()
+        let backend = makeBackend(transport)
+        try await backend.connect(host: host())
+
+        async let output = backend.run(command: "printf split")
+        let commandWrite = await transport.waitForWrite(containing: "printf split")
+        let marker = try XCTUnwrap(Self.marker(in: commandWrite))
+        let startMarker = try XCTUnwrap(Self.startMarker(in: commandWrite))
+        let splitStart = startMarker.index(startMarker.startIndex, offsetBy: startMarker.count / 2)
+        let splitEnd = marker.index(marker.startIndex, offsetBy: marker.count / 2)
+
+        await transport.emitOutput("ignored prompt ")
+        await transport.emitOutput(Data(startMarker[..<splitStart].utf8))
+        await transport.emitOutput(Data(startMarker[splitStart...].utf8))
+        await transport.emitOutput(Data("\nspl".utf8))
+        await transport.emitOutput(Data("it\n\(marker[..<splitEnd])".utf8))
+        await transport.emitOutput(Data("\(marker[splitEnd...]):0\nvisible".utf8))
+
+        let captured = try await output
+        let visible = await Self.firstVisibleOutput(from: backend)
+        XCTAssertEqual(captured, "split")
+        XCTAssertEqual(visible, "visible")
     }
 
     func testRunCommandCompletesWhenMarkerArrivesBeforeWaiterSuspends() async throws {
         let transport = ControlledTransport(autoRespond: { command in
-            guard let marker = Self.marker(in: command) else { return nil }
-            return "fast\n\(marker):0\n"
+            guard let marker = Self.marker(in: command), let startMarker = Self.startMarker(in: command) else { return nil }
+            return "\(startMarker)\nfast\n\(marker):0\n"
         })
         let backend = makeBackend(transport)
         try await backend.connect(host: host())
@@ -62,8 +112,11 @@ final class SSHTerminalBackendTests: XCTestCase {
         try await backend.connect(host: host())
 
         async let output = backend.run(command: "binary")
-        let marker = try XCTUnwrap(Self.marker(in: await transport.waitForWrite(containing: "binary")))
-        var bytes = Data(repeating: 0x61, count: 70 * 1024)
+        let commandWrite = await transport.waitForWrite(containing: "binary")
+        let marker = try XCTUnwrap(Self.marker(in: commandWrite))
+        let startMarker = try XCTUnwrap(Self.startMarker(in: commandWrite))
+        var bytes = Data("\(startMarker)\n".utf8)
+        bytes.append(Data(repeating: 0x61, count: 70 * 1024))
         bytes.append(contentsOf: [0xff, 0xfe])
         bytes.append(Data("\n\(marker):0\n".utf8))
         await transport.emitOutput(bytes)
@@ -79,8 +132,10 @@ final class SSHTerminalBackendTests: XCTestCase {
         try await backend.connect(host: host())
 
         async let output = backend.run(command: "missing-binary")
-        let marker = try XCTUnwrap(Self.marker(in: await transport.waitForWrite(containing: "missing-binary")))
-        await transport.emitOutput("nope\n\(marker):127\n")
+        let commandWrite = await transport.waitForWrite(containing: "missing-binary")
+        let marker = try XCTUnwrap(Self.marker(in: commandWrite))
+        let startMarker = try XCTUnwrap(Self.startMarker(in: commandWrite))
+        await transport.emitOutput("\(startMarker)\nnope\n\(marker):127\n")
 
         do {
             _ = try await output
@@ -120,7 +175,8 @@ final class SSHTerminalBackendTests: XCTestCase {
         } catch {
             XCTAssertLessThan(Date().timeIntervalSince(started), 5)
         }
-        XCTAssertEqual(await transport.allWrites().last, "stty echo\n")
+        let lastWrite = await transport.allWrites().last
+        XCTAssertEqual(lastWrite, "stty echo\n")
     }
 
     func testDisconnectResumesCaptureBeforeTeardownClearsIt() async throws {
@@ -143,10 +199,11 @@ final class SSHTerminalBackendTests: XCTestCase {
         let backend = makeBackend(transport)
         try await backend.connect(host: host())
 
-        async let visible = firstVisibleOutput(from: backend)
+        async let visible = Self.firstVisibleOutput(from: backend)
         await transport.emitOutput("ordinary")
 
-        XCTAssertEqual(await visible, "ordinary")
+        let captured = await visible
+        XCTAssertEqual(captured, "ordinary")
     }
 
     private func makeBackend(_ transport: ControlledTransport) -> SSHTerminalBackend {
@@ -160,7 +217,7 @@ final class SSHTerminalBackendTests: XCTestCase {
         HostRecord(nickname: "test", hostname: "example.invalid", username: "me", auth: .agentForwarding)
     }
 
-    private func firstVisibleOutput(from backend: SSHTerminalBackend) async -> String {
+    private static func firstVisibleOutput(from backend: SSHTerminalBackend) async -> String {
         for await chunk in backend.outputStream {
             return String(decoding: chunk, as: UTF8.self)
         }
@@ -168,7 +225,13 @@ final class SSHTerminalBackendTests: XCTestCase {
     }
 
     private static func marker(in text: String) -> String? {
-        text.split(whereSeparator: { $0.isWhitespace || $0 == "'" }).first { $0.hasPrefix("__openpaw_") }.map(String.init)
+        let tokens = text.split(whereSeparator: { $0.isWhitespace || $0 == "'" }).map(String.init)
+        return tokens.first { $0.hasPrefix("__openpaw_end_") }
+            ?? tokens.first { $0.hasPrefix("__openpaw_") && !$0.hasPrefix("__openpaw_start_") }
+    }
+
+    private static func startMarker(in text: String) -> String? {
+        text.split(whereSeparator: { $0.isWhitespace || $0 == "'" }).first { $0.hasPrefix("__openpaw_start_") }.map(String.init)
     }
 }
 
