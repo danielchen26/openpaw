@@ -27,9 +27,9 @@ public enum RootWidth: String, Sendable, Hashable, CaseIterable {
     }
 }
 
-/// How the five destinations are presented.
+/// How the six destinations are presented.
 public enum RootNavigationStyle: String, Sendable, Hashable, CaseIterable {
-    /// Tab bar at the bottom: one thumb, one hand, five reachable targets.
+    /// Tab bar at the bottom: one thumb, one hand, six reachable targets.
     case tabs
     /// Sidebar plus detail: room to keep the session list and the transcript on screen together.
     case split
@@ -320,7 +320,7 @@ public struct RootView: View {
     ///
     /// The platform split view lays its sidebar column out in a view hierarchy of its own, which nothing we do
     /// reaches: a column-width modifier applies while the content and ground do not draw, leaving a bare white
-    /// column in a dark app. Since all five destinations are always wanted at this width, there is no collapse
+    /// column in a dark app. Since all six destinations are always wanted at this width, there is no collapse
     /// behaviour to inherit and nothing else the split view was buying. This is two panes and a hairline, ours
     /// end to end, and it renders identically on both platforms.
     private func split(width: RootWidth) -> some View {
@@ -335,9 +335,9 @@ public struct RootView: View {
         }
     }
 
-    /// Five fixed destinations and one host chip.
+    /// Six fixed destinations and one host chip.
     ///
-    /// Deliberately not a `List`. A list of five static rows buys nothing here — no editing, no swipe, no dynamic
+    /// Deliberately not a `List`. A list of six static rows buys nothing here — no editing, no swipe, no dynamic
     /// content — and costs the platform's sidebar material plus row-realisation behaviour that leaves the column
     /// empty in a headless render.
     private var sidebar: some View {
@@ -442,7 +442,7 @@ public struct RootView: View {
     private func content(_ destination: ShellDestination, width: RootWidth) -> some View {
         switch destination {
         case .home:
-            EmptyView()
+            HostListView(model: model, settings: settings)
         case .terminal:
             TerminalScreenView(
                 model: model,
