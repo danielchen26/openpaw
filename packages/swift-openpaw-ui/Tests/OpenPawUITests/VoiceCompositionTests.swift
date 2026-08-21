@@ -234,6 +234,37 @@ struct VoiceCompositionTests {
         #expect(inactive.isLocaleSwitchEnabled)
     }
 
+    @Test func composerPreferencesNormalizePersistedLocaleAndDestination() {
+        let restored = ComposerDictationPreferences.restored(localeID: "zh_CN", mode: .terminal)
+        #expect(restored.localeID == "zh-CN")
+        #expect(restored.destination == .terminal)
+        #expect(ComposerDictationPreferences.persistedMode(for: .agent) == .composer)
+        #expect(ComposerDictationPreferences.persistedMode(for: .terminal) == .terminal)
+    }
+
+    @Test func activeComposerEditorKeepsDraftEditableAndShowsPartialSeparately() {
+        let presentation = ActiveDictationDraftPresentation.make(draft: "typed edit", partial: "live words")
+        #expect(presentation.editableDraft == "typed edit")
+        #expect(presentation.partialPreview == "live words")
+        #expect(presentation.accessibilityValue == "Draft typed edit. Current recognition live words")
+    }
+
+    @Test func microphoneControlIsKeyboardAndVoiceOverActionable() {
+        let stopped = ComposerControlPresentation.make(destination: .agent, hasAttachments: false, hasDraft: false, isSending: false)
+        #expect(stopped.microphoneKeyboardShortcut == "⌘⇧M")
+        #expect(stopped.microphoneAccessibilityLabel == "Start dictation")
+    }
+
+    @Test func terminalDraftControlsAreDisabledWhileDictating() {
+        let active = TerminalDictationDraftPresentation.make(draft: "echo safe", isDictating: true)
+        #expect(!active.isTextFieldEnabled)
+        #expect(!active.isExecuteEnabled)
+
+        let inactive = TerminalDictationDraftPresentation.make(draft: "echo safe", isDictating: false)
+        #expect(inactive.isTextFieldEnabled)
+        #expect(inactive.isExecuteEnabled)
+    }
+
     @Test func microphoneAccessibilitySemanticsChangeWithDictationState() {
         let stopped = ComposerControlPresentation.make(destination: .agent, hasAttachments: false, hasDraft: false, isSending: false)
         #expect(stopped.microphoneAccessibilityLabel == "Start dictation")
@@ -282,7 +313,9 @@ struct VoiceCompositionTests {
     @Test func fakeEngineLifecycleCapturesModeAndStop() async {
         let engine = FakeDictationEngine()
         _ = engine.transcribe(locale: Locale(identifier: "en-US"), mode: .terminal)
-        await Task.yield()
+        for _ in 0..<5 where await engine.requestedModes.isEmpty {
+            await Task.yield()
+        }
         await engine.stop()
 
         #expect(await engine.requestedModes == [.terminal])
@@ -316,6 +349,25 @@ struct VoiceCompositionTests {
         #expect(sent.contains("Attached files uploaded to:"))
         #expect(sent.contains("/.openpaw/uploads/sketch.png"))
     }
+
+    @MainActor @Test func attachmentUploadFailureKeepsSpecificHostError() async {
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(backend: FailingUploadBackend(), terminal: terminal)
+        let attachment = ComposerAttachment(data: Data("image".utf8), filename: "sketch.png", preview: nil)
+
+        #expect(await model.commitVoice(.sendAgent("review this"), attachments: [attachment]) == false)
+
+        #expect(model.lastError?.title == "The host failed (507)")
+        #expect(model.lastError?.detail == "disk full")
+    }
+
+    @MainActor @Test func attachmentCapabilityRequiresConnectedStructuredBackend() {
+        let model = OpenPawModel(backend: FailingUploadBackend(), terminal: RecordingTerminalBackend())
+        #expect(!model.canSendAgentAttachments())
+
+        model.connection = .connected(.ssh)
+        #expect(model.canSendAgentAttachments())
+    }
 }
 
 private actor RecordingTerminalBackend: TerminalBackend {
@@ -346,3 +398,21 @@ private actor FakeDictationEngine: DictationEngine {
 }
 
 private struct FakeSendError: Error {}
+
+private struct FailingUploadBackend: OpenPawBackend {
+    func health() async throws -> HealthInfo { throw FakeSendError() }
+    func sessions() async throws -> [SessionSummary] { [] }
+    func inbox(status: InboxStatus?) async throws -> [InboxItem] { [] }
+    func resolve(item: InboxItem, action: ActionID, answer: String?, detailAcknowledged: Bool) async throws -> ResolveResult { throw FakeSendError() }
+    func events(session: String?, afterSeq: UInt64?) -> AsyncThrowingStream<Event, any Error> { AsyncThrowingStream { $0.finish() } }
+    func repos() async throws -> [RepoSummary] { [] }
+    func repoStatus(_ repo: String) async throws -> RepoStatus { throw FakeSendError() }
+    func diff(repo: String, mode: DiffMode, path: String?) async throws -> Diff { throw FakeSendError() }
+    func tree(repo: String, ref: String, path: String) async throws -> [TreeEntry] { [] }
+    func blob(repo: String, ref: String, path: String) async throws -> Blob { throw FakeSendError() }
+    func search(repo: String, query: String, path: String?) async throws -> [ContentMatch] { [] }
+    func upload(data: Data, filename: String) async throws -> UploadResult { throw HostClientError.server(status: 507, body: "disk full") }
+    func previewURL(port: Int, path: String) throws -> URL { URL(string: "http://127.0.0.1")! }
+    func tailscaleDevices() async throws -> TailscaleDevicesResponse { throw FakeSendError() }
+    func audit(limit: Int) async throws -> [AuditEntry] { [] }
+}

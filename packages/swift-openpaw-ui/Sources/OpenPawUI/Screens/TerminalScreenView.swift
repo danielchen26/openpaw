@@ -160,7 +160,7 @@ public struct TerminalScreenView: View {
         .task(id: isSelectionMenuPresented) {
             lineCount = await scrollback.lineCount
         }
-        .onDisappear(perform: stopDictation)
+        .onDisappear(perform: cancelDictation)
     }
 
     // MARK: Header
@@ -388,12 +388,14 @@ public struct TerminalScreenView: View {
     }
 
     private var dictationDraftRow: some View {
-        HStack(spacing: OpenPawTheme.Space.small) {
+        let presentation = TerminalDictationDraftPresentation.make(draft: voice.draft, isDictating: voice.isActive)
+        return HStack(spacing: OpenPawTheme.Space.small) {
             Text("draft").microLabel()
             TextField("Speak, then execute", text: $voice.draft)
                 .font(OpenPawTheme.Machine.body)
                 .foregroundStyle(OpenPawTheme.textPrimary)
                 .textFieldStyle(.plain)
+                .disabled(!presentation.isTextFieldEnabled)
             Button("Execute") {
                 executeTerminalDraft()
             }
@@ -401,7 +403,7 @@ public struct TerminalScreenView: View {
             .font(OpenPawTheme.Machine.label)
             .frame(minHeight: 44)
             .foregroundStyle(OpenPawTheme.textPrimary)
-            .disabled(voice.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!presentation.isExecuteEnabled)
         }
         .padding(.horizontal, OpenPawTheme.Space.medium)
         .padding(.vertical, OpenPawTheme.Space.tight)
@@ -583,6 +585,18 @@ public struct TerminalScreenView: View {
         Task {
             await engine?.stop()
             try? await Task.sleep(for: .milliseconds(50))
+            task?.cancel()
+        }
+    }
+
+    private func cancelDictation() {
+        let engine = model.dictation
+        voice.cancel()
+        dictationTurnID = nil
+        let task = dictationTask
+        dictationTask = nil
+        Task {
+            await engine?.stop()
             task?.cancel()
         }
     }

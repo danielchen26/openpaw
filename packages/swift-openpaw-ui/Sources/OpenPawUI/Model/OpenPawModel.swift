@@ -417,7 +417,6 @@ public final class OpenPawModel {
     private func agentPrompt(_ prompt: String, with attachments: [ComposerAttachment]) async -> String? {
         guard !attachments.isEmpty else { return prompt }
         guard let uploads = await uploadComposerAttachments(attachments) else {
-            present(VoiceCommitError.agentAttachmentsNeedUpload, while: "sending the agent prompt")
             return nil
         }
         guard !uploads.isEmpty else { return prompt }
@@ -425,7 +424,7 @@ public final class OpenPawModel {
         return prompt + "\n\nAttached files uploaded to:\n" + paths
     }
 
-    public func canSendAgentAttachments() -> Bool { backend != nil }
+    public func canSendAgentAttachments() -> Bool { backend != nil && connection.isConnected }
 
     public func connectSelectedHost() async {
         guard let terminal, let host = selectedHost else { return }

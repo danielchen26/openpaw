@@ -96,6 +96,7 @@ public struct ComposerControlPresentation: Sendable, Equatable {
     public let isLocaleSwitchEnabled: Bool
     public let microphoneAccessibilityLabel: String
     public let microphoneAccessibilityHint: String
+    public let microphoneKeyboardShortcut: String
 
     public static func make(
         destination: VoiceDestination,
@@ -120,7 +121,8 @@ public struct ComposerControlPresentation: Sendable, Equatable {
             isDestinationSwitchEnabled: !isDictating,
             isLocaleSwitchEnabled: !isDictating,
             microphoneAccessibilityLabel: isDictating ? "Stop dictation" : "Start dictation",
-            microphoneAccessibilityHint: Self.microphoneHint(destination: destination, isDictating: isDictating)
+            microphoneAccessibilityHint: Self.microphoneHint(destination: destination, isDictating: isDictating),
+            microphoneKeyboardShortcut: "⌘⇧M"
         )
     }
 
@@ -136,7 +138,43 @@ public struct ComposerControlPresentation: Sendable, Equatable {
     }
 }
 
-// MARK: - Composer
+public struct ComposerDictationPreferences: Sendable, Equatable {
+    public let localeID: String
+    public let destination: VoiceDestination
+
+    public static func restored(localeID: String, mode: DictationMode) -> Self {
+        Self(localeID: VoiceLocaleChoices.normalize(localeID), destination: VoiceDestination(dictationMode: mode))
+    }
+
+    public static func persistedMode(for destination: VoiceDestination) -> DictationMode {
+        destination.dictationMode
+    }
+}
+
+public struct ActiveDictationDraftPresentation: Sendable, Equatable {
+    public let editableDraft: String
+    public let partialPreview: String
+    public let accessibilityValue: String
+
+    public static func make(draft: String, partial: String) -> Self {
+        let preview = partial.isEmpty ? "Listening" : partial
+        let value = draft.isEmpty
+            ? "Current recognition \(preview)"
+            : "Draft \(draft). Current recognition \(preview)"
+        return Self(editableDraft: draft, partialPreview: preview, accessibilityValue: value)
+    }
+}
+
+public struct TerminalDictationDraftPresentation: Sendable, Equatable {
+    public let isTextFieldEnabled: Bool
+    public let isExecuteEnabled: Bool
+
+    public static func make(draft: String, isDictating: Bool) -> Self {
+        let hasDraft = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return Self(isTextFieldEnabled: !isDictating, isExecuteEnabled: hasDraft && !isDictating)
+    }
+}
+
 
 /// The send surface: human register, because everything that leaves this view is something a person said.
 ///
@@ -151,6 +189,7 @@ public struct ComposerView: View {
     static let maximumLines = 6
 
     private let engine: (any DictationEngine)?
+    private let settings: OpenPawSettings
     private let supportsAgentAttachments: Bool
     private let onCommit: (VoiceCommitAction, [ComposerAttachment]) async -> Bool
 
@@ -169,16 +208,19 @@ public struct ComposerView: View {
 
     public init(
         engine: (any DictationEngine)? = nil,
+        settings: OpenPawSettings = OpenPawSettings(),
         supportsAgentAttachments: Bool = true,
         initialDestination: VoiceDestination? = nil,
         onCommit: @escaping (VoiceCommitAction, [ComposerAttachment]) async -> Bool
     ) {
         self.engine = engine
+        self.settings = settings
         self.supportsAgentAttachments = supportsAgentAttachments
         self.onCommit = onCommit
-        let destination = initialDestination ?? VoiceDestination(dictationMode: OpenPawSettings().dictationMode)
+        let restored = ComposerDictationPreferences.restored(localeID: settings.dictationLocaleID, mode: settings.dictationMode)
+        let destination = initialDestination ?? restored.destination
         self._voice = State(initialValue: VoiceComposition(destination: destination))
-        self._localeID = State(initialValue: VoiceLocaleChoices.normalize(Locale.current.identifier))
+        self._localeID = State(initialValue: restored.localeID)
     }
 
     /// Present only when an engine exists and the platform granted it. An always-visible but permanently disabled
@@ -231,15 +273,21 @@ public struct ComposerView: View {
             onCompletion: { result in attach(result) }
         )
         .onDisappear { cancelDictation() }
+        .onChange(of: localeID) { _, newValue in settings.dictationLocaleID = VoiceLocaleChoices.normalize(newValue) }
     }
 
     // MARK: Editor
 
     @ViewBuilder
     private var editor: some View {
-        if voice.isActive {
-            liveTranscript
-        } else {
+        VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+            if voice.isActive {
+                HStack(spacing: OpenPawTheme.Space.small) {
+                    Text("listening · \(localeID)").microLabel(OpenPawTheme.warn)
+                    Spacer(minLength: 0)
+                    Text(voice.destination == .agent ? "to draft" : "to terminal").microLabel(OpenPawTheme.warn)
+                }
+            }
             TextEditor(text: $voice.draft)
                 .font(OpenPawTheme.Human.prose)
                 .foregroundStyle(OpenPawTheme.textPrimary)
@@ -262,7 +310,19 @@ public struct ComposerView: View {
                     }
                 }
                 .accessibilityLabel("Prompt")
+                .accessibilityValue(activeDraftPresentation.accessibilityValue)
+            if voice.isActive {
+                Text(activeDraftPresentation.partialPreview)
+                    .font(OpenPawTheme.Human.caption)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel("Current recognition")
+            }
         }
+    }
+
+    private var activeDraftPresentation: ActiveDictationDraftPresentation {
+        ActiveDictationDraftPresentation.make(draft: voice.draft, partial: voice.partialTranscript)
     }
 
     private var visibleLines: Int {
@@ -336,6 +396,7 @@ public struct ComposerView: View {
         Button {
             let next: VoiceDestination = voice.destination == .agent ? .terminal : .agent
             voice.switchDestination(to: next)
+            settings.dictationMode = ComposerDictationPreferences.persistedMode(for: next)
         } label: {
             Text(voice.destination == .agent ? "draft" : "terminal")
                 .font(OpenPawTheme.Machine.label)
@@ -387,27 +448,30 @@ public struct ComposerView: View {
     /// Press and hold to talk. Holding is the right gesture for a walk-and-talk product: it cannot be left running
     /// by accident, and letting go is a decision, not a second aimed tap.
     private var microphone: some View {
-        Image(systemName: voice.isActive ? "waveform" : "mic")
-            .imageScale(.medium)
-            .foregroundStyle(voice.isActive ? OpenPawTheme.warn : OpenPawTheme.textSecondary)
-            .frame(minWidth: 44, minHeight: 44)
-            .contentShape(Rectangle())
-            .overlay(
-                RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card)
-                    .strokeBorder(
-                        voice.isActive ? OpenPawTheme.warn : OpenPawTheme.line,
-                        lineWidth: OpenPawTheme.hairline * 3
-                    )
-            )
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in startDictation() }
-                    .onEnded { _ in stopDictation() }
-            )
-            .accessibilityAddTraits(.isButton)
-            .accessibilityLabel(controlPresentation.microphoneAccessibilityLabel)
-            .accessibilityHint(controlPresentation.microphoneAccessibilityHint)
-            .accessibilityAction { voice.isActive ? stopDictation() : startDictation() }
+        Button(action: { voice.isActive ? stopDictation() : startDictation() }) {
+            Image(systemName: voice.isActive ? "waveform" : "mic")
+                .imageScale(.medium)
+                .foregroundStyle(voice.isActive ? OpenPawTheme.warn : OpenPawTheme.textSecondary)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(
+            RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card)
+                .strokeBorder(
+                    voice.isActive ? OpenPawTheme.warn : OpenPawTheme.line,
+                    lineWidth: OpenPawTheme.hairline * 3
+                )
+        )
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in startDictation() }
+                .onEnded { _ in stopDictation() }
+        )
+        .accessibilityLabel(controlPresentation.microphoneAccessibilityLabel)
+        .accessibilityHint(controlPresentation.microphoneAccessibilityHint)
+        .accessibilityAction { voice.isActive ? stopDictation() : startDictation() }
+        .keyboardShortcut("m", modifiers: [.command, .shift])
     }
 
     private var commitButton: some View {
