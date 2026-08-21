@@ -453,12 +453,30 @@ public final class OpenPawModel {
         if let lifecycle = backend as? any StructuredBackendLifecycle { await lifecycle.disconnect() }
         await terminal.disconnect()
         let targetHostID = host.id
+        var terminalConnectedContinuation: CheckedContinuation<Void, Never>?
+        var terminalConnectedAcknowledged = false
+        func acknowledgeTerminalConnected() {
+            guard !terminalConnectedAcknowledged else { return }
+            terminalConnectedAcknowledged = true
+            terminalConnectedContinuation?.resume()
+            terminalConnectedContinuation = nil
+        }
         stateTask?.cancel()
         stateTask = Task { [weak self, terminal] in
             var sawConnectedStateForAttempt = false
             for await state in terminal.stateStream {
-                guard let self, self.selectedHostID == targetHostID else { return }
-                if state.isConnected { sawConnectedStateForAttempt = true }
+                guard let self else {
+                    acknowledgeTerminalConnected()
+                    return
+                }
+                guard self.selectedHostID == targetHostID else {
+                    acknowledgeTerminalConnected()
+                    return
+                }
+                if state.isConnected {
+                    sawConnectedStateForAttempt = true
+                    acknowledgeTerminalConnected()
+                }
                 if !sawConnectedStateForAttempt, state.isTerminal { continue }
                 self.connection = state
                 if state.isTerminal, let lifecycle = self.backend as? any StructuredBackendLifecycle {
@@ -473,6 +491,16 @@ public final class OpenPawModel {
         do {
             try await terminal.connect(host: host)
             guard selectedHostID == targetHostID else { return }
+            if !connection.isConnected {
+                await withCheckedContinuation { continuation in
+                    if connection.isConnected {
+                        continuation.resume()
+                    } else {
+                        terminalConnectedContinuation = continuation
+                    }
+                }
+            }
+            guard selectedHostID == targetHostID, connection.isConnected else { return }
             if let lifecycle = backend as? any StructuredBackendLifecycle {
                 do {
                     try await lifecycle.connect(hostID: targetHostID)

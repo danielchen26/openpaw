@@ -527,7 +527,6 @@ struct StructuredBackendLifecycleTests {
         let terminal = RecordingTerminalBackend()
         let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend, terminal: terminal)
         await model.connectSelectedHost()
-        await Task.yield()
         #expect(model.connection.isConnected)
         #expect(model.structuredBackendReady == false)
         #expect(model.canRefreshRemoteState == false)
