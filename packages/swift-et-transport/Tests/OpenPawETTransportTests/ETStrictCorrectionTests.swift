@@ -16,6 +16,9 @@ final class ETStrictCorrectionTests: XCTestCase {
         XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 65536, terminalId: "tid", passkey: "pk"))
         XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 22, terminalId: "ti/d", passkey: "pk"))
         XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 22, terminalId: "tid", passkey: "p\nk"))
+        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 22, terminalId: "ti_d", passkey: "pk"))
+        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 22, terminalId: "tid", passkey: "p_k"))
+        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 22, terminalId: "tid", passkey: "pk", term: "xterm_256color"))
     }
 
     func testProtoFrameDecoderRejectsExtremaBeforeIntConversionAndEncoderCaps() throws {
