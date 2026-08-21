@@ -276,8 +276,40 @@ final class OpenPawTerminalView: TerminalView {
 
     // MARK: Appearance
 
+    /// The terminal face for one SGR variant, with a CJK fallback attached.
+    ///
+    /// `UIFont.monospacedSystemFont` has no CJK glyphs whatsoever — `CTFontGetGlyphsForCharacters` returns false
+    /// for 中, 文, 字 and every other Han character. Left alone, CoreText silently substitutes a face per run, and
+    /// the one it picks (`.PingFangUITextSC`) is a *UI* face the app never chose: it is not the family the rest of
+    /// OpenPaw sets, and its weight is selected by CoreText rather than by the terminal's SGR state.
+    ///
+    /// No font shipped on iOS has both a monospaced Latin set and Han glyphs, so the fix is a cascade: keep the
+    /// system monospaced face for Latin and name PingFang as the fallback for everything it cannot draw, which
+    /// makes the choice explicit and stable instead of leaving it to a per-run guess.
+    static func terminalFont(ofSize size: CGFloat, traits: UIFontDescriptor.SymbolicTraits = []) -> UIFont {
+        let base = UIFont.monospacedSystemFont(ofSize: size, weight: traits.contains(.traitBold) ? .bold : .regular)
+        // Traits first, cascade second. `withSymbolicTraits` resolves against a concrete family and drops any
+        // cascade list already on the descriptor, so attaching the fallback first would silently lose it and
+        // bold Chinese would fall back to CoreText's own substitution again.
+        let varied = base.fontDescriptor.withSymbolicTraits(traits) ?? base.fontDescriptor
+        let fallbacks = ["PingFangSC-Regular", "HiraginoSans-W3", "AppleSDGothicNeo-Regular"]
+            .map { UIFontDescriptor(fontAttributes: [.name: $0]) }
+        return UIFont(descriptor: varied.addingAttributes([.cascadeList: fallbacks]), size: size)
+    }
+
+    /// Builds all four SGR variants explicitly rather than letting SwiftTerm derive them.
+    ///
+    /// `TerminalView.font` runs the base font through `FontSet(font:)`, which derives bold and italic with
+    /// `withSymbolicTraits` — and that drops the cascade list, so any Chinese in bold or italic output would lose
+    /// the fallback that the regular weight has. Setting the four faces directly keeps every variant on the same
+    /// family.
     func apply(fontSize: CGFloat) {
-        font = UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        setFonts(
+            normal: Self.terminalFont(ofSize: fontSize),
+            bold: Self.terminalFont(ofSize: fontSize, traits: .traitBold),
+            italic: Self.terminalFont(ofSize: fontSize, traits: .traitItalic),
+            boldItalic: Self.terminalFont(ofSize: fontSize, traits: [.traitBold, .traitItalic])
+        )
     }
 
     /// The terminal is the machine register at its purest, so it takes the recessed `well` surface and the primary

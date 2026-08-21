@@ -18,6 +18,7 @@
 		1A2B3C000000000000000038 /* Redaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000028 /* Redaction.swift */; };
 		1A2B3C000000000000000043 /* BiometricGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002A /* BiometricGateTests.swift */; };
 		1A2B3C000000000000000044 /* MarkedTextComposerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */; };
+		1A2B3C0000000000000000D1 /* TerminalFontTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000D0 /* TerminalFontTests.swift */; };
 		1A2B3C000000000000000045 /* RedactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002C /* RedactionTests.swift */; };
 		1A2B3C000000000000000046 /* SSHTerminalBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002D /* SSHTerminalBackendTests.swift */; };
 		1A2B3C0000000000000000A0 /* LiveSSHConnectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */; };
@@ -62,6 +63,7 @@
 		1A2B3C000000000000000029 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		1A2B3C00000000000000002A /* BiometricGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricGateTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkedTextComposerTests.swift; sourceTree = "<group>"; };
+		1A2B3C0000000000000000D0 /* TerminalFontTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFontTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002C /* RedactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedactionTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002D /* SSHTerminalBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHTerminalBackendTests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSSHConnectionTests.swift; sourceTree = "<group>"; };
@@ -142,6 +144,7 @@
 			children = (
 				1A2B3C00000000000000002A /* BiometricGateTests.swift */,
 				1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */,
+				1A2B3C0000000000000000D0 /* TerminalFontTests.swift */,
 				1A2B3C00000000000000002C /* RedactionTests.swift */,
 				1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */,
 				1A2B3C00000000000000002D /* SSHTerminalBackendTests.swift */,
@@ -302,6 +305,7 @@
 			files = (
 				1A2B3C000000000000000043 /* BiometricGateTests.swift in Sources */,
 				1A2B3C000000000000000044 /* MarkedTextComposerTests.swift in Sources */,
+				1A2B3C0000000000000000D1 /* TerminalFontTests.swift in Sources */,
 				1A2B3C000000000000000045 /* RedactionTests.swift in Sources */,
 				1A2B3C0000000000000000A0 /* LiveSSHConnectionTests.swift in Sources */,
 				1A2B3C000000000000000046 /* SSHTerminalBackendTests.swift in Sources */,
