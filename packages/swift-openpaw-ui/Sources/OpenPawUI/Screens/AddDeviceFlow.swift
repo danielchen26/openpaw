@@ -117,8 +117,7 @@ public struct AddDeviceFlow: View {
         _state = State(initialValue: AddDeviceFlowState(hosts: model.hostStore.hosts, discovered: candidates))
     }
 
-    #if DEBUG
-    public init(
+    @_spi(SnapshotTesting) public init(
         model: OpenPawModel,
         settings: OpenPawSettings,
         state: AddDeviceFlowState,
@@ -132,7 +131,6 @@ public struct AddDeviceFlow: View {
         _state = State(initialValue: state)
         _draft = State(initialValue: draft)
     }
-    #endif
 
     public var body: some View {
         Group {

@@ -1,7 +1,7 @@
 import Foundation
 import OpenPawProtocol
 import OpenPawTerminalCore
-import OpenPawUI
+@_spi(SnapshotTesting) import OpenPawUI
 import SwiftUI
 
 /// One thing to render: a screen, in a scenario, as a view.
