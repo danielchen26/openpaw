@@ -20,16 +20,25 @@
 		1A2B3C000000000000000044 /* MarkedTextComposerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */; };
 		1A2B3C000000000000000045 /* RedactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002C /* RedactionTests.swift */; };
 		1A2B3C000000000000000046 /* SSHTerminalBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002D /* SSHTerminalBackendTests.swift */; };
+		1A2B3C0000000000000000A0 /* LiveSSHConnectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */; };
 		1A2B3C000000000000000047 /* HostAPIBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002E /* HostAPIBackendTests.swift */; };
 		1A2B3C000000000000000070 /* OpenPawProtocol in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000060 /* OpenPawProtocol */; };
 		1A2B3C000000000000000071 /* OpenPawTerminalCore in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000061 /* OpenPawTerminalCore */; };
 		1A2B3C000000000000000072 /* OpenPawSSH in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000062 /* OpenPawSSH */; };
 		1A2B3C000000000000000073 /* OpenPawUI in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000063 /* OpenPawUI */; };
 		1A2B3C000000000000000074 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000064 /* SwiftTerm */; };
+		1A2B3C0000000000000000B0 /* ConnectFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
 		1A2B3C000000000000000018 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1A2B3C000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1A2B3C000000000000000006;
+			remoteInfo = OpenPaw;
+		};
+		1A2B3C0000000000000000B8 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 1A2B3C000000000000000001 /* Project object */;
 			proxyType = 1;
@@ -55,7 +64,10 @@
 		1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkedTextComposerTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002C /* RedactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedactionTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002D /* SSHTerminalBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHTerminalBackendTests.swift; sourceTree = "<group>"; };
+		1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSSHConnectionTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002E /* HostAPIBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAPIBackendTests.swift; sourceTree = "<group>"; };
+		1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectFlowUITests.swift; sourceTree = "<group>"; };
+		1A2B3C0000000000000000B2 /* OpenPawUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenPawUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -78,6 +90,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		1A2B3C0000000000000000B6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -86,6 +105,7 @@
 			children = (
 				1A2B3C000000000000000004 /* OpenPawApp */,
 				1A2B3C000000000000000005 /* OpenPawAppTests */,
+				1A2B3C0000000000000000B3 /* OpenPawUITests */,
 				1A2B3C000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -95,6 +115,7 @@
 			children = (
 				1A2B3C000000000000000008 /* OpenPaw.app */,
 				1A2B3C000000000000000009 /* OpenPawAppTests.xctest */,
+				1A2B3C0000000000000000B2 /* OpenPawUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -122,10 +143,19 @@
 				1A2B3C00000000000000002A /* BiometricGateTests.swift */,
 				1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */,
 				1A2B3C00000000000000002C /* RedactionTests.swift */,
+				1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */,
 				1A2B3C00000000000000002D /* SSHTerminalBackendTests.swift */,
 				1A2B3C00000000000000002E /* HostAPIBackendTests.swift */,
 			);
 			path = OpenPawAppTests;
+			sourceTree = "<group>";
+		};
+		1A2B3C0000000000000000B3 /* OpenPawUITests */ = {
+			isa = PBXGroup;
+			children = (
+				1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */,
+			);
+			path = OpenPawUITests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -174,6 +204,25 @@
 			productReference = 1A2B3C000000000000000009 /* OpenPawAppTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		1A2B3C0000000000000000B4 /* OpenPawUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A2B3C0000000000000000B9 /* Build configuration list for PBXNativeTarget "OpenPawUITests" */;
+			buildPhases = (
+				1A2B3C0000000000000000B5 /* Sources */,
+				1A2B3C0000000000000000B6 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				1A2B3C0000000000000000B7 /* PBXTargetDependency */,
+			);
+			name = OpenPawUITests;
+			packageProductDependencies = (
+			);
+			productName = OpenPawUITests;
+			productReference = 1A2B3C0000000000000000B2 /* OpenPawUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -215,6 +264,7 @@
 			targets = (
 				1A2B3C000000000000000006 /* OpenPaw */,
 				1A2B3C000000000000000007 /* OpenPawAppTests */,
+				1A2B3C0000000000000000B4 /* OpenPawUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -253,8 +303,17 @@
 				1A2B3C000000000000000043 /* BiometricGateTests.swift in Sources */,
 				1A2B3C000000000000000044 /* MarkedTextComposerTests.swift in Sources */,
 				1A2B3C000000000000000045 /* RedactionTests.swift in Sources */,
+				1A2B3C0000000000000000A0 /* LiveSSHConnectionTests.swift in Sources */,
 				1A2B3C000000000000000046 /* SSHTerminalBackendTests.swift in Sources */,
 				1A2B3C000000000000000047 /* HostAPIBackendTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A2B3C0000000000000000B5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A2B3C0000000000000000B0 /* ConnectFlowUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -449,6 +508,60 @@
 			};
 			name = Release;
 		};
+		1A2B3C0000000000000000BA /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.openpaw.app.uitests;
+				PRODUCT_MODULE_NAME = OpenPawUITests;
+				PRODUCT_NAME = OpenPawUITests;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = OpenPaw;
+			};
+			name = Debug;
+		};
+		1A2B3C0000000000000000BB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.openpaw.app.uitests;
+				PRODUCT_MODULE_NAME = OpenPawUITests;
+				PRODUCT_NAME = OpenPawUITests;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_STRICT_CONCURRENCY = minimal;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = OpenPaw;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -479,6 +592,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		1A2B3C0000000000000000B9 /* Build configuration list for PBXNativeTarget "OpenPawUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A2B3C0000000000000000BA /* Debug */,
+				1A2B3C0000000000000000BB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin PBXTargetDependency section */
@@ -486,6 +608,11 @@
 			isa = PBXTargetDependency;
 			target = 1A2B3C000000000000000006 /* OpenPaw */;
 			targetProxy = 1A2B3C000000000000000018 /* PBXContainerItemProxy */;
+		};
+		1A2B3C0000000000000000B7 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1A2B3C000000000000000006 /* OpenPaw */;
+			targetProxy = 1A2B3C0000000000000000B8 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 

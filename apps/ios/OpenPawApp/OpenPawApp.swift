@@ -235,6 +235,10 @@ final class AppWiring {
         self.model = model
         gate = GateController()
 
+        #if DEBUG && targetEnvironment(simulator)
+            Self.seedDebugKeyIfRequested(into: keychain)
+        #endif
+
         promptSink.set { error in
             Task { @MainActor in
                 guard let verdict = error.hostKeyVerdict else { return }
@@ -346,6 +350,40 @@ extension TransportError {
 /// A file in Application Support rather than `UserDefaults`, because the store is exportable by design
 /// (`HostStore.export()`) and a file is the thing a user can hand to another device. It contains no secret material —
 /// every credential is a `KeychainReference` — so the app container is protection enough.
+#if DEBUG && targetEnvironment(simulator)
+
+    extension AppWiring {
+
+        /// Loads a private key handed to the simulator on the command line, so a development build can reach a real
+        /// host without a key-import screen the shipping app does not have.
+        ///
+        /// Deliberately fenced to DEBUG *and* the simulator, and driven by a launch argument rather than a file the
+        /// app goes looking for: a device build has no path into this at all, and nothing happens unless someone
+        /// explicitly launched with the flag. The key is stored without biometric protection because the simulator
+        /// has no enrolled biometry to satisfy the check with.
+        static func seedDebugKeyIfRequested(into keychain: KeychainStore) {
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let flag = arguments.firstIndex(of: "-openpaw-debug-seed-key"),
+                arguments.index(after: flag) < arguments.endIndex
+            else { return }
+            let path = arguments[arguments.index(after: flag)]
+
+            guard let data = FileManager.default.contents(atPath: path), !data.isEmpty else {
+                assertionFailure("debug key seed requested but \(path) could not be read")
+                return
+            }
+            let identifier = (path as NSString).lastPathComponent
+            do {
+                let reference = try KeychainReference(identifier: identifier)
+                try keychain.store(secret: data, for: reference, requireBiometry: false)
+            } catch {
+                assertionFailure("debug key seed failed: \(error)")
+            }
+        }
+    }
+
+#endif
+
 struct HostStoreFile: Sendable {
 
     private var url: URL {
