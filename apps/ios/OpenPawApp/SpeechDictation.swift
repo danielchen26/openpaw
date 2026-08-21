@@ -110,6 +110,7 @@ private actor DictationSession {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var isRunning = false
+    private var generation = 0
 
     func start(
         locale: Locale,
@@ -120,7 +121,13 @@ private actor DictationSession {
         // input node, which throws inside CoreAudio and leaves the session activated.
         if isRunning { await stop() }
 
+        generation += 1
+        let turn = generation
+
         try await requestPermissions()
+
+        try Task.checkCancellation()
+        guard turn == generation else { throw CancellationError() }
 
         guard SFSpeechRecognizer.supportedLocales().contains(where: { $0.identifier == locale.identifier }) else {
             throw DictationError.localeUnsupported(locale.identifier)
@@ -128,6 +135,10 @@ private actor DictationSession {
         guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
             throw DictationError.recognizerUnavailable(locale.identifier)
         }
+
+        try Task.checkCancellation()
+        guard turn == generation else { throw CancellationError() }
+
         self.recognizer = recognizer
 
         let request = SFSpeechAudioBufferRecognitionRequest()
@@ -148,6 +159,14 @@ private actor DictationSession {
         self.request = request
 
         try activateAudioSession()
+
+        do {
+            try Task.checkCancellation()
+            guard turn == generation else { throw CancellationError() }
+        } catch {
+            deactivateAudioSession()
+            throw error
+        }
 
         let input = audioEngine.inputNode
         let format = input.outputFormat(forBus: 0)
@@ -171,27 +190,14 @@ private actor DictationSession {
 
         isRunning = true
 
-        recognitionTask = recognizer.recognitionTask(with: request) { result, error in
-            if let result {
-                continuation.yield(
-                    DictationUpdate(
-                        text: result.bestTranscription.formattedString,
-                        isFinal: result.isFinal
-                    )
-                )
-                if result.isFinal {
-                    continuation.finish()
-                }
-            }
-            if let error {
-                // A cancellation after the final result is the normal end of a push-to-talk turn, not a failure, and
-                // finishing twice is harmless — `AsyncThrowingStream` ignores the second.
-                continuation.finish(throwing: error)
-            }
+        recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            guard let self else { return }
+            Task { await self.deliver(result: result, error: error, turn: turn, continuation: continuation) }
         }
     }
 
     func stop() async {
+        generation += 1
         guard isRunning || recognitionTask != nil || request != nil else { return }
         isRunning = false
 
@@ -209,6 +215,31 @@ private actor DictationSession {
         recognizer = nil
 
         deactivateAudioSession()
+    }
+
+    private func deliver(
+        result: SFSpeechRecognitionResult?,
+        error: (any Error)?,
+        turn: Int,
+        continuation: AsyncThrowingStream<DictationUpdate, any Error>.Continuation
+    ) {
+        guard turn == generation else { return }
+        if let result {
+            continuation.yield(
+                DictationUpdate(
+                    text: result.bestTranscription.formattedString,
+                    isFinal: result.isFinal
+                )
+            )
+            if result.isFinal {
+                continuation.finish()
+            }
+        }
+        if let error {
+            // A cancellation after the final result is the normal end of a push-to-talk turn, not a failure, and
+            // finishing twice is harmless — `AsyncThrowingStream` ignores the second.
+            continuation.finish(throwing: error)
+        }
     }
 
     // MARK: Permissions

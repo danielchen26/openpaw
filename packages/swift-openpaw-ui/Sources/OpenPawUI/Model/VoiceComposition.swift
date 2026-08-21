@@ -158,16 +158,31 @@ public struct VoiceComposition: Sendable, Hashable {
         let ownsLateFinal = acceptsLateFinal && update.isFinal && turn == lateFinalTurn
         guard ownsActiveTurn || ownsLateFinal else { return nil }
         if update.isFinal {
-            if acceptsLateFinal, let provisionalPhrase {
-                let stagedProvisional = Self.join(draft: draftAtStart, phrase: provisionalPhrase)
-                guard draft == stagedProvisional else {
-                    partialTranscript = ""
-                    acceptsLateFinal = false
-                    self.provisionalPhrase = nil
-                    return nil
+            let baseDraft: String
+            if ownsLateFinal {
+                if acceptsLateFinal, let provisionalPhrase {
+                    let stagedProvisional = Self.join(draft: draftAtStart, phrase: provisionalPhrase)
+                    guard draft == stagedProvisional else {
+                        partialTranscript = ""
+                        acceptsLateFinal = false
+                        self.provisionalPhrase = nil
+                        lateFinalTurn = nil
+                        return nil
+                    }
+                    baseDraft = draftAtStart
+                } else {
+                    guard draft == draftAtStart else {
+                        partialTranscript = ""
+                        acceptsLateFinal = false
+                        lateFinalTurn = nil
+                        return nil
+                    }
+                    baseDraft = draftAtStart
                 }
+            } else {
+                baseDraft = partialTranscript.isEmpty ? draft : draftAtStart
             }
-            draft = Self.join(draft: draftAtStart, phrase: update.text)
+            draft = Self.join(draft: baseDraft, phrase: update.text)
             partialTranscript = ""
             acceptsLateFinal = false
             provisionalPhrase = nil

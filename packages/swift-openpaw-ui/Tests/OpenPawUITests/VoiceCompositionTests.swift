@@ -108,6 +108,56 @@ struct VoiceCompositionTests {
         #expect(voice.draft == "old partial new words")
     }
 
+    @Test func lateFinalDoesNotOverwritePostStopUserEditWithoutProvisionalPartial() {
+        var voice = VoiceComposition(destination: .agent, draft: "typed before")
+        let turn = voice.start()
+        voice.stop()
+        voice.draft = "typed after stop"
+
+        #expect(voice.apply(DictationUpdate(text: "late final", isFinal: true), turn: turn) == nil)
+
+        #expect(voice.draft == "typed after stop")
+        #expect(voice.partialTranscript == "")
+        #expect(!voice.isActive)
+    }
+
+    @Test func cancelInvalidatesPendingLateFinalAfterNavigationTeardown() {
+        var voice = VoiceComposition(destination: .agent, draft: "keep")
+        let turn = voice.start()
+        voice.apply(DictationUpdate(text: "partial", isFinal: false), turn: turn)
+        voice.cancel()
+
+        #expect(voice.apply(DictationUpdate(text: "late final", isFinal: true), turn: turn) == nil)
+
+        #expect(voice.draft == "keep")
+        #expect(voice.partialTranscript == "")
+        #expect(!voice.isActive)
+    }
+
+    @Test func activeTerminalFinalUsesUserEditedDraftAsBase() {
+        var voice = VoiceComposition(destination: .terminal, draft: "git")
+        let turn = voice.start()
+        voice.draft = "git status"
+
+        #expect(voice.apply(DictationUpdate(text: "--short", isFinal: true), turn: turn) == nil)
+
+        #expect(voice.draft == "git status --short")
+        #expect(voice.partialTranscript == "")
+        #expect(voice.isActive)
+    }
+
+    @Test func startingNewTurnInvalidatesOldLateFinalAfterRapidRestart() {
+        var voice = VoiceComposition(destination: .agent)
+        let old = voice.start()
+        voice.stop()
+        let new = voice.start()
+        voice.apply(DictationUpdate(text: "new words", isFinal: false), turn: new)
+
+        #expect(voice.apply(DictationUpdate(text: "old final", isFinal: true), turn: old) == nil)
+
+        #expect(voice.displayText == "new words")
+    }
+
     @Test func cancelDiscardsTransientPartialButKeepsPreexistingDraft() {
         var voice = VoiceComposition(destination: .agent, draft: "preexisting")
         voice.start()
