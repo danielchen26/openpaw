@@ -271,6 +271,24 @@ final class MultiplexerAdapterTests: XCTestCase {
         XCTAssertEqual(sessions[0].kind, .herdr)
     }
 
+    func testHerdrParsesBareArrayWindows() throws {
+        let json = """
+            [{"id":"w2","index":2,"name":"logs","active":false,"panes":1}]
+            """
+        let windows = try HerdrAdapter().parseWindows(json, sessionID: "hd_01")
+        XCTAssertEqual(windows.map(\.id), ["w2"])
+        XCTAssertEqual(windows[0].sessionID, "hd_01")
+        XCTAssertEqual(windows[0].name, "logs")
+    }
+
+    func testHerdrMissingOldHerdrFallsBackToEmpty() async throws {
+        let runner = StubRunner([
+            ("herdr list --json", .failing("herdr: command not found", exitCode: 127))
+        ])
+        let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
+        XCTAssertTrue(sessions.isEmpty)
+    }
+
     func testHerdrWindowsAndCommandStrings() async throws {
         let json = """
             {"windows":[{"id":"w1","index":0,"name":"api","active":true,"panes":2,
@@ -295,6 +313,21 @@ final class MultiplexerAdapterTests: XCTestCase {
 
     func testHerdrRejectsNonJSON() {
         XCTAssertThrowsError(try HerdrAdapter().parseSessions("<html>nope</html>"))
+    }
+
+    func testHerdrMalformedSessionsAndWindowsAreHardErrors() {
+        XCTAssertThrowsError(try HerdrAdapter().parseSessions("{\"items\":[]}")) { error in
+            guard case MultiplexerError.malformedOutput(let kind, _) = error else {
+                return XCTFail("unexpected error \(error)")
+            }
+            XCTAssertEqual(kind, .herdr)
+        }
+        XCTAssertThrowsError(try HerdrAdapter().parseWindows("{\"items\":[]}", sessionID: "hd")) { error in
+            guard case MultiplexerError.malformedOutput(let kind, _) = error else {
+                return XCTFail("unexpected error \(error)")
+            }
+            XCTAssertEqual(kind, .herdr)
+        }
     }
 
     // MARK: factory

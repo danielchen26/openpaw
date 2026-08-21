@@ -8,11 +8,13 @@ public struct SessionSpaceSnapshot: Sendable, Hashable {
     public var remoteSessions: [RemoteSession]
     public var restoration: SessionRestorationPlan?
     public var transport: SessionTransportPresentation
+    public var issues: [String]
 
-    public init(remoteSessions: [RemoteSession] = [], restoration: SessionRestorationPlan? = nil, transport: SessionTransportPresentation = .init()) {
+    public init(remoteSessions: [RemoteSession] = [], restoration: SessionRestorationPlan? = nil, transport: SessionTransportPresentation = .init(), issues: [String] = []) {
         self.remoteSessions = remoteSessions
         self.restoration = restoration
         self.transport = transport
+        self.issues = issues
     }
 }
 
@@ -132,4 +134,50 @@ public protocol SessionSpaceProviding: AnyObject {
 public final class EmptySessionSpaceProvider: SessionSpaceProviding {
     public init() {}
     public func snapshot(for model: OpenPawModel) async -> SessionSpaceSnapshot { SessionSpaceSnapshot() }
+}
+
+public final class LiveMultiplexerSessionSpaceProvider: SessionSpaceProviding {
+    private let runner: any CommandRunner
+    private let adapters: [any MultiplexerAdapter]
+    private let preferred: MultiplexerKind?
+
+    public init(runner: any CommandRunner, adapters: [any MultiplexerAdapter] = MultiplexerAdapters.all, preferred: MultiplexerKind? = nil) {
+        self.runner = runner
+        self.adapters = adapters
+        self.preferred = preferred
+    }
+
+    public func snapshot(for model: OpenPawModel) async -> SessionSpaceSnapshot {
+        var sessions: [RemoteSession] = []
+        var issues: [String] = []
+        for adapter in adapters {
+            do {
+                sessions.append(contentsOf: try await adapter.discoverSessions(runner: runner))
+            } catch let error as MultiplexerError {
+                issues.append("\(adapter.kind.displayName): \(error)")
+            } catch let failure as CommandFailure {
+                if failure.exitCode != 127 {
+                    issues.append("\(adapter.kind.displayName): discovery command failed with exit \(failure.exitCode)")
+                }
+            } catch {
+                issues.append("\(adapter.kind.displayName): \(String(describing: error))")
+            }
+        }
+        // No restoration plan is fabricated here. Production can only return one once a real persisted plan exists.
+        return SessionSpaceSnapshot(
+            remoteSessions: sessions,
+            restoration: nil,
+            transport: SessionTransportPresentation(preferredMultiplexer: model.selectedHost?.multiplexerPreference ?? preferred, attemptedMultiplexers: adapters.map(\.kind)),
+            issues: issues)
+    }
+}
+
+@MainActor
+public protocol SessionSpaceCommandExecuting: AnyObject {
+    func executeSessionCommand(_ command: String) async throws
+}
+
+public final class EmptySessionSpaceCommandExecutor: SessionSpaceCommandExecuting {
+    public init() {}
+    public func executeSessionCommand(_ command: String) async throws {}
 }

@@ -165,6 +165,7 @@ public struct RootView: View {
     private let settings: OpenPawSettings
     private let scrollback: ScrollbackStore
     private let sessionSpaceProvider: any SessionSpaceProviding
+    private let sessionCommandExecutor: any SessionSpaceCommandExecuting
     @State private var sessionSpace = SessionSpaceSnapshot()
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -177,11 +178,13 @@ public struct RootView: View {
     public init(
         model: OpenPawModel,
         terminalSurface: @escaping () -> AnyView,
-        sessionSpaceProvider: any SessionSpaceProviding = EmptySessionSpaceProvider()
+        sessionSpaceProvider: any SessionSpaceProviding = EmptySessionSpaceProvider(),
+        sessionCommandExecutor: any SessionSpaceCommandExecuting = EmptySessionSpaceCommandExecutor()
     ) {
         self.model = model
         self.terminalSurface = terminalSurface
         self.sessionSpaceProvider = sessionSpaceProvider
+        self.sessionCommandExecutor = sessionCommandExecutor
         self.router = ShellRouter()
         let settings = OpenPawSettings()
         self.settings = settings
@@ -229,7 +232,7 @@ public struct RootView: View {
             guard model.canRefreshRemoteState else { return }
             await model.refresh()
             model.startFollowing(session: model.selectedSessionID)
-            sessionSpace = await sessionSpaceProvider.snapshot(for: model)
+            await refreshSessionSpace()
         }
         .task { await pumpScrollback() }
         .sheet(item: sheetBinding) { sheet in
@@ -548,7 +551,12 @@ public struct RootView: View {
                 remoteSessions: sessionSpace.remoteSessions,
                 restoration: sessionSpace.restoration,
                 transport: sessionSpace.transport,
-                onSelect: selectSession
+                onSelect: selectSession,
+                onAttach: attachSession,
+                onCreate: createSession,
+                onRename: renameSession,
+                onKill: killSession,
+                onRestore: restoreSession
             )
                 .navigationDestination(item: chatSessionBinding) { sessionID in
                     transcript(sessionID)
@@ -560,7 +568,12 @@ public struct RootView: View {
                 remoteSessions: sessionSpace.remoteSessions,
                 restoration: sessionSpace.restoration,
                 transport: sessionSpace.transport,
-                onSelect: selectSession
+                onSelect: selectSession,
+                onAttach: attachSession,
+                onCreate: createSession,
+                onRename: renameSession,
+                onKill: killSession,
+                onRestore: restoreSession
             )
                     .frame(width: 340)
                 Rectangle()
@@ -586,6 +599,52 @@ public struct RootView: View {
             onOpenFile: openFile(_:),
             onApprove: { router.openApproval(itemID: $0) }
         )
+    }
+
+    private func refreshSessionSpace() async {
+        let snapshot = await sessionSpaceProvider.snapshot(for: model)
+        sessionSpace = snapshot
+        if !snapshot.issues.isEmpty {
+            model.lastError = PresentedError(
+                title: "Session discovery issue",
+                detail: snapshot.issues.joined(separator: "\n"),
+                isRecoverable: true)
+        }
+    }
+
+    private func runSessionCommand(_ command: String, refreshAfterCommand: Bool) {
+        Task {
+            do {
+                try await sessionCommandExecutor.executeSessionCommand(command)
+                router.destination = .terminal
+                if refreshAfterCommand { await refreshSessionSpace() }
+            } catch {
+                model.lastError = PresentedError(title: "Session command failed", detail: String(describing: error), isRecoverable: true)
+            }
+        }
+    }
+
+    private func attachSession(_ session: RemoteSession) {
+        guard session.isAlive else { return }
+        runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).attach(session), refreshAfterCommand: false)
+    }
+
+    private func createSession(_ name: String) {
+        let adapter = MultiplexerAdapters.adapter(for: sessionSpace.transport.preferredMultiplexer ?? .tmux)
+        runSessionCommand(adapter.create(name: name, directory: nil), refreshAfterCommand: false)
+    }
+
+    private func renameSession(_ session: RemoteSession, to name: String) {
+        runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).rename(session, to: name), refreshAfterCommand: true)
+    }
+
+    private func killSession(_ session: RemoteSession) {
+        runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).kill(session), refreshAfterCommand: true)
+    }
+
+    private func restoreSession(_ plan: SessionRestorationPlan) {
+        guard let command = plan.restorationCommand() else { return }
+        runSessionCommand(command, refreshAfterCommand: false)
     }
 
     @ViewBuilder

@@ -158,7 +158,9 @@ final class AppWiring {
                         onChangeDirectory: { [weak self] directory in self?.remoteDirectory = directory }
                     )
                 )
-            }
+            },
+            sessionSpaceProvider: LiveMultiplexerSessionSpaceProvider(runner: terminal),
+            sessionCommandExecutor: TerminalSessionCommandExecutor(terminal: terminal)
         )
         cachedRoot = created
         return created
@@ -271,6 +273,19 @@ final class AppWiring {
 
     func persistHosts() {
         hosts.save(model.hostStore)
+    }
+}
+
+@MainActor
+final class TerminalSessionCommandExecutor: SessionSpaceCommandExecuting {
+    private let terminal: any TerminalBackend
+
+    init(terminal: any TerminalBackend) {
+        self.terminal = terminal
+    }
+
+    func executeSessionCommand(_ command: String) async throws {
+        try await terminal.send(text: command + "\n")
     }
 }
 

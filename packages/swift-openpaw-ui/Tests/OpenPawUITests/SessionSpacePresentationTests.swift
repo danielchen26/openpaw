@@ -51,4 +51,75 @@ final class SessionSpacePresentationTests: XCTestCase {
         XCTAssertEqual(space.transport.preferenceLabel, "Preference: GNU Screen")
         XCTAssertEqual(space.transport.discoveryLabel, "Checked: tmux, Zellij, GNU Screen, Herdr")
     }
+
+    @MainActor
+    func testLiveProviderDiscoversThroughAdaptersAndKeepsPreferenceSeparate() async {
+        let provider = LiveMultiplexerSessionSpaceProvider(
+            runner: RecordingRunner(),
+            adapters: [ProviderAdapter(kind: .tmux, result: .success([RemoteSession.target("$0", kind: .tmux)]))],
+            preferred: .zellij)
+
+        let snapshot = await provider.snapshot(for: OpenPawModel())
+        XCTAssertEqual(snapshot.remoteSessions.map(\.id), ["$0"])
+        XCTAssertEqual(snapshot.transport.preferredMultiplexer, .zellij)
+        XCTAssertEqual(snapshot.transport.attemptedMultiplexers, [.tmux])
+        XCTAssertNil(snapshot.restoration, "No production persisted restoration source exists yet, so the live provider must not fabricate one.")
+    }
+
+    @MainActor
+    func testLiveProviderKeepsMalformedOutputVisibleButUnavailableAdaptersEmpty() async {
+        let provider = LiveMultiplexerSessionSpaceProvider(
+            runner: RecordingRunner(),
+            adapters: [
+                ProviderAdapter(kind: .tmux, result: .success([])),
+                ProviderAdapter(kind: .herdr, result: .failure(MultiplexerError.malformedOutput(kind: .herdr, detail: "{"))),
+            ])
+
+        let snapshot = await provider.snapshot(for: OpenPawModel())
+        XCTAssertTrue(snapshot.remoteSessions.isEmpty)
+        XCTAssertEqual(snapshot.transport.attemptedMultiplexers, [.tmux, .herdr])
+        XCTAssertEqual(snapshot.issues.count, 1)
+        XCTAssertTrue(snapshot.issues[0].contains("Herdr"))
+    }
+
+    @MainActor
+    func testLiveProviderUsesSelectedHostPreferenceAndSanitizesCommandFailures() async {
+        let host = HostRecord(
+            id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+            nickname: "beta",
+            hostname: "beta.local",
+            port: 22,
+            username: "dev",
+            auth: .password(reference: try! KeychainReference(identifier: "kc://openpaw/beta/password")),
+            multiplexerPreference: .screen)
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]))
+        let provider = LiveMultiplexerSessionSpaceProvider(
+            runner: RecordingRunner(),
+            adapters: [
+                ProviderAdapter(kind: .tmux, result: .failure(CommandFailure(command: "tmux", exitCode: 127, output: "tmux: command not found"))),
+                ProviderAdapter(kind: .herdr, result: .failure(CommandFailure(command: "herdr", exitCode: 2, output: "secret raw output"))),
+            ],
+            preferred: .zellij)
+
+        let snapshot = await provider.snapshot(for: model)
+        XCTAssertEqual(snapshot.transport.preferredMultiplexer, .screen)
+        XCTAssertEqual(snapshot.issues, ["Herdr: discovery command failed with exit 2"])
+    }
+}
+
+private actor RecordingRunner: CommandRunner {
+    func run(_ command: String) async throws -> String { "" }
+}
+
+private struct ProviderAdapter: MultiplexerAdapter {
+    let kind: MultiplexerKind
+    let result: Result<[RemoteSession], any Error>
+
+    func discoverSessions(runner: any CommandRunner) async throws -> [RemoteSession] { try result.get() }
+    func attach(_ session: RemoteSession) -> String { "attach" }
+    func create(name: String, directory: String?) -> String { "create" }
+    func listWindows(session: RemoteSession, runner: any CommandRunner) async throws -> [RemoteWindow] { [] }
+    func focus(window: RemoteWindow) -> String { "focus" }
+    func kill(_ session: RemoteSession) -> String { "kill" }
+    func rename(_ session: RemoteSession, to newName: String) -> String { "rename" }
 }

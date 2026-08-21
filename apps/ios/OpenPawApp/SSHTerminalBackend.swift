@@ -12,7 +12,7 @@ import OpenPawUI
 ///
 /// The PTY is authoritative for execution. A host with no `openpaw-host` daemon still gives a fully working terminal
 /// through this object alone, which is why it holds no reference to `OpenPawBackend` and never waits on one.
-actor SSHTerminalBackend: TerminalBackend {
+actor SSHTerminalBackend: TerminalBackend, CommandRunner {
 
     /// Builds a transport for a configuration. In the app this is `TransportSelector`'s decision; in tests it is a
     /// closure returning a mock.
@@ -121,6 +121,10 @@ actor SSHTerminalBackend: TerminalBackend {
             group.cancelAll()
             return result
         }
+    }
+
+    func run(_ command: String) async throws -> String {
+        try await run(command: command)
     }
 
     // MARK: Reconnect

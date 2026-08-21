@@ -52,6 +52,11 @@ public struct SessionRestorationPlan: Sendable, Hashable, Codable {
         return [adapter.create(name: newSessionName, directory: workingDirectory)]
     }
 
+    public func restorationCommand() -> String? {
+        let joined = commands().joined(separator: " && ")
+        return joined.isEmpty ? nil : joined
+    }
+
     /// Deterministic name for a session created because the old one is gone:
     /// the working directory's leaf, sanitised for tmux/screen/Zellij.
     public var newSessionName: String {
