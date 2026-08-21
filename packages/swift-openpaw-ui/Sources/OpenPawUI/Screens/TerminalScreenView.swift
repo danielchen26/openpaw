@@ -118,19 +118,26 @@ public struct TerminalScreenView: View {
         self.onFontSizeChange = onFontSizeChange
     }
 
-    private var width: RootWidth {
+    /// True only where a size class exists and reports compact.
+    private var isCompactSizeClass: Bool {
         #if os(iOS)
-            horizontalSizeClass == .compact ? .compact : .regular
+            horizontalSizeClass == .compact
         #else
-            .regular
+            false
         #endif
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            header
-            terminal
-            footer
+        // Measured, not inferred: the key bar's row count follows the room it actually has. A size class alone
+        // reports regular for every macOS window, which would put a two-row bar in a phone-width frame.
+        GeometryReader { proxy in
+            let width = RootWidth.resolve(width: proxy.size.width, isCompactSizeClass: isCompactSizeClass)
+            VStack(spacing: 0) {
+                header
+                terminal
+                footer(width: width)
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .background(OpenPawTheme.ink)
         .overlay {
@@ -160,23 +167,30 @@ public struct TerminalScreenView: View {
 
     private var header: some View {
         let status = ConnectionPresentation.make(model.connection)
+        let host = model.selectedHost?.nickname
         return VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
             HStack(alignment: .firstTextBaseline, spacing: OpenPawTheme.Space.small) {
-                Image(systemName: status.glyph)
+                Image(systemName: host == nil ? "circle.dashed" : status.glyph)
                     .font(OpenPawTheme.Machine.codeSmall)
-                    .foregroundStyle(status.tone)
+                    .foregroundStyle(host == nil ? OpenPawTheme.textTertiary : status.tone)
                     .accessibilityHidden(true)
-                Text(model.selectedHost?.nickname ?? "No host")
+                Text(host ?? "No host")
                     .font(OpenPawTheme.Machine.headline)
-                    .foregroundStyle(OpenPawTheme.textPrimary)
-                Text(status.label).microLabel(status.tone)
-                if let transport = ConnectionPresentation.transportLabel(model.connection) {
-                    Text(transport).microLabel()
+                    .foregroundStyle(host == nil ? OpenPawTheme.textSecondary : OpenPawTheme.textPrimary)
+                // With no host there is nothing a connection state could be true about, so it is not claimed.
+                // A header must never state two things that cannot both hold.
+                if host != nil {
+                    Text(status.label).microLabel(status.tone)
+                    if let transport = ConnectionPresentation.transportLabel(model.connection) {
+                        Text(transport).microLabel()
+                    }
+                } else {
+                    Text("add one in settings").microLabel()
                 }
                 Spacer(minLength: OpenPawTheme.Space.small)
                 connectionButton
             }
-            if let detail = status.detail {
+            if host != nil, let detail = status.detail {
                 Text(detail)
                     .font(OpenPawTheme.Human.caption)
                     .foregroundStyle(OpenPawTheme.textSecondary)
@@ -195,7 +209,7 @@ public struct TerminalScreenView: View {
     }
 
     private func headerVoiceLabel(_ status: ConnectionPresentation) -> String {
-        let host = model.selectedHost?.nickname ?? "No host"
+        guard let host = model.selectedHost?.nickname else { return "No host selected" }
         guard let detail = status.detail else { return "\(host), \(status.label)" }
         return "\(host), \(status.label). \(detail)"
     }
@@ -229,7 +243,13 @@ public struct TerminalScreenView: View {
 
     private var terminal: some View {
         surface()
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Terminals grow from the bottom: new output arrives at the bottom edge and history scrolls up off
+            // the top. Filling the height without an anchor centres a short session in the middle of the pane.
+            //
+            // `.bottomLeading` on both, never `.bottom`: `UnitPoint.bottom` is x 0.5, so it would centre the
+            // columns horizontally and break every aligned thing a terminal prints — tables, diffs, tree output.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            .defaultScrollAnchor(.bottomLeading)
             .background(settings.terminalTheme.background)
             .contentShape(Rectangle())
             // Pinch reports through the injected closure; this view never resizes the PTY itself.
@@ -257,7 +277,7 @@ public struct TerminalScreenView: View {
 
     // MARK: Footer
 
-    private var footer: some View {
+    private func footer(width: RootWidth) -> some View {
         VStack(spacing: 0) {
             if settings.dictationMode == .composer, isDictating || !dictationDraft.isEmpty {
                 dictationDraftRow

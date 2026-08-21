@@ -238,6 +238,32 @@ struct RootNavigationTests {
         #expect(RepoPane.allCases.map(\.rawValue) == ["diff", "files", "preview", "status"])
     }
 
+    @Test("Layout follows the measured width, because a size class alone lies on macOS")
+    func widthResolvesFromMeasurement() {
+        // An iPhone, portrait and landscape.
+        #expect(RootWidth.resolve(width: 393) == .compact)
+        #expect(RootWidth.resolve(width: 440) == .compact)
+        // An iPad portrait, an iPad landscape, a Mac window.
+        #expect(RootWidth.resolve(width: 1_024) == .regular)
+        #expect(RootWidth.resolve(width: 1_366) == .regular)
+        #expect(RootWidth.resolve(width: 900) == .regular)
+        // The boundary is exact, so a frame at the threshold cannot flip between renders.
+        #expect(RootWidth.resolve(width: RootWidth.twoPaneThreshold) == .regular)
+        #expect(RootWidth.resolve(width: RootWidth.twoPaneThreshold - 1) == .compact)
+    }
+
+    @Test("A compact size class wins over a wide frame, which is what Slide Over looks like")
+    func compactSizeClassOverridesWidth() {
+        #expect(RootWidth.resolve(width: 1_024, isCompactSizeClass: true) == .compact)
+        #expect(RootWidth.resolve(width: 393, isCompactSizeClass: false) == .compact)
+    }
+
+    @Test("The two rules compose into the layout the app draws")
+    func widthAndStyleCompose() {
+        #expect(RootNavigationStyle.style(for: RootWidth.resolve(width: 393)) == .tabs)
+        #expect(RootNavigationStyle.style(for: RootWidth.resolve(width: 1_024)) == .split)
+    }
+
     @MainActor
     @Test("A deep link selects the inbox and remembers the item")
     func deepLinkOpensTheInbox() {

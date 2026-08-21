@@ -311,6 +311,50 @@ final class PreviewBackendTests: XCTestCase {
         XCTAssertEqual(session?.sessionID, PreviewBackend.claudeSessionID)
     }
 
+    /// Every scenario is a paired device. A header reading "no host" beside a live connection state is a
+    /// contradiction, and it made three of the shell screens snapshot their empty path under `.populated`.
+    func testEveryScenarioHasHostsAndASelectedOne() {
+        for scenario in PreviewBackend.Scenario.allCases {
+            let model = PreviewBackend.model(scenario)
+            XCTAssertEqual(model.hostStore.hosts.count, 2, "\(scenario.rawValue) has no hosts")
+            XCTAssertNotNil(model.selectedHostID, "\(scenario.rawValue) selects no host")
+            XCTAssertNotNil(model.selectedHost, "\(scenario.rawValue) selects a host that is not in the store")
+        }
+    }
+
+    /// The connected transport has to be one the selected host could actually have used, or the terminal header
+    /// and the host row disagree about the same connection.
+    func testConnectedTransportAgreesWithTheSelectedHost() {
+        for scenario in [PreviewBackend.Scenario.populated, .reviewingDestructiveCommand, .empty] {
+            let model = PreviewBackend.model(scenario)
+            guard case .connected(let transport) = model.connection else {
+                return XCTFail("\(scenario.rawValue) should be connected")
+            }
+            let host = model.selectedHost
+            XCTAssertNotNil(host)
+            let plausible = [host?.lastSuccessfulTransport, host?.preferredTransport, .ssh]
+            XCTAssertTrue(
+                plausible.contains(transport),
+                "\(scenario.rawValue) reports \(transport) but the host records none of it"
+            )
+        }
+    }
+
+    /// Both auth shapes render, and no fixture inlines key material.
+    func testHostFixturesCoverBothAuthShapesAndCarryNoSecrets() {
+        let hosts = PreviewBackend.model(.populated).hostStore.hosts
+        XCTAssertTrue(hosts.contains { $0.auth == .agentForwarding })
+        guard let keyed = hosts.first(where: { if case .privateKey = $0.auth { return true } else { return false } })
+        else { return XCTFail("no host exercises a keychain-referenced private key") }
+        guard case .privateKey(let reference, let passphrase) = keyed.auth else { return }
+        XCTAssertEqual(reference.identifier, "id_ed25519")
+        XCTAssertNil(passphrase)
+
+        // One host is pinned and one is not, so the unknown-host prompt has a fixture too.
+        XCTAssertTrue(hosts.contains { !$0.knownHosts.isEmpty })
+        XCTAssertTrue(hosts.contains { $0.knownHosts.isEmpty })
+    }
+
     func testPopulatedInboxCoversEveryCategoryTheDesignHasToHandle() {
         let model = PreviewBackend.model(.populated)
         let categories = Set(model.inbox.map(\.category))

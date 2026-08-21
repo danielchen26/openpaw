@@ -5,11 +5,26 @@ import SwiftUI
 
 // MARK: - Layout selection
 
-/// The two widths the app is designed for. Kept as our own type rather than `UserInterfaceSizeClass` so the choice
-/// is testable and so the macOS build, which has no size class, does not need a special case at every call site.
+/// The two widths the app is designed for.
+///
+/// Our own type rather than `UserInterfaceSizeClass`, for two reasons: the choice stays testable, and the size
+/// class is not a reliable signal on its own — macOS reports `.regular` at every window size, so a phone-sized
+/// frame would otherwise be handed a two-pane layout it cannot fit. The measured width is the honest question,
+/// "is there room for two panes?", and it answers correctly on every platform.
 public enum RootWidth: String, Sendable, Hashable, CaseIterable {
     case compact
     case regular
+
+    /// Narrowest width where a 220pt sidebar and a usable terminal both fit. Below it the tab bar is the only
+    /// honest answer; iPad portrait (1024pt) and any Mac window clear it, an iPhone (393-440pt) does not.
+    public static let twoPaneThreshold: CGFloat = 700
+
+    /// `isCompactSizeClass` still participates: on iOS it is what tells us we are in Slide Over rather than
+    /// full screen, which the width alone can miss at the margins.
+    public static func resolve(width: CGFloat, isCompactSizeClass: Bool = false) -> RootWidth {
+        if isCompactSizeClass { return .compact }
+        return width < twoPaneThreshold ? .compact : .regular
+    }
 }
 
 /// How the five destinations are presented.
@@ -55,6 +70,16 @@ public enum ShellDestination: String, Sendable, Hashable, CaseIterable, Identifi
         case .inbox: "tray.full"
         case .repo: "arrow.triangle.branch"
         case .settings: "gearshape"
+        }
+    }
+
+    /// Whether this destination ever pushes a detail view, and so needs a navigation stack around it.
+    ///
+    /// The terminal never does: it carries its own header and every control it has is in its own footer.
+    public var pushesDetail: Bool {
+        switch self {
+        case .terminal: false
+        case .chat, .inbox, .repo, .settings: true
         }
     }
 }
@@ -147,24 +172,35 @@ public struct RootView: View {
         Task { await model.refresh() }
     }
 
-    public var width: RootWidth {
+    /// True only where a size class exists and reports compact.
+    private var isCompactSizeClass: Bool {
         #if os(iOS)
-            horizontalSizeClass == .compact ? .compact : .regular
+            horizontalSizeClass == .compact
         #else
-            .regular
+            false
         #endif
     }
 
     public var body: some View {
-        Group {
-            switch RootNavigationStyle.style(for: width) {
-            case .tabs: tabs
-            case .split: split
+        GeometryReader { proxy in
+            let width = RootWidth.resolve(
+                width: proxy.size.width, isCompactSizeClass: isCompactSizeClass)
+            Group {
+                switch RootNavigationStyle.style(for: width) {
+                case .tabs: tabs(width: width)
+                case .split: split(width: width)
+                }
             }
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .background(OpenPawTheme.ink)
         .tint(OpenPawTheme.textPrimary)
         .task {
+            // A device with hosts but no selection has nothing to show a status about. Adopting the first entry
+            // is what the model does at init; doing it here too covers a store loaded after the model was built.
+            if model.selectedHostID == nil {
+                model.selectedHostID = model.hostStore.hosts.first?.id
+            }
             await model.refresh()
             model.startFollowing(session: model.selectedSessionID)
         }
@@ -193,77 +229,178 @@ public struct RootView: View {
 
     // MARK: Compact
 
-    private var tabs: some View {
-        TabView(selection: destinationBinding) {
+    /// Content above, tab bar below, both ours.
+    ///
+    /// Not a `TabView`, for the same reason the sidebar is not a `List`: the platform control brings a surface we
+    /// cannot reach and, on macOS, places its strip at the top with labels that do not draw — so the compact
+    /// layout could not be verified on the only machine this project renders on. Five fixed destinations need a
+    /// row of five buttons, and that is a thing we can own completely and check.
+    private func tabs(width: RootWidth) -> some View {
+        VStack(spacing: 0) {
+            navigated(router.destination, width: width)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            tabBar
+        }
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 0) {
             ForEach(ShellDestination.allCases) { destination in
-                NavigationStack {
-                    content(destination)
-                }
-                .tabItem {
-                    Label(destination.title, systemImage: destination.glyph)
-                }
-                .badge(destination == .inbox ? pendingCount : 0)
-                .tag(destination)
+                tabItem(destination)
             }
+        }
+        .background(OpenPawTheme.panel)
+        .overlay(alignment: .top) {
+            Rectangle().fill(OpenPawTheme.line).frame(height: OpenPawTheme.hairline)
+        }
+    }
+
+    private func tabItem(_ destination: ShellDestination) -> some View {
+        let isSelected = router.destination == destination
+        return Button {
+            router.destination = destination
+        } label: {
+            VStack(spacing: OpenPawTheme.Space.hair) {
+                // The selected tab is marked by a rule along the edge it touches, mirroring the sidebar.
+                Rectangle()
+                    .fill(isSelected ? OpenPawTheme.textPrimary : Color.clear)
+                    .frame(height: 2)
+                Image(systemName: destination.glyph)
+                    .font(OpenPawTheme.Machine.body)
+                    .overlay(alignment: .topTrailing) {
+                        if destination == .inbox, pendingCount > 0 {
+                            Text("\(pendingCount)")
+                                .font(OpenPawTheme.Machine.label)
+                                .padding(.horizontal, OpenPawTheme.Space.tight)
+                                .foregroundStyle(OpenPawTheme.ink)
+                                .background(OpenPawTheme.warn)
+                                .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.chip))
+                                .alignmentGuide(.top) { $0[.bottom] / 2 }
+                                .alignmentGuide(.trailing) { $0[.leading] }
+                        }
+                    }
+                Text(destination.title)
+                    .font(OpenPawTheme.Machine.label)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+            }
+            .padding(.bottom, OpenPawTheme.Space.small)
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .foregroundStyle(isSelected ? OpenPawTheme.textPrimary : OpenPawTheme.textSecondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(sidebarVoiceLabel(destination))
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// Wraps a destination in a `NavigationStack` only when it has somewhere to push.
+    ///
+    /// The terminal has its own header and nothing to navigate to, so a stack there contributes an empty
+    /// navigation bar — which renders as a bare light strip above a dark screen and steals 44pt from the PTY.
+    @ViewBuilder
+    private func navigated(_ destination: ShellDestination, width: RootWidth) -> some View {
+        if destination.pushesDetail {
+            NavigationStack {
+                content(destination, width: width)
+            }
+        } else {
+            content(destination, width: width)
         }
     }
 
     // MARK: Regular
 
-    private var split: some View {
-        NavigationSplitView {
+    /// Sidebar plus detail, built from an `HStack` rather than a `NavigationSplitView`.
+    ///
+    /// The platform split view lays its sidebar column out in a view hierarchy of its own, which nothing we do
+    /// reaches: a column-width modifier applies while the content and ground do not draw, leaving a bare white
+    /// column in a dark app. Since all five destinations are always wanted at this width, there is no collapse
+    /// behaviour to inherit and nothing else the split view was buying. This is two panes and a hairline, ours
+    /// end to end, and it renders identically on both platforms.
+    private func split(width: RootWidth) -> some View {
+        HStack(spacing: 0) {
             sidebar
-        } detail: {
-            NavigationStack {
-                content(router.destination)
-            }
+                .frame(width: 220)
+            Rectangle()
+                .fill(OpenPawTheme.line)
+                .frame(width: OpenPawTheme.hairline)
+            navigated(router.destination, width: width)
+                .frame(maxWidth: .infinity)
         }
     }
 
+    /// Five fixed destinations and one host chip.
+    ///
+    /// Deliberately not a `List`. A list of five static rows buys nothing here — no editing, no swipe, no dynamic
+    /// content — and costs the platform's sidebar material plus row-realisation behaviour that leaves the column
+    /// empty in a headless render.
     private var sidebar: some View {
-        List(selection: sidebarSelection) {
-            Section {
-                ForEach(ShellDestination.allCases) { destination in
-                    HStack(spacing: OpenPawTheme.Space.small) {
-                        Image(systemName: destination.glyph)
-                            .frame(width: 20)
-                            .accessibilityHidden(true)
-                        Text(destination.title)
-                            .font(OpenPawTheme.Machine.body)
-                        Spacer(minLength: 0)
-                        if destination == .inbox, pendingCount > 0 {
-                            Text("\(pendingCount)")
-                                .font(OpenPawTheme.Machine.label)
-                                .padding(.horizontal, OpenPawTheme.Space.small)
-                                .padding(.vertical, OpenPawTheme.Space.hair)
-                                .foregroundStyle(OpenPawTheme.ink)
-                                .background(OpenPawTheme.warn)
-                                .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.chip))
-                        }
-                    }
-                    .frame(minHeight: 44)
-                    .listRowBackground(Color.clear)
-                    .accessibilityLabel(sidebarVoiceLabel(destination))
-                    .tag(destination)
-                }
-            } header: {
-                Text("OpenPaw").microLabel()
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.hair) {
+                Text("OpenPaw")
+                    .microLabel()
+                    .padding(.horizontal, OpenPawTheme.Space.medium)
+                    .padding(.top, OpenPawTheme.Space.medium)
+                    .padding(.bottom, OpenPawTheme.Space.small)
 
-            Section {
+                ForEach(ShellDestination.allCases) { destination in
+                    sidebarRow(destination)
+                }
+
+                Text("Host")
+                    .microLabel()
+                    .padding(.horizontal, OpenPawTheme.Space.medium)
+                    .padding(.top, OpenPawTheme.Space.xl)
+                    .padding(.bottom, OpenPawTheme.Space.small)
+
                 hostChip
-                    .listRowBackground(Color.clear)
-            } header: {
-                Text("Host").microLabel()
+                    .padding(.horizontal, OpenPawTheme.Space.medium)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .listStyle(.plain)
-        // A `List` brings its own surface — the light sidebar material on macOS, grouped grey on iOS. Both fight
-        // the ink ground, so the list's own background is removed and the panel tone put back underneath.
         .scrollContentBackground(.hidden)
+        .frame(maxHeight: .infinity)
         .background(OpenPawTheme.panel)
-        .foregroundStyle(OpenPawTheme.textPrimary)
-        .navigationTitle("OpenPaw")
+    }
+
+    private func sidebarRow(_ destination: ShellDestination) -> some View {
+        let isSelected = router.destination == destination
+        return Button {
+            router.destination = destination
+        } label: {
+            HStack(spacing: OpenPawTheme.Space.small) {
+                // A 2pt rule rather than a filled pill: the selected row is stated, not decorated.
+                Rectangle()
+                    .fill(isSelected ? OpenPawTheme.textPrimary : Color.clear)
+                    .frame(width: 2)
+                    .accessibilityHidden(true)
+                Image(systemName: destination.glyph)
+                    .frame(width: 20)
+                    .accessibilityHidden(true)
+                Text(destination.title)
+                    .font(OpenPawTheme.Machine.body)
+                Spacer(minLength: 0)
+                if destination == .inbox, pendingCount > 0 {
+                    Text("\(pendingCount)")
+                        .font(OpenPawTheme.Machine.label)
+                        .padding(.horizontal, OpenPawTheme.Space.small)
+                        .padding(.vertical, OpenPawTheme.Space.hair)
+                        .foregroundStyle(OpenPawTheme.ink)
+                        .background(OpenPawTheme.warn)
+                        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.chip))
+                }
+            }
+            .padding(.trailing, OpenPawTheme.Space.medium)
+            .frame(minHeight: 44)
+            .foregroundStyle(isSelected ? OpenPawTheme.textPrimary : OpenPawTheme.textSecondary)
+            .background(isSelected ? OpenPawTheme.well : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(sidebarVoiceLabel(destination))
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
     private func sidebarVoiceLabel(_ destination: ShellDestination) -> String {
@@ -298,7 +435,7 @@ public struct RootView: View {
     // MARK: Destination content
 
     @ViewBuilder
-    private func content(_ destination: ShellDestination) -> some View {
+    private func content(_ destination: ShellDestination, width: RootWidth) -> some View {
         switch destination {
         case .terminal:
             TerminalScreenView(
@@ -309,7 +446,7 @@ public struct RootView: View {
                 onFontSizeChange: { _ in }
             )
         case .chat:
-            chat
+            chat(width: width)
         case .inbox:
             InboxView(model: model)
         case .repo:
@@ -320,7 +457,7 @@ public struct RootView: View {
     }
 
     @ViewBuilder
-    private var chat: some View {
+    private func chat(width: RootWidth) -> some View {
         switch RootNavigationStyle.style(for: width) {
         case .tabs:
             SessionListView(model: model, onSelect: selectSession)
@@ -518,13 +655,6 @@ public struct RootView: View {
 
     private var destinationBinding: Binding<ShellDestination> {
         Binding(get: { router.destination }, set: { router.destination = $0 })
-    }
-
-    private var sidebarSelection: Binding<ShellDestination?> {
-        Binding(
-            get: { router.destination },
-            set: { if let destination = $0 { router.destination = destination } }
-        )
     }
 
     private var repoPaneBinding: Binding<RepoPane> {

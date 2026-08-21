@@ -35,11 +35,25 @@ for pkg in swift-agent-protocol swift-terminal-core swift-ssh-transport swift-op
   step "packages/$pkg · test" in_dir "packages/$pkg" swift test
 done
 
-step "app · build" in_dir apps/ios xcodebuild \
-  -project OpenPaw.xcodeproj -scheme OpenPaw \
-  -destination 'generic/platform=iOS Simulator' \
-  -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO \
-  -quiet build
+# `xcodebuild` is the real gate, but it refuses to load its IDE plug-ins on a machine whose Xcode first-launch
+# content is older than Xcode itself (`sudo xcodebuild -runFirstLaunch` fixes that, and needs a password). When it
+# cannot run at all, fall back to type-checking the app sources against the iOS simulator SDK with swiftc, which
+# needs no IDE plug-ins and still catches every compile error in the app target.
+app_step() {
+  if xcodebuild -project apps/ios/OpenPaw.xcodeproj -list >/dev/null 2>&1; then
+    in_dir apps/ios xcodebuild \
+      -project OpenPaw.xcodeproj -scheme OpenPaw \
+      -destination 'generic/platform=iOS Simulator' \
+      -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO \
+      -quiet build
+  else
+    printf '   xcodebuild cannot load its plug-ins here; run `sudo xcodebuild -runFirstLaunch`.\n'
+    printf '   Falling back to the swiftc type-check.\n'
+    in_dir apps/ios bash scripts/typecheck-ios.sh
+  fi
+}
+
+step "app · build" app_step
 
 step "ui · snapshots" in_dir tools/openpaw-snapshot \
   swift run openpaw-snapshot --output "${TMPDIR:-/tmp}/openpaw-snapshots"
