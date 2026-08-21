@@ -38,6 +38,7 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle {
     /// not worth an actor hop.
     private let localPort = LockedBox<UInt16?>(nil)
     private let activeHostID = LockedBox<HostRecord.ID?>(nil)
+    private let lifecycleEpoch = LockedBox<Int>(0)
 
     init(
         forwarder: any LoopbackForwarder,
@@ -59,9 +60,14 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle {
 
     func connect(hostID: HostRecord.ID) async throws {
         await disconnect()
+        let epoch = lifecycleEpoch.update { $0 += 1; return $0 }
         activeHostID.set(hostID)
         do {
             let port = try await forwarder.start(remotePort: remotePort)
+            guard activeHostID.get() == hostID, lifecycleEpoch.get() == epoch else {
+                await forwarder.stop()
+                throw HostClientError.transport(URLError(.cancelled))
+            }
             localPort.set(port)
             guard let base = URL(string: "http://127.0.0.1:\(port)") else {
                 throw HostClientError.transport(URLError(.badURL))
@@ -70,17 +76,24 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle {
             if let signer = credentials.loadSigner(hostID: hostID) {
                 await client.setSigner(signer)
             }
+            guard activeHostID.get() == hostID, lifecycleEpoch.get() == epoch else {
+                await forwarder.stop()
+                throw HostClientError.transport(URLError(.cancelled))
+            }
             await state.install(client: client)
         } catch {
-            await state.install(client: nil)
-            localPort.set(nil)
-            activeHostID.set(nil)
+            if activeHostID.get() == hostID, lifecycleEpoch.get() == epoch {
+                await state.install(client: nil)
+                localPort.set(nil)
+                activeHostID.set(nil)
+            }
             await forwarder.stop()
             throw error
         }
     }
 
     func disconnect() async {
+        lifecycleEpoch.update { $0 += 1; return $0 }
         await state.install(client: nil)
         localPort.set(nil)
         activeHostID.set(nil)
@@ -96,6 +109,8 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle {
     @discardableResult
     func pair(pairingCode: String, deviceName: String) async throws -> PairingResult {
         let client = try await state.requireClient()
+        guard let hostID = activeHostID.get() else { throw HostClientError.transport(URLError(.notConnectedToInternet)) }
+        let epoch = lifecycleEpoch.get()
         let result = try await client.pair(
             pairingCode: pairingCode,
             deviceName: deviceName,
@@ -108,7 +123,9 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle {
                 )
             )
         }
-        guard let hostID = activeHostID.get() else { throw HostClientError.transport(URLError(.notConnectedToInternet)) }
+        guard activeHostID.get() == hostID, lifecycleEpoch.get() == epoch, await state.client === client else {
+            throw HostClientError.transport(URLError(.cancelled))
+        }
         try credentials.save(result, hostID: hostID)
         await client.setSigner(signer)
         return result
@@ -404,6 +421,12 @@ final class LockedBox<Value: Sendable>: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return value
+    }
+
+    func update<Result>(_ body: (inout Value) -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&value)
     }
 
     func set(_ newValue: Value) {

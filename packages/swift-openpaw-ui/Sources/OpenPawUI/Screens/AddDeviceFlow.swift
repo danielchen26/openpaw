@@ -310,8 +310,14 @@ public struct AddDeviceFlow: View {
     }
 
     private var liveCandidates: [AddDeviceCandidate] {
-        let mapped = model.tailscaleDiscovery.candidates.map(AddDeviceCandidate.from)
-        return mapped.isEmpty ? state.discovered : mapped
+        switch model.tailscaleDiscovery {
+        case .idle:
+            return state.discovered
+        case .candidates(let candidates):
+            return candidates.map(AddDeviceCandidate.from)
+        case .loading, .noConnectedHost, .empty, .unavailable, .failure:
+            return []
+        }
     }
 
     @ViewBuilder private var discoveryStatusView: some View {

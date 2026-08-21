@@ -82,6 +82,7 @@ public final class OpenPawModel {
 
     private var eventTask: Task<Void, Never>?
     private var stateTask: Task<Void, Never>?
+    private var terminalConnectAcknowledgement: CheckedContinuation<Void, Never>?
     private let reducer = TranscriptReducer()
 
     public init(
@@ -345,14 +346,15 @@ public final class OpenPawModel {
             )
             return false
         }
-        guard let backend else {
+        guard canRefreshRemoteState, connection.isConnected, let backend, let hostID = selectedHostID else {
             lastError = PresentedError(
-                title: "No host is connected",
+                title: "Structured host features are unavailable",
                 detail: "Reconnect the host to send this decision. The agent is still waiting.",
                 isRecoverable: true
             )
             return false
         }
+        let generation = connectionGeneration
         do {
             _ = try await backend.resolve(
                 item: item,
@@ -360,6 +362,7 @@ public final class OpenPawModel {
                 answer: answer,
                 detailAcknowledged: isDetailAcknowledged(item)
             )
+            guard selectedHostID == hostID, connectionGeneration == generation, structuredBackendReady else { return false }
             if let index = inbox.firstIndex(where: { $0.id == item.id }) {
                 inbox[index].status = .resolved
                 inbox[index].resolution = action.rawValue
@@ -419,11 +422,15 @@ public final class OpenPawModel {
 
     public func uploadComposerAttachments(_ attachments: [ComposerAttachment]) async -> [UploadResult]? {
         guard !attachments.isEmpty else { return [] }
-        guard let backend else { return nil }
+        guard backend != nil && structuredBackendReady, let backend else { return nil }
+        let hostID = selectedHostID
+        let generation = connectionGeneration
         do {
             var uploaded: [UploadResult] = []
             for attachment in attachments {
-                uploaded.append(try await backend.upload(data: attachment.data, filename: attachment.filename))
+                let result = try await backend.upload(data: attachment.data, filename: attachment.filename)
+                guard selectedHostID == hostID, connectionGeneration == generation, structuredBackendReady else { return nil }
+                uploaded.append(result)
             }
             return uploaded
         } catch {
@@ -453,14 +460,13 @@ public final class OpenPawModel {
         if let lifecycle = backend as? any StructuredBackendLifecycle { await lifecycle.disconnect() }
         await terminal.disconnect()
         let targetHostID = host.id
-        var terminalConnectedContinuation: CheckedContinuation<Void, Never>?
         var terminalConnectedAcknowledged = false
         func acknowledgeTerminalConnected() {
             guard !terminalConnectedAcknowledged else { return }
             terminalConnectedAcknowledged = true
-            terminalConnectedContinuation?.resume()
-            terminalConnectedContinuation = nil
+            self.resumeTerminalConnectAcknowledgement()
         }
+        resumeTerminalConnectAcknowledgement()
         stateTask?.cancel()
         stateTask = Task { [weak self, terminal] in
             var sawConnectedStateForAttempt = false
@@ -496,7 +502,7 @@ public final class OpenPawModel {
                     if connection.isConnected {
                         continuation.resume()
                     } else {
-                        terminalConnectedContinuation = continuation
+                        self.terminalConnectAcknowledgement = continuation
                     }
                 }
             }
@@ -504,7 +510,9 @@ public final class OpenPawModel {
             if let lifecycle = backend as? any StructuredBackendLifecycle {
                 do {
                     try await lifecycle.connect(hostID: targetHostID)
+                    guard selectedHostID == targetHostID, connection.isConnected else { return }
                     structuredBackendReady = await lifecycle.isReady
+                    guard selectedHostID == targetHostID, connection.isConnected, structuredBackendReady else { return }
                     await refresh()
                     startFollowing(session: selectedSessionID)
                 } catch {
@@ -529,16 +537,23 @@ public final class OpenPawModel {
         clearHostDerivedState()
         stateTask?.cancel()
         stateTask = nil
+        resumeTerminalConnectAcknowledgement()
         if let lifecycle = backend as? any StructuredBackendLifecycle { await lifecycle.disconnect() }
         structuredBackendReady = false
         await terminal?.disconnect()
         connection = .disconnected(reason: nil)
     }
 
+    private func resumeTerminalConnectAcknowledgement() {
+        terminalConnectAcknowledgement?.resume()
+        terminalConnectAcknowledgement = nil
+    }
+
     private func invalidateSelectedHostDerivedState() {
         stopFollowing()
         cancelTailscaleDiscovery()
         clearHostDerivedState()
+        resumeTerminalConnectAcknowledgement()
         structuredBackendReady = backend.map { !($0 is any StructuredBackendLifecycle) } ?? false
         if backend is any StructuredBackendLifecycle {
             structuredBackendReady = false

@@ -341,6 +341,12 @@ final class HostClientTests: XCTestCase {
             XCTAssertEqual(code, .malformedResponse)
             XCTAssertFalse(message.contains("token"))
         }
+        respond(status: 400, body: "raw bad request with token")
+        await assertThrows(try await makeClient().tailscaleDevices()) { error in
+            guard case .tailscaleDiscovery(let code, let message) = error else { return XCTFail("expected discovery error, got \(error)") }
+            XCTAssertEqual(code, .malformedResponse)
+            XCTAssertFalse(message.contains("token"))
+        }
     }
 
     func testResolveSendsTheActionTokenAndAcknowledgement() async throws {

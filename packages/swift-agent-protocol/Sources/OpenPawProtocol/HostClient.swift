@@ -214,6 +214,12 @@ public actor HostClient {
                     message: "The connected host returned an unsupported Tailscale discovery response."
                 )
             }
+            if case .badRequest = discovery {
+                throw HostClientError.tailscaleDiscovery(
+                    code: .malformedResponse,
+                    message: "The connected host returned an unsupported Tailscale discovery response."
+                )
+            }
             if case .server = discovery {
                 throw HostClientError.tailscaleDiscovery(
                     code: .malformedResponse,
