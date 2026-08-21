@@ -96,8 +96,7 @@ public struct TerminalScreenView: View {
     @State private var lineCount = 0
     @State private var isSelectionMenuPresented = false
     @State private var pinchBase: CGFloat?
-    @State private var isDictating = false
-    @State private var dictationDraft = ""
+    @State private var voice = VoiceComposition(destination: .terminal)
     @State private var dictationTask: Task<Void, Never>?
 
     #if os(iOS)
@@ -279,7 +278,7 @@ public struct TerminalScreenView: View {
 
     private func footer(width: RootWidth) -> some View {
         VStack(spacing: 0) {
-            if settings.dictationMode == .composer, isDictating || !dictationDraft.isEmpty {
+            if voice.isActive || !voice.draft.isEmpty {
                 dictationDraftRow
             }
             if settings.isShortcutBarVisible {
@@ -371,40 +370,39 @@ public struct TerminalScreenView: View {
     private var dictationButton: some View {
         let available = model.dictation?.isAvailable ?? false
         Button(action: toggleDictation) {
-            Image(systemName: isDictating ? "mic.fill" : "mic")
+            Image(systemName: voice.isActive ? "mic.fill" : "mic")
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(isDictating ? OpenPawTheme.textPrimary : OpenPawTheme.textSecondary)
+        .foregroundStyle(voice.isActive ? OpenPawTheme.textPrimary : OpenPawTheme.textSecondary)
         .disabled(!available)
         .accessibilityLabel(dictationVoiceLabel(available: available))
     }
 
     private func dictationVoiceLabel(available: Bool) -> String {
         guard available else { return "Dictation unavailable on this device" }
-        if isDictating { return "Stop dictation" }
-        return settings.dictationMode == .terminal ? "Dictate into the terminal" : "Dictate into a draft"
+        if voice.isActive { return "Stop dictation" }
+        return "Dictate into a terminal draft"
     }
 
     private var dictationDraftRow: some View {
         HStack(spacing: OpenPawTheme.Space.small) {
             Text("draft").microLabel()
-            TextField("Speak, then send", text: $dictationDraft)
+            TextField("Speak, then execute", text: $voice.draft)
                 .font(OpenPawTheme.Machine.body)
                 .foregroundStyle(OpenPawTheme.textPrimary)
                 .textFieldStyle(.plain)
-            Button("Send") {
-                let text = dictationDraft
-                dictationDraft = ""
+            Button("Execute") {
+                guard case .executeTerminal(let text) = voice.commit() else { return }
                 stopDictation()
-                Task { await model.send(prompt: text) }
+                send(text: text)
             }
             .buttonStyle(.plain)
             .font(OpenPawTheme.Machine.label)
             .frame(minHeight: 44)
             .foregroundStyle(OpenPawTheme.textPrimary)
-            .disabled(dictationDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(voice.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(.horizontal, OpenPawTheme.Space.medium)
         .padding(.vertical, OpenPawTheme.Space.tight)
@@ -539,43 +537,37 @@ public struct TerminalScreenView: View {
     // MARK: Dictation
 
     private func toggleDictation() {
-        isDictating ? stopDictation() : startDictation()
+        voice.isActive ? stopDictation() : startDictation()
     }
 
     private func startDictation() {
         guard let engine = model.dictation, engine.isAvailable else { return }
-        let mode = settings.dictationMode
+        let mode = VoiceDestination.terminal.dictationMode
         let locale = settings.dictationLocale
-        isDictating = true
-        dictationDraft = ""
+        voice.start()
         dictationTask = Task {
             do {
                 for try await update in engine.transcribe(locale: locale, mode: mode) {
-                    switch mode {
-                    case .composer:
-                        dictationDraft = update.text
-                    case .terminal:
-                        // Only finalized utterances are typed, so a refined transcript never double-types.
-                        if update.isFinal, let terminal = model.terminal {
-                            try await terminal.send(text: update.text)
-                        }
-                    }
+                    voice.apply(update)
                 }
             } catch is CancellationError {
                 // Stopping is not a failure.
             } catch {
                 model.present(error, while: "listening for dictation")
             }
-            isDictating = false
+            voice.stop()
         }
     }
 
     private func stopDictation() {
         let engine = model.dictation
-        dictationTask?.cancel()
+        voice.stop()
+        let task = dictationTask
         dictationTask = nil
-        isDictating = false
-        Task { await engine?.stop() }
+        Task {
+            await engine?.stop()
+            task?.cancel()
+        }
     }
 }
 

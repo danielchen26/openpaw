@@ -120,15 +120,12 @@ public struct ComposerView: View {
     private let engine: (any DictationEngine)?
     private let onSend: (String, [ComposerAttachment]) async -> Void
 
-    @State private var draft = ""
+    @State private var voice: VoiceComposition
     @State private var attachments: [ComposerAttachment] = []
     @State private var isSending = false
     @State private var isImporting = false
 
-    @State private var mode: DictationMode = .composer
     @State private var localeID: String
-    @State private var isDictating = false
-    @State private var partial = ""
     @State private var dictationTask: Task<Void, Never>?
     @State private var failure: String?
 
@@ -141,8 +138,8 @@ public struct ComposerView: View {
     ) {
         self.engine = engine
         self.onSend = onSend
-        // The device locale is the right default; the switcher exists for the second language, not the first.
-        self._localeID = State(initialValue: Self.normalize(Locale.current.identifier))
+        self._voice = State(initialValue: VoiceComposition(destination: .agent))
+        self._localeID = State(initialValue: VoiceLocaleChoices.normalize(Locale.current.identifier))
     }
 
     /// Present only when an engine exists and the platform granted it. An always-visible but permanently disabled
@@ -150,7 +147,7 @@ public struct ComposerView: View {
     private var hasDictation: Bool { engine?.isAvailable == true }
 
     private var canSend: Bool {
-        !isSending && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+        !isSending && (!voice.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
     }
 
     public var body: some View {
@@ -189,10 +186,10 @@ public struct ComposerView: View {
 
     @ViewBuilder
     private var editor: some View {
-        if isDictating {
+        if voice.isActive {
             liveTranscript
         } else {
-            TextEditor(text: $draft)
+            TextEditor(text: $voice.draft)
                 .font(OpenPawTheme.Human.prose)
                 .foregroundStyle(OpenPawTheme.textPrimary)
                 .scrollContentBackground(.hidden)
@@ -204,7 +201,7 @@ public struct ComposerView: View {
                         .fill(OpenPawTheme.well)
                 )
                 .overlay(alignment: .topLeading) {
-                    if draft.isEmpty {
+                    if voice.draft.isEmpty {
                         Text("Say what you want changed")
                             .font(OpenPawTheme.Human.prose)
                             .foregroundStyle(OpenPawTheme.textTertiary)
@@ -218,7 +215,7 @@ public struct ComposerView: View {
     }
 
     private var visibleLines: Int {
-        let hard = draft.reduce(into: 1) { total, character in
+        let hard = voice.draft.reduce(into: 1) { total, character in
             if character == "\n" { total += 1 }
         }
         return min(Self.maximumLines, max(1, hard))
@@ -230,7 +227,7 @@ public struct ComposerView: View {
             HStack(spacing: OpenPawTheme.Space.small) {
                 Text("listening · \(localeID)").microLabel(OpenPawTheme.warn)
                 Spacer(minLength: 0)
-                Text(mode == .composer ? "to draft" : "to terminal").microLabel(OpenPawTheme.warn)
+                Text(voice.destination == .agent ? "to draft" : "to terminal").microLabel(OpenPawTheme.warn)
             }
 
             Text(spokenSoFar)
@@ -245,12 +242,12 @@ public struct ComposerView: View {
                 )
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Listening in \(localeID). \(partial)")
+        .accessibilityLabel("Listening in \(localeID). \(voice.partialTranscript)")
     }
 
     /// Draft in primary ink, the live guess in secondary, so it is obvious which words are committed.
     private var spokenSoFar: AttributedString {
-        let split = DictationDraft.inProgress(draft: draft, partial: partial, mode: mode)
+        let split = DictationDraft.inProgress(draft: voice.draft, partial: voice.partialTranscript, mode: voice.destination.dictationMode)
         var text = AttributedString(split.committed)
         text.foregroundColor = OpenPawTheme.textPrimary
         var live = AttributedString(split.live)
@@ -288,13 +285,14 @@ public struct ComposerView: View {
     /// tinted `warn` while armed for the terminal, and the word is what carries the meaning if the tint does not.
     private var modeToggle: some View {
         Button {
-            mode = mode == .composer ? .terminal : .composer
+            let next: VoiceDestination = voice.destination == .agent ? .terminal : .agent
+            voice.switchDestination(to: next)
         } label: {
-            Text(mode == .composer ? "draft" : "terminal")
+            Text(voice.destination == .agent ? "draft" : "terminal")
                 .font(OpenPawTheme.Machine.label)
                 .textCase(.uppercase)
                 .tracking(0.9)
-                .foregroundStyle(mode == .composer ? OpenPawTheme.textSecondary : OpenPawTheme.warn)
+                .foregroundStyle(voice.destination == .agent ? OpenPawTheme.textSecondary : OpenPawTheme.warn)
                 .padding(.horizontal, OpenPawTheme.Space.small)
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
@@ -303,14 +301,14 @@ public struct ComposerView: View {
         .overlay(
             RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card)
                 .strokeBorder(
-                    mode == .composer ? OpenPawTheme.line : OpenPawTheme.warn,
+                    voice.destination == .agent ? OpenPawTheme.line : OpenPawTheme.warn,
                     lineWidth: OpenPawTheme.hairline * 3
                 )
         )
         .accessibilityLabel(
-            mode == .composer
-                ? "Dictation goes to the draft. Switches to sending straight to the terminal."
-                : "Dictation goes straight to the terminal. Switches to keeping a draft."
+            voice.destination == .agent
+                ? "Dictation goes to the draft. Switches to terminal draft."
+                : "Dictation goes to a terminal draft. Switches to keeping an agent draft."
         )
     }
 
@@ -336,15 +334,15 @@ public struct ComposerView: View {
     /// Press and hold to talk. Holding is the right gesture for a walk-and-talk product: it cannot be left running
     /// by accident, and letting go is a decision, not a second aimed tap.
     private var microphone: some View {
-        Image(systemName: isDictating ? "waveform" : "mic")
+        Image(systemName: voice.isActive ? "waveform" : "mic")
             .imageScale(.medium)
-            .foregroundStyle(isDictating ? OpenPawTheme.warn : OpenPawTheme.textSecondary)
+            .foregroundStyle(voice.isActive ? OpenPawTheme.warn : OpenPawTheme.textSecondary)
             .frame(minWidth: 44, minHeight: 44)
             .contentShape(Rectangle())
             .overlay(
                 RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card)
                     .strokeBorder(
-                        isDictating ? OpenPawTheme.warn : OpenPawTheme.line,
+                        voice.isActive ? OpenPawTheme.warn : OpenPawTheme.line,
                         lineWidth: OpenPawTheme.hairline * 3
                     )
             )
@@ -354,7 +352,7 @@ public struct ComposerView: View {
                     .onEnded { _ in stopDictation() }
             )
             .accessibilityLabel("Hold to dictate")
-            .accessibilityHint(mode == .composer ? "Words land in the draft" : "Words go straight to the terminal")
+            .accessibilityHint(voice.destination == .agent ? "Words land in the draft" : "Words land in a terminal draft")
     }
 
     private var sendButton: some View {
@@ -472,12 +470,12 @@ public struct ComposerView: View {
 
     private func send() {
         guard canSend else { return }
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = voice.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let payload = attachments
         isSending = true
         Task {
             await onSend(text, payload)
-            draft = ""
+            voice.draft = ""
             attachments = []
             isSending = false
         }
@@ -486,11 +484,11 @@ public struct ComposerView: View {
     // MARK: Dictation
 
     private var localeChoices: [String] {
-        DictationDraft.localeChoices(deviceLocale: localeID)
+        VoiceLocaleChoices.choices(deviceLocale: localeID)
     }
 
     static func normalize(_ identifier: String) -> String {
-        DictationDraft.normalize(identifier)
+        VoiceLocaleChoices.normalize(identifier)
     }
 
     static func name(for identifier: String) -> String {
@@ -499,54 +497,33 @@ public struct ComposerView: View {
     }
 
     private func startDictation() {
-        guard let engine, engine.isAvailable, !isDictating else { return }
-        isDictating = true
-        partial = ""
+        guard let engine, engine.isAvailable, !voice.isActive else { return }
+        voice.start()
         failure = nil
         let locale = Locale(identifier: localeID)
-        let mode = self.mode
+        let destination = voice.destination
         dictationTask = Task {
             do {
-                for try await update in engine.transcribe(locale: locale, mode: mode) {
-                    // A finished phrase in terminal mode goes out immediately — that is what "straight to the
-                    // terminal" means, and waiting for the release would just be a slower draft.
-                    if mode == .terminal, update.isFinal {
-                        let phrase = update.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                        partial = ""
-                        if !phrase.isEmpty { await onSend(phrase, []) }
-                    } else {
-                        partial = update.text
-                    }
+                for try await update in engine.transcribe(locale: locale, mode: destination.dictationMode) {
+                    voice.apply(update)
                 }
             } catch is CancellationError {
                 return
             } catch {
                 failure = "Dictation stopped: \(error.localizedDescription). Check microphone access and hold again."
-                isDictating = false
+                voice.stop()
             }
         }
     }
 
     private func stopDictation() {
-        guard isDictating else { return }
-        isDictating = false
-        let tail = partial.trimmingCharacters(in: .whitespacesAndNewlines)
-        let mode = self.mode
-        partial = ""
+        guard voice.isActive else { return }
+        voice.stop()
         let task = dictationTask
         dictationTask = nil
         Task {
             await engine?.stop()
             task?.cancel()
-            guard !tail.isEmpty else { return }
-            switch mode {
-            case .composer:
-                // Kept as an editable draft: speech recognition is wrong often enough that sending unread is
-                // the wrong default when the words are about to change someone's repository.
-                draft = DictationDraft.committing(draft: draft, phrase: tail)
-            case .terminal:
-                await onSend(tail, [])
-            }
         }
     }
 }
