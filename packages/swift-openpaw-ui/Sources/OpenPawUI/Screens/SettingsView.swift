@@ -391,13 +391,21 @@ public struct SettingsView: View {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
                 VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
                     Text("Language").microLabel()
+                    // `.menu` explicitly: the automatic style collapses to a bare chevron here, leaving no way to
+                    // see which language speech is being recognised as. `.labelsHidden()` drops the picker's own
+                    // "Language" title, which the row above already states, while the menu keeps showing the
+                    // selected value.
                     Picker("Language", selection: bind(\.dictationLocaleID)) {
                         ForEach(localeChoices, id: \.self) { identifier in
                             Text(localeName(identifier)).tag(identifier)
                         }
                     }
+                    .pickerStyle(.menu)
                     .labelsHidden()
+                    .font(OpenPawTheme.Machine.body)
                     .frame(minHeight: 44)
+                    .accessibilityLabel("Dictation language")
+                    .accessibilityValue(localeName(settings.dictationLocaleID))
                     Text(VoicePrivacyDisclosure.appleSpeech)
                         .font(OpenPawTheme.Human.caption)
                         .foregroundStyle(OpenPawTheme.textTertiary)
