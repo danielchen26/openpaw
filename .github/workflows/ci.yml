@@ -54,11 +54,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [swift-agent-protocol, swift-terminal-core, swift-ssh-transport, swift-openpaw-ui]
+        package: [swift-agent-protocol, swift-terminal-core, swift-ssh-transport, swift-openpaw-ui, swift-openpaw-notifications]
     steps:
       - uses: actions/checkout@v5
       - name: test
         run: swift test
+        working-directory: packages/${{ matrix.package }}
+      - name: release build
+        run: swift build -c release
         working-directory: packages/${{ matrix.package }}
 
   app:
