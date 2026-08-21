@@ -11,7 +11,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Json;
+use axum::response::{IntoResponse, Response};
+use axum::{Json, http::StatusCode};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
@@ -56,6 +57,22 @@ pub enum TailscaleUnavailable {
     Timeout(String),
     /// The fixed command produced more output than the bounded limit.
     OutputLimit(String),
+}
+
+/// Structured unavailable response body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TailscaleUnavailableResponse {
+    /// Typed safe error.
+    pub error: TailscaleUnavailable,
+}
+
+/// Parser error for Tailscale status JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TailscaleParseError {
+    /// Status JSON reports Tailscale is unavailable.
+    Unavailable(TailscaleUnavailable),
+    /// Status JSON is malformed or has an unsupported shape.
+    Malformed(String),
 }
 
 impl TailscaleUnavailable {
@@ -111,34 +128,41 @@ pub struct TailscaleDeviceCandidate {
 /// Route handler for `GET /v1/tailscale/devices`.
 pub async fn devices(
     axum::extract::State(app): axum::extract::State<crate::AppState>,
-) -> Result<Json<TailscaleDevicesResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let bytes = app
         .tailscale
         .status_json()
         .await
-        .map_err(unavailable_error)?;
-    parse_status_json(&bytes)
-        .map(Json)
-        .map_err(|err| ApiError::internal(format!("malformed tailscale status json: {err}")))
+        .map_err(unavailable_response)?;
+    match parse_status_json(&bytes) {
+        Ok(response) => Ok(Json(response).into_response()),
+        Err(TailscaleParseError::Unavailable(err)) => Err(unavailable_response(err)),
+        Err(TailscaleParseError::Malformed(err)) => Err(ApiError::internal(format!(
+            "malformed tailscale status json: {err}"
+        ))),
+    }
 }
 
-fn unavailable_error(err: TailscaleUnavailable) -> ApiError {
+fn unavailable_response(err: TailscaleUnavailable) -> ApiError {
     let status = match err {
         TailscaleUnavailable::MissingCli(_) | TailscaleUnavailable::LoggedOut(_) => {
-            axum::http::StatusCode::SERVICE_UNAVAILABLE
+            StatusCode::SERVICE_UNAVAILABLE
         }
-        TailscaleUnavailable::Timeout(_) => axum::http::StatusCode::GATEWAY_TIMEOUT,
-        TailscaleUnavailable::OutputLimit(_) => axum::http::StatusCode::BAD_GATEWAY,
+        TailscaleUnavailable::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+        TailscaleUnavailable::OutputLimit(_) => StatusCode::BAD_GATEWAY,
     };
-    ApiError::new(
-        status,
-        serde_json::to_string(&err).unwrap_or_else(|_| "Tailscale is unavailable.".to_owned()),
-    )
+    ApiError::json(status, serde_json::json!({ "error": err }))
 }
 
 /// Parse `tailscale status --json` into sanitized candidates.
-pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, String> {
-    let value: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, TailscaleParseError> {
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|e| TailscaleParseError::Malformed(e.to_string()))?;
+    if is_logged_out_status(&value) {
+        return Err(TailscaleParseError::Unavailable(
+            TailscaleUnavailable::logged_out(),
+        ));
+    }
     let peers = if let Some(peer) = value.get("Peer") {
         peer
     } else if value.is_array() {
@@ -146,7 +170,9 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, Strin
     } else if let Some(peers) = value.get("peers") {
         peers
     } else {
-        return Err("unsupported tailscale status shape".to_owned());
+        return Err(TailscaleParseError::Malformed(
+            "unsupported tailscale status shape".to_owned(),
+        ));
     };
 
     let values: Vec<&Value> = if let Some(map) = peers.as_object() {
@@ -154,7 +180,9 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, Strin
     } else if let Some(array) = peers.as_array() {
         array.iter().collect()
     } else {
-        return Err("unsupported tailscale peer shape".to_owned());
+        return Err(TailscaleParseError::Malformed(
+            "unsupported tailscale peer shape".to_owned(),
+        ));
     };
 
     let mut candidates = Vec::new();
@@ -168,6 +196,19 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, Strin
         version: 1,
         candidates,
     })
+}
+
+fn is_logged_out_status(value: &Value) -> bool {
+    let backend_state = value
+        .get("BackendState")
+        .or_else(|| value.get("backend_state"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        backend_state.as_str(),
+        "needslogin" | "needs_login" | "stopped" | "no_state"
+    )
 }
 
 fn candidate_from_peer(peer: &Value) -> Option<TailscaleDeviceCandidate> {
@@ -237,9 +278,10 @@ async fn run_status_command(
     let mut child = Command::new("tailscale")
         .arg("status")
         .arg("--json")
+        .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -318,5 +360,14 @@ mod tests {
     fn rejects_malformed_and_unsupported_json() {
         assert!(parse_status_json(b"not json").is_err());
         assert!(parse_status_json(br#"{"Self":{}}"#).is_err());
+    }
+
+    #[test]
+    fn backend_state_needs_login_is_typed_logged_out() {
+        let err = parse_status_json(br#"{"BackendState":"NeedsLogin","Peer":{}}"#).unwrap_err();
+        assert!(matches!(
+            err,
+            TailscaleParseError::Unavailable(TailscaleUnavailable::LoggedOut(_))
+        ));
     }
 }

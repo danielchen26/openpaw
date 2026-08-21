@@ -34,6 +34,7 @@ use crate::auth::{self, Capability};
 pub struct ApiError {
     status: StatusCode,
     message: String,
+    body: Option<serde_json::Value>,
 }
 
 impl ApiError {
@@ -42,6 +43,16 @@ impl ApiError {
         ApiError {
             status,
             message: message.into(),
+            body: None,
+        }
+    }
+
+    /// Error with a pre-shaped safe JSON body.
+    pub fn json(status: StatusCode, body: serde_json::Value) -> ApiError {
+        ApiError {
+            status,
+            message: String::new(),
+            body: Some(body),
         }
     }
 
@@ -90,7 +101,11 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({ "error": self.message }))).into_response()
+        if let Some(body) = self.body {
+            (self.status, Json(body)).into_response()
+        } else {
+            (self.status, Json(json!({ "error": self.message }))).into_response()
+        }
     }
 }
 

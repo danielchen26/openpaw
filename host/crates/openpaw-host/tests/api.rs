@@ -1224,6 +1224,12 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
             "output_limit",
         ),
     ] {
+        let expected_message = match &unavailable {
+            TailscaleUnavailable::MissingCli(message)
+            | TailscaleUnavailable::LoggedOut(message)
+            | TailscaleUnavailable::Timeout(message)
+            | TailscaleUnavailable::OutputLimit(message) => message.clone(),
+        };
         let runner = Arc::new(FakeTailscaleRunner {
             result: Err(unavailable),
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -1232,8 +1238,25 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
         let response = harness.get("/v1/tailscale/devices").await;
         assert_eq!(response.status(), expected_status);
         let body: Value = response.json().await.unwrap();
-        assert!(body["error"].as_str().unwrap().contains(expected_code));
+        assert_eq!(
+            body,
+            json!({ "error": { "code": expected_code, "message": expected_message } })
+        );
     }
+
+    let runner = Arc::new(FakeTailscaleRunner {
+        result: Ok(br#"{"BackendState":"NeedsLogin","Peer":{}}"#.to_vec()),
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
+    let logged_out_json = harness.get("/v1/tailscale/devices").await;
+    assert_eq!(logged_out_json.status(), 503);
+    let body: Value = logged_out_json.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "logged_out");
+    assert_eq!(
+        body["error"]["message"],
+        "Tailscale is installed but not logged in on the connected host."
+    );
 
     let runner = Arc::new(FakeTailscaleRunner {
         result: Ok(b"not json".to_vec()),
