@@ -9,16 +9,13 @@ public struct WorkspaceCard: View {
         self.action = action
     }
 
-    public nonisolated var orderedMetrics: [WorkspaceMetric] {
-        presentation.metrics
-    }
-
     public var body: some View {
         let signal = ConnectionSignal(availability: presentation.availability)
 
         VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
             HStack(alignment: .top, spacing: OpenPawTheme.Space.medium) {
                 SignalOrb(signal: signal, size: 24)
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
                     Text(presentation.title)
@@ -39,7 +36,7 @@ public struct WorkspaceCard: View {
             }
 
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: OpenPawTheme.Space.small)], spacing: OpenPawTheme.Space.small) {
-                ForEach(orderedMetrics) { metric in
+                ForEach(presentation.metrics) { metric in
                     VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
                         Text(metric.label)
                             .microLabel()

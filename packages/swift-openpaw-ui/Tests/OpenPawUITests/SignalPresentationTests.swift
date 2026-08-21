@@ -24,6 +24,7 @@ struct SignalPresentationTests {
             (.online, "Online", "checkmark.circle.fill", .pulse, false),
             (.degraded, "Degraded", "exclamationmark.triangle.fill", .caution, true),
             (.offline, "Offline", "moon.zzz.fill", .quiet, false),
+            (.failed, "Failed", "xmark.octagon.fill", .caution, false),
             (.blocked, "Blocked", "lock.trianglebadge.exclamationmark.fill", .blocked, false),
         ]
 
@@ -45,14 +46,21 @@ struct SignalPresentationTests {
         #expect(Set(glyphs).count == ConnectionSignalState.allCases.count)
     }
 
-    @Test("Offline and blocked remain distinguishable without color")
-    func offlineAndBlockedAreNonColorDistinct() {
+    @Test("Offline, failed, and blocked remain distinguishable without color")
+    func offlineFailedAndBlockedAreNonColorDistinct() {
         let offline = ConnectionSignal(.offline)
+        let failed = ConnectionSignal(.failed)
         let blocked = ConnectionSignal(.blocked)
 
         #expect(offline.label != blocked.label)
+        #expect(offline.label != failed.label)
+        #expect(failed.label != blocked.label)
         #expect(offline.glyph != blocked.glyph)
+        #expect(offline.glyph != failed.glyph)
+        #expect(failed.glyph != blocked.glyph)
         #expect(offline.accessibilityLabel != blocked.accessibilityLabel)
+        #expect(offline.accessibilityLabel != failed.accessibilityLabel)
+        #expect(failed.accessibilityLabel != blocked.accessibilityLabel)
     }
 
     @Test("Motion policy disables rotation for reduce motion or inactive app")
@@ -69,21 +77,7 @@ struct SignalPresentationTests {
         #expect(ConnectionSignal(availability: .connecting).state == .connecting)
         #expect(ConnectionSignal(availability: .online).state == .online)
         #expect(ConnectionSignal(availability: .offline).state == .offline)
-        #expect(ConnectionSignal(availability: .failed).state == .blocked)
-    }
-
-    @Test("Workspace card consumes deterministic presentation metric order")
-    func workspaceCardUsesStableMetricOrder() {
-        let host = fixture(preferredTransport: .mosh, multiplexerPreference: .zellij)
-        let presentation = WorkspaceDevicePresentation(
-            host: host,
-            selectedHostID: host.id,
-            activeSessionCount: 3,
-            pendingApprovalCount: 2
-        )
-        let card = WorkspaceCard(presentation: presentation) {}
-
-        #expect(card.orderedMetrics.map(\.id) == ["active-sessions", "pending-approvals", "transport", "multiplexer"])
+        #expect(ConnectionSignal(availability: .failed).state == .failed)
     }
 }
 

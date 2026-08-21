@@ -6,6 +6,7 @@ public enum ConnectionSignalState: String, CaseIterable, Sendable, Hashable {
     case online
     case degraded
     case offline
+    case failed
     case blocked
 }
 
@@ -42,7 +43,7 @@ public struct ConnectionSignal: Sendable, Hashable, Identifiable {
         case .connecting: self.init(.connecting)
         case .online: self.init(.online)
         case .offline: self.init(.offline)
-        case .failed: self.init(.blocked)
+        case .failed: self.init(.failed)
         }
     }
 
@@ -53,6 +54,7 @@ public struct ConnectionSignal: Sendable, Hashable, Identifiable {
         case .online: "Online"
         case .degraded: "Degraded"
         case .offline: "Offline"
+        case .failed: "Failed"
         case .blocked: "Blocked"
         }
     }
@@ -64,6 +66,7 @@ public struct ConnectionSignal: Sendable, Hashable, Identifiable {
         case .online: "checkmark.circle.fill"
         case .degraded: "exclamationmark.triangle.fill"
         case .offline: "moon.zzz.fill"
+        case .failed: "xmark.octagon.fill"
         case .blocked: "lock.trianglebadge.exclamationmark.fill"
         }
     }
@@ -75,6 +78,7 @@ public struct ConnectionSignal: Sendable, Hashable, Identifiable {
         case .online: .pulse
         case .degraded: .caution
         case .offline: .quiet
+        case .failed: .caution
         case .blocked: .blocked
         }
     }
@@ -146,6 +150,7 @@ public struct SignalOrb: View {
             }
         }
         .frame(width: size, height: size)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(signal.accessibilityLabel))
     }
 }
