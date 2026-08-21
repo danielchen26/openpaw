@@ -250,6 +250,11 @@ public final class OpenPawModel {
         tailscaleDiscovery = .idle
     }
 
+    @_spi(SnapshotTesting) public func setTailscaleDiscoveryForSnapshot(_ state: TailscaleDiscoveryState) {
+        tailscaleDiscoveryTask?.cancel()
+        tailscaleDiscovery = state
+    }
+
     public func stopFollowing() {
         eventTask?.cancel()
         eventTask = nil

@@ -294,6 +294,65 @@ enum ScreenCatalog {
             },
             unavailableReason: ""
         ),
+
+        Screen(
+            name: "AddDeviceFlow-tailscale-loading",
+            build: { _, _ in
+                var state = AddDeviceFlowState(hosts: [])
+                state.startTailscaleDiscovery()
+                let model = OpenPawModel(hostStore: HostStore())
+                model.setTailscaleDiscoveryForSnapshot(.loading)
+                return AnyView(NavigationStack { AddDeviceFlow(model: model, settings: OpenPawSettings.preview(), state: state, onDismiss: {}) })
+            },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "AddDeviceFlow-tailscale-candidates",
+            build: { _, _ in
+                var state = AddDeviceFlowState(hosts: [])
+                state.startTailscaleDiscovery()
+                let model = OpenPawModel(hostStore: HostStore())
+                model.setTailscaleDiscoveryForSnapshot(.candidates([
+                    TailscaleDeviceCandidate(id: "node-studio", displayName: "Studio", dnsName: "studio.tail123.ts.net", tailscaleIPs: ["100.64.0.10"], os: "macOS", online: true),
+                    TailscaleDeviceCandidate(id: "node-lab", displayName: "Lab mini", dnsName: nil, tailscaleIPs: ["100.64.0.11"], os: "linux", online: false)
+                ]))
+                return AnyView(NavigationStack { AddDeviceFlow(model: model, settings: OpenPawSettings.preview(), state: state, onDismiss: {}) })
+            },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "AddDeviceFlow-tailscale-no-connected-host",
+            build: { _, _ in
+                var state = AddDeviceFlowState(hosts: [])
+                state.startTailscaleDiscovery()
+                let model = OpenPawModel(hostStore: HostStore())
+                model.setTailscaleDiscoveryForSnapshot(.noConnectedHost)
+                return AnyView(NavigationStack { AddDeviceFlow(model: model, settings: OpenPawSettings.preview(), state: state, onDismiss: {}) })
+            },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "AddDeviceFlow-tailscale-busy",
+            build: { _, _ in
+                var state = AddDeviceFlowState(hosts: [])
+                state.startTailscaleDiscovery()
+                let model = OpenPawModel(hostStore: HostStore())
+                model.setTailscaleDiscoveryForSnapshot(.unavailable(code: .busy, message: "Tailscale status is already running on the connected host."))
+                return AnyView(NavigationStack { AddDeviceFlow(model: model, settings: OpenPawSettings.preview(), state: state, onDismiss: {}) })
+            },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "AddDeviceFlow-tailscale-malformed",
+            build: { _, _ in
+                var state = AddDeviceFlowState(hosts: [])
+                state.startTailscaleDiscovery()
+                let model = OpenPawModel(hostStore: HostStore())
+                model.setTailscaleDiscoveryForSnapshot(.failure(message: "The connected host returned an unsupported Tailscale discovery response."))
+                return AnyView(NavigationStack { AddDeviceFlow(model: model, settings: OpenPawSettings.preview(), state: state, onDismiss: {}) })
+            },
+            unavailableReason: ""
+        ),
         Screen(
             name: "AddDeviceFlow-candidate-confirmation",
             build: { _, _ in

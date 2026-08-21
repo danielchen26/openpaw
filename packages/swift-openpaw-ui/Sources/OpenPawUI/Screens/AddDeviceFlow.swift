@@ -69,6 +69,11 @@ public struct AddDeviceFlowState: Sendable, Hashable {
         step = .confirmCandidate
     }
 
+    public mutating func selectCandidate(id: AddDeviceCandidate.ID, from candidates: [AddDeviceCandidate]) {
+        discovered = candidates
+        selectCandidate(id: id)
+    }
+
     public mutating func selectCandidate(id: UUID) {
         selectCandidate(id: id.uuidString)
     }
@@ -164,8 +169,14 @@ public struct AddDeviceFlow: View {
                     model: model,
                     settings: settings,
                     initialDraft: draft ?? HostDraft(),
-                    onDismiss: onDismiss,
-                    onCancel: { state.back() }
+                    onDismiss: {
+                        model.cancelTailscaleDiscovery()
+                        onDismiss()
+                    },
+                    onCancel: {
+                        model.cancelTailscaleDiscovery()
+                        state.back()
+                    }
                 )
             }
         }
@@ -173,11 +184,22 @@ public struct AddDeviceFlow: View {
         .navigationTitle(AddDeviceFlowCopy.title)
         .toolbar {
             if state.step == .welcome {
-                ToolbarItem(placement: .cancellationAction) { Button("Close", action: onDismiss) }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        model.cancelTailscaleDiscovery()
+                        onDismiss()
+                    }
+                }
             } else if state.step != .editDetails {
-                ToolbarItem(placement: .cancellationAction) { Button("Back") { state.back() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Back") {
+                        model.cancelTailscaleDiscovery()
+                        state.back()
+                    }
+                }
             }
         }
+        .onDisappear { model.cancelTailscaleDiscovery() }
     }
 
     private var welcome: some View {
@@ -198,6 +220,7 @@ public struct AddDeviceFlow: View {
                             model.refreshTailscaleDevices()
                         }
                         actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
+                            model.cancelTailscaleDiscovery()
                             draft = state.startManualSSH()
                         }
                     }
@@ -207,10 +230,10 @@ public struct AddDeviceFlow: View {
                             model.refreshTailscaleDevices()
                         }
                         actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
+                            model.cancelTailscaleDiscovery()
                             draft = state.startManualSSH()
                         }
                     }
-                    actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") { draft = state.startManualSSH() }
                 }
             }
             .padding(OpenPawTheme.Space.xl)
@@ -233,11 +256,12 @@ public struct AddDeviceFlow: View {
                         .font(OpenPawTheme.Human.prose)
                         .foregroundStyle(OpenPawTheme.textSecondary)
                     actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
+                        model.cancelTailscaleDiscovery()
                         draft = state.startManualSSH()
                     }
                 } else {
                     ForEach(discovered) { candidate in
-                        Button { state.selectCandidate(id: candidate.id) } label: {
+                        Button { state.selectCandidate(id: candidate.id, from: discovered) } label: {
                             candidateRow(candidate)
                         }
                         .buttonStyle(.plain)

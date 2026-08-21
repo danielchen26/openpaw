@@ -198,11 +198,29 @@ public actor HostClient {
     public func tailscaleDevices() async throws -> TailscaleDevicesResponse {
         let request = try makeRequest(method: "GET", path: "/v1/tailscale/devices")
         do {
-            return try decode(TailscaleDevicesResponse.self, from: try await send(request))
-        } catch HostClientError.decoding {
-            throw HostClientError.tailscaleDiscovery(code: .malformedResponse, message: "The connected host returned an unsupported Tailscale discovery response.")
-        } catch HostClientError.server {
-            throw HostClientError.tailscaleDiscovery(code: .malformedResponse, message: "The connected host returned an unsupported Tailscale discovery response.")
+            let response = try decode(TailscaleDevicesResponse.self, from: try await send(request))
+            guard response.isSupportedVersion else {
+                throw HostClientError.tailscaleDiscovery(
+                    code: .unsupportedVersion,
+                    message: "The connected host returned an unsupported Tailscale discovery response."
+                )
+            }
+            return response
+        } catch let discovery as HostClientError {
+            if case .tailscaleDiscovery = discovery { throw discovery }
+            if case .decoding = discovery {
+                throw HostClientError.tailscaleDiscovery(
+                    code: .malformedResponse,
+                    message: "The connected host returned an unsupported Tailscale discovery response."
+                )
+            }
+            if case .server = discovery {
+                throw HostClientError.tailscaleDiscovery(
+                    code: .malformedResponse,
+                    message: "The connected host returned an unsupported Tailscale discovery response."
+                )
+            }
+            throw discovery
         }
     }
 

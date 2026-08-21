@@ -660,9 +660,11 @@ public enum DiffMode: Sendable, Hashable {
 
 
 public struct TailscaleDevicesResponse: Codable, Sendable, Hashable {
+    public static let supportedVersion = 1
     public let version: Int
     public let candidates: [TailscaleDeviceCandidate]
     public init(version: Int, candidates: [TailscaleDeviceCandidate]) { self.version = version; self.candidates = candidates }
+    public var isSupportedVersion: Bool { version == Self.supportedVersion }
 }
 
 public struct TailscaleDeviceCandidate: Codable, Sendable, Hashable, Identifiable {
@@ -677,7 +679,51 @@ public struct TailscaleDeviceCandidate: Codable, Sendable, Hashable, Identifiabl
     enum CodingKeys: String, CodingKey { case id; case displayName = "display_name"; case dnsName = "dns_name"; case tailscaleIPs = "tailscale_ips"; case os; case online; case lastSeen = "last_seen" }
 }
 
-public enum TailscaleDiscoveryErrorCode: String, Codable, Sendable, Hashable { case missingCLI = "missing_cli"; case loggedOut = "logged_out"; case timeout; case outputLimit = "output_limit"; case malformedResponse = "malformed_response"; case unavailable }
+public enum TailscaleDiscoveryErrorCode: Codable, Sendable, Hashable {
+    case missingCLI
+    case loggedOut
+    case timeout
+    case outputLimit
+    case busy
+    case malformedResponse
+    case unsupportedVersion
+    case unavailable
+    case unknown(String)
+
+    public var rawValue: String {
+        switch self {
+        case .missingCLI: "missing_cli"
+        case .loggedOut: "logged_out"
+        case .timeout: "timeout"
+        case .outputLimit: "output_limit"
+        case .busy: "busy"
+        case .malformedResponse: "malformed_response"
+        case .unsupportedVersion: "unsupported_version"
+        case .unavailable: "unavailable"
+        case .unknown(let value): value
+        }
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = switch raw {
+        case "missing_cli": .missingCLI
+        case "logged_out": .loggedOut
+        case "timeout": .timeout
+        case "output_limit": .outputLimit
+        case "busy": .busy
+        case "malformed_response": .malformedResponse
+        case "unsupported_version": .unsupportedVersion
+        case "unavailable": .unavailable
+        default: .unknown(raw)
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
 
 public struct TailscaleDiscoveryErrorEnvelope: Codable, Sendable, Hashable {
     public struct Payload: Codable, Sendable, Hashable { public let code: TailscaleDiscoveryErrorCode; public let message: String; public init(code: TailscaleDiscoveryErrorCode, message: String) { self.code = code; self.message = message } }

@@ -295,6 +295,54 @@ final class HostClientTests: XCTestCase {
         )
     }
 
+
+    func testTailscaleDevicesDecodesSuccessAndSignsExactReadOnlyRoute() async throws {
+        respond(status: 200, body: #"{"version":1,"candidates":[{"id":"node-1","display_name":"Studio","dns_name":"studio.tail.ts.net","tailscale_ips":["100.64.0.10"],"os":"macOS","online":true,"last_seen":"2026-08-21T07:00:00Z"}]}"#)
+        let response = try await makeClient().tailscaleDevices()
+        XCTAssertEqual(response.version, 1)
+        XCTAssertEqual(response.candidates.first?.id, "node-1")
+        XCTAssertEqual(response.candidates.first?.displayName, "Studio")
+        let request = try XCTUnwrap(StubResponder.shared.recorded.first)
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertEqual(request.url?.path, "/v1/tailscale/devices")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer tok_secret")
+        XCTAssertNotNil(request.value(forHTTPHeaderField: RequestSigner.Header.signature))
+    }
+
+    func testTailscaleBusyAndUnknownCodesDecodeWithoutRawBodyLeak() async {
+        respond(status: 503, body: #"{"error":{"code":"busy","message":"Tailscale status is already running"},"debug":"raw secret"}"#)
+        await assertThrows(try await makeClient().tailscaleDevices()) { error in
+            guard case .tailscaleDiscovery(let code, let message) = error else { return XCTFail("expected discovery error, got \(error)") }
+            XCTAssertEqual(code, .busy)
+            XCTAssertEqual(message, "Tailscale status is already running")
+            XCTAssertFalse(String(describing: error).contains("raw secret"))
+        }
+
+        respond(status: 500, body: #"{"error":{"code":"future_code","message":"Future safe message"},"stderr":"secret"}"#)
+        await assertThrows(try await makeClient().tailscaleDevices()) { error in
+            guard case .tailscaleDiscovery(let code, let message) = error else { return XCTFail("expected discovery error, got \(error)") }
+            XCTAssertEqual(code, .unknown("future_code"))
+            XCTAssertEqual(message, "Future safe message")
+            XCTAssertFalse(String(describing: error).contains("secret"))
+        }
+    }
+
+    func testTailscaleUnsupportedVersionAndMalformedBodyAreSafe() async {
+        respond(status: 200, body: #"{"version":2,"candidates":[]}"#)
+        await assertThrows(try await makeClient().tailscaleDevices()) { error in
+            guard case .tailscaleDiscovery(let code, let message) = error else { return XCTFail("expected discovery error, got \(error)") }
+            XCTAssertEqual(code, .unsupportedVersion)
+            XCTAssertFalse(message.contains("version"))
+        }
+
+        respond(status: 500, body: "raw panic with token")
+        await assertThrows(try await makeClient().tailscaleDevices()) { error in
+            guard case .tailscaleDiscovery(let code, let message) = error else { return XCTFail("expected discovery error, got \(error)") }
+            XCTAssertEqual(code, .malformedResponse)
+            XCTAssertFalse(message.contains("token"))
+        }
+    }
+
     func testResolveSendsTheActionTokenAndAcknowledgement() async throws {
         respond(status: 200, body: #"{"status":"resolved","event_id":"evt_abc"}"#)
         let result = try await makeClient().resolve(

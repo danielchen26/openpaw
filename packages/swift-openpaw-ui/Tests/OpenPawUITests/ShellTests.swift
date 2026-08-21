@@ -269,6 +269,25 @@ struct RootNavigationTests {
     }
 
     @MainActor
+    @Test("Host switch and same-host reconnect advance the connection generation")
+    func connectionGenerationInvalidatesSessionRows() {
+        let first = hostRecord()
+        let second = HostRecord(nickname: "bench", hostname: "10.0.0.5", username: "chet", auth: .agentForwarding)
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]))
+        let initial = model.connectionGeneration
+
+        model.connection = .connected(.ssh)
+        #expect(model.connectionGeneration == initial + 1)
+
+        model.connection = .idle
+        model.connection = .connected(.ssh)
+        #expect(model.connectionGeneration == initial + 3)
+
+        model.selectedHostID = second.id
+        #expect(model.connectionGeneration == initial + 4)
+    }
+
+    @MainActor
     @Test("An empty first-run host store never calls the host API")
     func emptyHostStoreRefreshIsLocalOnly() async {
         let backend = RecordingBackend()
@@ -343,6 +362,14 @@ private final class RecordingBackend: OpenPawBackend, @unchecked Sendable {
         defer { lock.unlock() }
         return calls
     }
+
+    func callCount(_ name: String) -> Int {
+        callNames.filter { $0 == name }.count
+    }
+
+    var tailscaleResponse = TailscaleDevicesResponse(version: 1, candidates: [])
+    var tailscaleError: (any Error)?
+    var tailscaleDelayNanoseconds: UInt64 = 0
 
     private func record(_ name: String) {
         lock.lock()
@@ -419,7 +446,9 @@ private final class RecordingBackend: OpenPawBackend, @unchecked Sendable {
 
     func tailscaleDevices() async throws -> TailscaleDevicesResponse {
         record("tailscaleDevices")
-        return TailscaleDevicesResponse(version: 1, candidates: [])
+        if tailscaleDelayNanoseconds > 0 { try await Task.sleep(nanoseconds: tailscaleDelayNanoseconds) }
+        if let tailscaleError { throw tailscaleError }
+        return tailscaleResponse
     }
 
     func audit(limit: Int) async throws -> [AuditEntry] {
@@ -894,7 +923,7 @@ struct AddDeviceFlowTests {
         #expect(state.step == .tailscaleCandidates)
         #expect(state.discovered.isEmpty)
         #expect(state.selectedCandidate == nil)
-        #expect(AddDeviceFlowCopy.noCandidates == "No Tailscale candidates are available from this build. Automatic discovery is not connected. Add SSH details to enter a device manually.")
+        #expect(AddDeviceFlowCopy.noCandidates == "No Tailscale devices were reported by the connected discovery host. Add SSH details to enter a device manually.")
     }
 
     @Test("Selecting a discovered candidate requires confirmation and does not save")
@@ -982,8 +1011,54 @@ struct AddDeviceFlowTests {
         #expect(state.step == .confirmCandidate)
     }
 
+
+
+    @Test("Selecting a live model candidate snapshots it into flow state for confirmation")
+    func selectingLiveCandidateUsesStableModelIdentity() {
+        let live = AddDeviceCandidate(id: "node-live", nickname: "Live Studio", hostname: "live.tail.ts.net")
+        var state = AddDeviceFlowState(hosts: [], discovered: [])
+        state.startTailscaleDiscovery()
+        state.selectCandidate(id: live.id, from: [live])
+        #expect(state.step == .confirmCandidate)
+        #expect(state.selectedCandidate?.id == "node-live")
+        #expect(state.selectedCandidate?.hostname == "live.tail.ts.net")
+    }
+
+    @MainActor
+    @Test("Tailscale discovery is gated on a selected connected host")
+    func discoveryRequiresConnectedSelectedHost() async {
+        let backend = RecordingBackend()
+        let model = OpenPawModel(hostStore: HostStore(), backend: backend)
+        model.refreshTailscaleDevices()
+        #expect(model.tailscaleDiscovery == .noConnectedHost)
+        #expect(backend.callCount("tailscaleDevices") == 0)
+    }
+
+    @MainActor
+    @Test("Tailscale discovery loads candidates and suppresses stale cancelled responses")
+    func discoveryLoadsAndCancelsStaleResponses() async throws {
+        let host = HostRecord(nickname: "Studio", hostname: "studio.local", username: "dev", auth: .agentForwarding)
+        let backend = RecordingBackend()
+        backend.tailscaleDelayNanoseconds = 50_000_000
+        backend.tailscaleResponse = TailscaleDevicesResponse(version: 1, candidates: [
+            TailscaleDeviceCandidate(id: "node-late", displayName: "Late", dnsName: "late.tail.ts.net", tailscaleIPs: ["100.64.0.9"], online: true)
+        ])
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        model.connection = .connected(.ssh)
+        model.refreshTailscaleDevices()
+        #expect(model.tailscaleDiscovery == .loading)
+        model.cancelTailscaleDiscovery()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        #expect(model.tailscaleDiscovery == .idle)
+
+        backend.tailscaleDelayNanoseconds = 0
+        model.refreshTailscaleDevices()
+        try await Task.sleep(nanoseconds: 5_000_000)
+        #expect(model.tailscaleDiscovery.candidates.map(\.id) == ["node-late"])
+    }
+
     @Test("Candidate accessibility label includes exact safety semantics")
     func candidateAccessibilityLabelIncludesSafetySemantics() {
-        #expect(Self.candidate.accessibilityLabel == "Studio, studio.tail123.ts.net, discovery candidate, not trusted or saved")
+        #expect(Self.candidate.accessibilityLabel == "Studio, studio.tail123.ts.net, Tailscale discovery candidate, not trusted or saved")
     }
 }
