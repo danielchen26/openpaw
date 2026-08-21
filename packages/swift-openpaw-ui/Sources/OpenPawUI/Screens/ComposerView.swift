@@ -58,19 +58,13 @@ enum DictationDraft {
 
     /// What the editor shows mid-phrase, split into the part already committed and the live guess.
     ///
-    /// In `.composer` mode the existing draft stays visible in front of the guess, because the phrase is about to
-    /// join it. In `.terminal` mode there is no draft to join — each finished phrase has already left — so only the
-    /// guess shows, and showing a stale draft there would imply text is queued when none is.
+    /// Existing draft stays visible in front of the guess for both destinations. Speech always lands in an editable
+    /// draft first; Send or Execute is a separate explicit action.
     static func inProgress(
         draft: String, partial: String, mode: DictationMode
     ) -> (committed: String, live: String) {
         let live = partial.isEmpty ? "…" : partial
-        switch mode {
-        case .composer:
-            return (draft.isEmpty ? "" : draft + " ", live)
-        case .terminal:
-            return ("", live)
-        }
+        return (draft.isEmpty ? "" : draft + " ", live)
     }
 
     /// The draft after letting go in `.composer` mode: joined by a single space, never gaining a leading one.
@@ -81,24 +75,44 @@ enum DictationDraft {
         return draft.hasSuffix(" ") || draft.hasSuffix("\n") ? draft + phrase : draft + " " + phrase
     }
 
-    /// The two locales this product is designed around. Anything else the device offers is added in front of them.
-    public static let firstClassLocales = ["en-US", "zh-CN"]
+    public static let firstClassLocales = VoiceLocaleChoices.firstClassLocales
 
-    /// `en_US` and `en-US` are the same locale; the switcher must not offer both.
-    static func normalize(_ identifier: String) -> String {
-        identifier.replacingOccurrences(of: "_", with: "-")
-    }
+    static func normalize(_ identifier: String) -> String { VoiceLocaleChoices.normalize(identifier) }
 
-    /// The switcher's contents: the device's own locale first when it is not already one of the first-class two,
-    /// then those two, always both present. Mixed Chinese and English dictation is a primary use, so neither is
-    /// ever more than one tap away regardless of what the device is set to.
     static func localeChoices(
-        deviceLocale: String, firstClass: [String] = firstClassLocales
+        deviceLocale: String,
+        firstClass: [String] = VoiceLocaleChoices.firstClassLocales
     ) -> [String] {
-        let device = normalize(deviceLocale)
-        var identifiers = firstClass
-        if !identifiers.contains(device) { identifiers.insert(device, at: 0) }
-        return identifiers
+        VoiceLocaleChoices.choices(deviceLocale: deviceLocale, firstClass: firstClass)
+    }
+}
+
+public struct ComposerControlPresentation: Sendable, Equatable {
+    public let commitTitle: String
+    public let accessibilityLabel: String
+    public let isCommitEnabled: Bool
+    public let disabledReason: String?
+
+    public static func make(
+        destination: VoiceDestination,
+        hasAttachments: Bool,
+        hasDraft: Bool,
+        isSending: Bool,
+        supportsAgentAttachments: Bool = true
+    ) -> Self {
+        let title = destination == .agent ? "Send" : "Execute"
+        let label = destination == .agent ? "Send the agent prompt" : "Execute the terminal draft"
+        let hasPayload = destination == .agent ? (hasDraft || hasAttachments) : hasDraft
+        let blockedByAttachments = destination == .terminal && hasAttachments
+        let blockedByUnsupportedAgentAttachments = destination == .agent && hasAttachments && !supportsAgentAttachments
+        return Self(
+            commitTitle: title,
+            accessibilityLabel: isSending ? (destination == .agent ? "Sending" : "Executing") : label,
+            isCommitEnabled: !isSending && hasPayload && !blockedByAttachments && !blockedByUnsupportedAgentAttachments,
+            disabledReason: blockedByAttachments
+                ? "Remove attachments before executing a terminal draft."
+                : (blockedByUnsupportedAgentAttachments ? "Connect to a host before sending attachments." : nil)
+        )
     }
 }
 
@@ -109,8 +123,7 @@ enum DictationDraft {
 /// Dictation is here rather than in a settings screen because mixed Chinese and English speech is a primary way
 /// this app is used — walking, one hand, describing a change out loud. Two things follow from that. The locale is
 /// on screen and switchable in one tap rather than buried, with `zh-CN` and `en-US` both first class. And the
-/// mode switch is explicit: speech either lands in an editable draft you can fix before sending, or it goes
-/// straight to the terminal as each phrase is recognised, and you can always see which of the two is armed.
+/// mode switch is explicit: speech lands in an editable draft, then Send or Execute is explicit.
 @MainActor
 public struct ComposerView: View {
     /// A growing editor stops growing here and starts scrolling. Six lines is a paragraph; more than that and the
@@ -118,7 +131,8 @@ public struct ComposerView: View {
     static let maximumLines = 6
 
     private let engine: (any DictationEngine)?
-    private let onSend: (String, [ComposerAttachment]) async -> Void
+    private let supportsAgentAttachments: Bool
+    private let onCommit: (VoiceCommitAction, [ComposerAttachment]) async -> Bool
 
     @State private var voice: VoiceComposition
     @State private var attachments: [ComposerAttachment] = []
@@ -134,10 +148,12 @@ public struct ComposerView: View {
 
     public init(
         engine: (any DictationEngine)? = nil,
-        onSend: @escaping (String, [ComposerAttachment]) async -> Void
+        supportsAgentAttachments: Bool = true,
+        onCommit: @escaping (VoiceCommitAction, [ComposerAttachment]) async -> Bool
     ) {
         self.engine = engine
-        self.onSend = onSend
+        self.supportsAgentAttachments = supportsAgentAttachments
+        self.onCommit = onCommit
         self._voice = State(initialValue: VoiceComposition(destination: .agent))
         self._localeID = State(initialValue: VoiceLocaleChoices.normalize(Locale.current.identifier))
     }
@@ -146,8 +162,18 @@ public struct ComposerView: View {
     /// microphone teaches the user nothing.
     private var hasDictation: Bool { engine?.isAvailable == true }
 
-    private var canSend: Bool {
-        !isSending && (!voice.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+    private var controlPresentation: ComposerControlPresentation {
+        ComposerControlPresentation.make(
+            destination: voice.destination,
+            hasAttachments: !attachments.isEmpty,
+            hasDraft: !voice.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            isSending: isSending,
+            supportsAgentAttachments: supportsAgentAttachments
+        )
+    }
+
+    private var canCommit: Bool {
+        controlPresentation.isCommitEnabled
     }
 
     public var body: some View {
@@ -268,7 +294,7 @@ public struct ComposerView: View {
 
             Spacer(minLength: 0)
 
-            sendButton
+            commitButton
         }
     }
 
@@ -280,9 +306,7 @@ public struct ComposerView: View {
         }
     }
 
-    /// Where your voice goes is a two-state, safety-relevant choice — terminal mode submits each finished phrase
-    /// the moment it is recognised — so it is a visible toggle carrying the word, not a row inside a menu. It is
-    /// tinted `warn` while armed for the terminal, and the word is what carries the meaning if the tint does not.
+    /// Where your voice goes is a two-state, safety-relevant choice, so it is a visible toggle carrying the word.
     private var modeToggle: some View {
         Button {
             let next: VoiceDestination = voice.destination == .agent ? .terminal : .agent
@@ -355,26 +379,28 @@ public struct ComposerView: View {
             .accessibilityHint(voice.destination == .agent ? "Words land in the draft" : "Words land in a terminal draft")
     }
 
-    private var sendButton: some View {
-        Button(action: send) {
-            Label("Send", systemImage: "arrow.up")
+    private var commitButton: some View {
+        let presentation = controlPresentation
+        return Button(action: commit) {
+            Label(presentation.commitTitle, systemImage: voice.destination == .agent ? "arrow.up" : "terminal")
                 .labelStyle(.titleAndIcon)
                 .font(OpenPawTheme.Machine.headline)
-                .foregroundStyle(canSend ? OpenPawTheme.textPrimary : OpenPawTheme.textTertiary)
+                .foregroundStyle(canCommit ? OpenPawTheme.textPrimary : OpenPawTheme.textTertiary)
                 .padding(.horizontal, OpenPawTheme.Space.medium)
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!canSend)
+        .disabled(!canCommit)
         .overlay(
             RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card)
                 .strokeBorder(
-                    canSend ? OpenPawTheme.lineStrong : OpenPawTheme.line,
+                    canCommit ? OpenPawTheme.lineStrong : OpenPawTheme.line,
                     lineWidth: OpenPawTheme.hairline * 3
                 )
         )
-        .accessibilityLabel(isSending ? "Sending" : "Send the prompt")
+        .accessibilityLabel(presentation.accessibilityLabel)
+        .accessibilityHint(presentation.disabledReason ?? "")
     }
 
     private func iconButton(_ glyph: String, label: String, action: @escaping () -> Void) -> some View {
@@ -466,17 +492,18 @@ public struct ComposerView: View {
         }
     }
 
-    // MARK: Sending
+    // MARK: Committing
 
-    private func send() {
-        guard canSend else { return }
-        let text = voice.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func commit() {
+        guard canCommit, let action = voice.commit() else { return }
         let payload = attachments
         isSending = true
         Task {
-            await onSend(text, payload)
-            voice.draft = ""
-            attachments = []
+            let succeeded = await onCommit(action, payload)
+            if succeeded {
+                voice.clearAfterSuccessfulCommit()
+                if case .sendAgent = action { attachments = [] }
+            }
             isSending = false
         }
     }
@@ -532,11 +559,10 @@ public struct ComposerView: View {
 
 #Preview("Composer") {
     let model = PreviewBackend.model()
-    return VStack {
-        Spacer()
-        ComposerView(engine: model.dictation) { prompt, files in
-            await model.send(prompt: prompt)
-            _ = files
+        return VStack {
+            Spacer()
+        ComposerView(engine: model.dictation) { action, files in
+            await model.commitVoice(action, attachments: files)
         }
     }
     .background(OpenPawTheme.ink)
@@ -545,7 +571,7 @@ public struct ComposerView: View {
 #Preview("Composer · no dictation engine") {
     VStack {
         Spacer()
-        ComposerView(engine: nil) { _, _ in }
+        ComposerView(engine: nil) { _, _ in false }
     }
     .background(OpenPawTheme.ink)
 }

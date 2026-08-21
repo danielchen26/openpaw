@@ -24,6 +24,20 @@ public enum VoiceLifecycle: Sendable, Hashable {
     case active
 }
 
+public enum VoiceCommitError: LocalizedError, Sendable, Equatable {
+    case terminalAttachments
+    case agentAttachmentsNeedUpload
+
+    public var errorDescription: String? {
+        switch self {
+        case .terminalAttachments:
+            "Remove attachments before executing a terminal draft."
+        case .agentAttachmentsNeedUpload:
+            "Connect to a host before sending attachments."
+        }
+    }
+}
+
 /// Destination-neutral composition state for typed and dictated text.
 ///
 /// Recognition updates only stage editable text. Sending to an agent or executing in a terminal is represented by
@@ -36,6 +50,7 @@ public struct VoiceComposition: Sendable, Hashable {
 
     private var draftAtStart: String
     private var acceptsLateFinal: Bool
+    private var provisionalPhrase: String?
 
     public init(destination: VoiceDestination, draft: String = "") {
         self.destination = destination
@@ -44,6 +59,7 @@ public struct VoiceComposition: Sendable, Hashable {
         self.lifecycle = .stopped
         self.draftAtStart = draft
         self.acceptsLateFinal = false
+        self.provisionalPhrase = nil
     }
 
     public var isActive: Bool { lifecycle == .active }
@@ -59,11 +75,18 @@ public struct VoiceComposition: Sendable, Hashable {
         draftAtStart = draft
         partialTranscript = ""
         acceptsLateFinal = false
+        provisionalPhrase = nil
     }
 
     public mutating func stop() {
         guard lifecycle == .active else { return }
         lifecycle = .stopped
+        let provisional = partialTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !provisional.isEmpty {
+            draft = Self.join(draft: draftAtStart, phrase: provisional)
+            provisionalPhrase = provisional
+            partialTranscript = ""
+        }
         acceptsLateFinal = true
     }
 
@@ -72,6 +95,7 @@ public struct VoiceComposition: Sendable, Hashable {
         partialTranscript = ""
         lifecycle = .stopped
         acceptsLateFinal = false
+        provisionalPhrase = nil
     }
 
     @discardableResult
@@ -81,6 +105,7 @@ public struct VoiceComposition: Sendable, Hashable {
             draft = Self.join(draft: draftAtStart, phrase: update.text)
             partialTranscript = ""
             acceptsLateFinal = false
+            provisionalPhrase = nil
         } else if lifecycle == .active {
             partialTranscript = update.text
         }
@@ -94,10 +119,6 @@ public struct VoiceComposition: Sendable, Hashable {
     public mutating func commit() -> VoiceCommitAction? {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
-        draft = ""
-        partialTranscript = ""
-        draftAtStart = ""
-        acceptsLateFinal = false
         lifecycle = .stopped
         switch destination {
         case .agent:
@@ -105,6 +126,15 @@ public struct VoiceComposition: Sendable, Hashable {
         case .terminal:
             return .executeTerminal(text)
         }
+    }
+
+    public mutating func clearAfterSuccessfulCommit() {
+        draft = ""
+        partialTranscript = ""
+        draftAtStart = ""
+        acceptsLateFinal = false
+        provisionalPhrase = nil
+        lifecycle = .stopped
     }
 
     static func join(draft: String, phrase: String) -> String {

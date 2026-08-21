@@ -411,10 +411,9 @@ struct ChatFormatTests {
 @Suite("Dictation text rules")
 struct DictationDraftTests {
 
-    /// Composer mode is a draft you can fix before sending, so the words you already have stay in front of the
-    /// live guess. Terminal mode has no draft — each finished phrase has already gone — so showing one would imply
-    /// text is queued when none is.
-    @Test func showsTheDraftInFrontOfTheLiveGuessOnlyInComposerMode() {
+    /// Speech always lands in an editable draft first, so both agent and terminal destinations keep staged text in
+    /// front of the live guess. Send or Execute is a separate explicit action.
+    @Test func showsTheDraftInFrontOfTheLiveGuessForBothDestinations() {
         let composing = DictationDraft.inProgress(
             draft: "Fix the flaking test", partial: "and drop the retry", mode: .composer
         )
@@ -424,7 +423,7 @@ struct DictationDraftTests {
         let streaming = DictationDraft.inProgress(
             draft: "Fix the flaking test", partial: "and drop the retry", mode: .terminal
         )
-        #expect(streaming.committed == "")
+        #expect(streaming.committed == "Fix the flaking test ")
         #expect(streaming.live == "and drop the retry")
     }
 

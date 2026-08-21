@@ -392,6 +392,10 @@ public struct ChatView: View {
             } else {
                 transcript(rows: rows, pending: pending)
             }
+
+            ComposerView(engine: model.dictation, supportsAgentAttachments: model.canSendAgentAttachments()) { action, attachments in
+                await model.commitVoice(action, attachments: attachments)
+            }
         }
         .background(OpenPawTheme.ink)
     }

@@ -129,6 +129,10 @@ public final class OpenPawSettings {
 
     public var dictationLocale: Locale { Locale(identifier: dictationLocaleID) }
 
+    public static func dictationLocaleChoices(deviceLocale: String) -> [String] {
+        VoiceLocaleChoices.choices(deviceLocale: deviceLocale)
+    }
+
     // MARK: Session profiles
 
     public func profile(for host: HostID) -> SessionProfile {
@@ -392,7 +396,7 @@ public struct SettingsView: View {
                     }
                     .labelsHidden()
                     .frame(minHeight: 44)
-                    Text("Taken from the languages this device is already set up for.")
+                    Text("Speech lands in an editable draft first. Send or Execute is always explicit.")
                         .font(OpenPawTheme.Human.caption)
                         .foregroundStyle(OpenPawTheme.textTertiary)
                 }
@@ -424,19 +428,20 @@ public struct SettingsView: View {
 
     private var dictationExplanation: String {
         settings.dictationMode == .terminal
-            ? "Finished phrases are typed into the terminal as they are recognised."
-            : "Speech lands in a draft you can correct before sending."
+            ? "Speech lands in an editable terminal draft you can correct before tapping Execute."
+            : "Speech lands in an editable agent draft you can correct before tapping Send."
     }
 
     private var localeChoices: [String] {
-        var seen = Set<String>()
-        var result: [String] = []
-        for identifier in Locale.preferredLanguages + [Locale.current.identifier, settings.dictationLocaleID] {
-            let normalized = Locale(identifier: identifier).identifier
-            guard seen.insert(normalized).inserted else { continue }
-            result.append(normalized)
+        var choices = Self.settingsLocaleChoices(deviceLocale: settings.dictationLocaleID)
+        for identifier in Locale.preferredLanguages.map(VoiceLocaleChoices.normalize) where !choices.contains(identifier) {
+            choices.append(identifier)
         }
-        return result
+        return choices
+    }
+
+    static func settingsLocaleChoices(deviceLocale: String) -> [String] {
+        OpenPawSettings.dictationLocaleChoices(deviceLocale: deviceLocale)
     }
 
     private func localeName(_ identifier: String) -> String {

@@ -53,7 +53,7 @@ public protocol DictationEngine: Sendable {
 }
 
 public enum DictationMode: String, Sendable, Codable, CaseIterable {
-    /// Words go straight to the PTY as keystrokes.
+    /// Words land in an editable terminal draft before explicit execution.
     case terminal
     /// Words land in an editable draft that you send when you are ready.
     case composer

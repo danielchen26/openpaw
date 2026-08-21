@@ -293,14 +293,73 @@ public final class OpenPawModel {
         inbox[index].status = .dismissed
     }
 
-    public func send(prompt: String) async {
-        guard let terminal, !prompt.isEmpty else { return }
-        do {
-            try await terminal.send(text: prompt + "\n")
-        } catch {
-            present(error, while: "sending to the terminal")
+    public func sendAgentPrompt(_ prompt: String) async -> Bool {
+        await sendTerminalLine(prompt, activity: "sending the agent prompt")
+    }
+
+    public func executeTerminalDraft(_ command: String) async -> Bool {
+        await sendTerminalLine(command, activity: "executing the terminal draft")
+    }
+
+    public func commitVoice(_ action: VoiceCommitAction, attachments: [ComposerAttachment] = []) async -> Bool {
+        switch action {
+        case .sendAgent(let prompt):
+            guard let prompt = await agentPrompt(prompt, with: attachments) else { return false }
+            return await sendAgentPrompt(prompt)
+        case .executeTerminal(let command):
+            guard attachments.isEmpty else {
+                present(
+                    VoiceCommitError.terminalAttachments,
+                    while: "executing the terminal draft"
+                )
+                return false
+            }
+            return await executeTerminalDraft(command)
         }
     }
+
+    public func send(prompt: String) async {
+        _ = await sendAgentPrompt(prompt)
+    }
+
+    private func sendTerminalLine(_ text: String, activity: String) async -> Bool {
+        guard let terminal, !text.isEmpty else { return false }
+        do {
+            try await terminal.send(text: text + "\n")
+            return true
+        } catch {
+            present(error, while: activity)
+            return false
+        }
+    }
+
+    public func uploadComposerAttachments(_ attachments: [ComposerAttachment]) async -> [UploadResult]? {
+        guard !attachments.isEmpty else { return [] }
+        guard let backend else { return nil }
+        do {
+            var uploaded: [UploadResult] = []
+            for attachment in attachments {
+                uploaded.append(try await backend.upload(data: attachment.data, filename: attachment.filename))
+            }
+            return uploaded
+        } catch {
+            present(error, while: "uploading composer attachments")
+            return nil
+        }
+    }
+
+    private func agentPrompt(_ prompt: String, with attachments: [ComposerAttachment]) async -> String? {
+        guard !attachments.isEmpty else { return prompt }
+        guard let uploads = await uploadComposerAttachments(attachments) else {
+            present(VoiceCommitError.agentAttachmentsNeedUpload, while: "sending the agent prompt")
+            return nil
+        }
+        guard !uploads.isEmpty else { return prompt }
+        let paths = uploads.map { "- \($0.path)" }.joined(separator: "\n")
+        return prompt + "\n\nAttached files uploaded to:\n" + paths
+    }
+
+    public func canSendAgentAttachments() -> Bool { backend != nil }
 
     public func connectSelectedHost() async {
         guard let terminal, let host = selectedHost else { return }
