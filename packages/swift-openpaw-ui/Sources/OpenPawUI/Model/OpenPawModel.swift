@@ -35,7 +35,12 @@ public final class OpenPawModel {
 
     public var hostStore: HostStore
     public var selectedHostID: HostRecord.ID? {
-        didSet { if oldValue != selectedHostID { connectionGeneration += 1 } }
+        didSet {
+            if oldValue != selectedHostID {
+                connectionGeneration += 1
+                invalidateSelectedHostDerivedState()
+            }
+        }
     }
     public var connection: ConnectionState = .idle {
         didSet { connectionGeneration += 1 }
@@ -450,8 +455,11 @@ public final class OpenPawModel {
         let targetHostID = host.id
         stateTask?.cancel()
         stateTask = Task { [weak self, terminal] in
+            var sawConnectedStateForAttempt = false
             for await state in terminal.stateStream {
                 guard let self, self.selectedHostID == targetHostID else { return }
+                if state.isConnected { sawConnectedStateForAttempt = true }
+                if !sawConnectedStateForAttempt, state.isTerminal { continue }
                 self.connection = state
                 if state.isTerminal, let lifecycle = self.backend as? any StructuredBackendLifecycle {
                     self.structuredBackendReady = false
@@ -497,6 +505,20 @@ public final class OpenPawModel {
         structuredBackendReady = false
         await terminal?.disconnect()
         connection = .disconnected(reason: nil)
+    }
+
+    private func invalidateSelectedHostDerivedState() {
+        stopFollowing()
+        cancelTailscaleDiscovery()
+        clearHostDerivedState()
+        structuredBackendReady = backend.map { !($0 is any StructuredBackendLifecycle) } ?? false
+        if backend is any StructuredBackendLifecycle {
+            structuredBackendReady = false
+            connection = .disconnected(reason: "Host selection changed")
+        }
+        if let lifecycle = backend as? any StructuredBackendLifecycle {
+            Task { await lifecycle.disconnect() }
+        }
     }
 
     private func clearHostDerivedState() {

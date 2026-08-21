@@ -482,6 +482,7 @@ private final class RecordingTerminalBackend: TerminalBackend, @unchecked Sendab
     let outputStream = AsyncStream<Data> { $0.finish() }
     private(set) var connectedHosts: [HostRecord.ID] = []
     private(set) var disconnectCount = 0
+    var failConnect = false
     init() {
         var cont: AsyncStream<ConnectionState>.Continuation!
         stateStream = AsyncStream { cont = $0 }
@@ -489,6 +490,7 @@ private final class RecordingTerminalBackend: TerminalBackend, @unchecked Sendab
     }
     func connect(host: HostRecord) async throws {
         connectedHosts.append(host.id)
+        if failConnect { throw RecordingBackendError.unexpectedCall }
         continuation.yield(.connected(.ssh))
     }
     func disconnect() async { disconnectCount += 1; continuation.yield(.disconnected(reason: nil)) }
@@ -530,6 +532,36 @@ struct StructuredBackendLifecycleTests {
         #expect(model.structuredBackendReady == false)
         #expect(model.canRefreshRemoteState == false)
         #expect(model.lastError?.title == "Structured host features are unavailable")
+    }
+
+    @MainActor
+    @Test("Selecting a different host immediately invalidates structured readiness before reconnect")
+    func selectingDifferentHostInvalidatesReadinessBeforeReconnect() async {
+        let first = HostRecord(nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Two", hostname: "two", username: "dev", auth: .agentForwarding)
+        let backend = LifecycleRecordingBackend()
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend, terminal: terminal)
+        await model.connectSelectedHost()
+        await Task.yield()
+        #expect(model.structuredBackendReady)
+        #expect(model.connection.isConnected)
+
+        terminal.failConnect = true
+        let healthCalls = backend.callCount("health")
+        model.selectedHostID = second.id
+
+        #expect(model.structuredBackendReady == false)
+        #expect(model.canRefreshRemoteState == false)
+        await model.refresh()
+        model.refreshTailscaleDevices()
+        #expect(backend.callCount("health") == healthCalls)
+        #expect(model.tailscaleDiscovery == .noConnectedHost)
+
+        await model.connectSelectedHost()
+        #expect(model.structuredBackendReady == false)
+        #expect(model.canRefreshRemoteState == false)
+        #expect(backend.connectIDs == [first.id])
     }
 
     @MainActor

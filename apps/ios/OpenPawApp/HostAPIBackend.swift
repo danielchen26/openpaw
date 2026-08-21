@@ -60,16 +60,24 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle {
     func connect(hostID: HostRecord.ID) async throws {
         await disconnect()
         activeHostID.set(hostID)
-        let port = try await forwarder.start(remotePort: remotePort)
-        localPort.set(port)
-        guard let base = URL(string: "http://127.0.0.1:\(port)") else {
-            throw HostClientError.transport(URLError(.badURL))
+        do {
+            let port = try await forwarder.start(remotePort: remotePort)
+            localPort.set(port)
+            guard let base = URL(string: "http://127.0.0.1:\(port)") else {
+                throw HostClientError.transport(URLError(.badURL))
+            }
+            let client = HostClient(baseURL: base, session: urlSession)
+            if let signer = credentials.loadSigner(hostID: hostID) {
+                await client.setSigner(signer)
+            }
+            await state.install(client: client)
+        } catch {
+            await state.install(client: nil)
+            localPort.set(nil)
+            activeHostID.set(nil)
+            await forwarder.stop()
+            throw error
         }
-        let client = HostClient(baseURL: base, session: urlSession)
-        if let signer = credentials.loadSigner(hostID: hostID) {
-            await client.setSigner(signer)
-        }
-        await state.install(client: client)
     }
 
     func disconnect() async {

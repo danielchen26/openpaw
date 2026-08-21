@@ -20,12 +20,15 @@ final class HostAPIBackendTests: XCTestCase {
 
         try await backend.connect(hostID: hostB)
         XCTAssertEqual(credentials.loadedHostIDs, [hostB])
-        XCTAssertTrue(await backend.isReady)
+        let isReadyAfterConnect = await backend.isReady
+        XCTAssertTrue(isReadyAfterConnect)
         XCTAssertNoThrow(try backend.previewURL(port: 3000, path: "/"))
 
         await backend.disconnect()
-        XCTAssertFalse(await backend.isReady)
-        XCTAssertEqual(await forwarder.stopCount, 2)
+        let isReadyAfterDisconnect = await backend.isReady
+        let stopCount = await forwarder.stopCount
+        XCTAssertFalse(isReadyAfterDisconnect)
+        XCTAssertEqual(stopCount, 2)
         XCTAssertThrowsError(try backend.previewURL(port: 3000, path: "/"))
     }
 
@@ -50,6 +53,26 @@ final class HostAPIBackendTests: XCTestCase {
         XCTAssertNotNil(credentials.signers[hostA])
     }
 
+    func testConnectFailureClearsActiveHostClientAndTunnel() async throws {
+        let host = HostRecord.ID()
+        let credentials = FakeCredentialStore(signers: [host: signer(deviceID: "a")])
+        let forwarder = FakeForwarder(port: 49_323)
+        await forwarder.setFailStart(true)
+        let backend = HostAPIBackend(forwarder: forwarder, credentials: credentials, urlSession: Self.stubSession())
+
+        do {
+            try await backend.connect(hostID: host)
+            XCTFail("connect should fail")
+        } catch {}
+
+        let isReadyAfterFailure = await backend.isReady
+        let stopCountAfterFailure = await forwarder.stopCount
+        XCTAssertFalse(isReadyAfterFailure)
+        XCTAssertFalse(backend.isPaired)
+        XCTAssertEqual(stopCountAfterFailure, 2)
+        XCTAssertThrowsError(try backend.previewURL(port: 3000, path: "/"))
+    }
+
     private static func stubSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubURLProtocol.self]
@@ -66,11 +89,17 @@ private actor FakeForwarder: LoopbackForwarder {
     let port: UInt16
     var startedRemotePorts: [UInt16] = []
     var stopCount = 0
+    private var failStart = false
 
     init(port: UInt16) { self.port = port }
 
+    func setFailStart(_ value: Bool) {
+        failStart = value
+    }
+
     func start(remotePort: UInt16) async throws -> UInt16 {
         startedRemotePorts.append(remotePort)
+        if failStart { throw URLError(.cannotConnectToHost) }
         return port
     }
 
