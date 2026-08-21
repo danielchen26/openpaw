@@ -17,8 +17,30 @@ final class SSHTerminalBackendTests: XCTestCase {
         let captured = try await output
 
         XCTAssertEqual(captured, "ok")
+        let writes = await transport.allWrites()
+        XCTAssertGreaterThanOrEqual(writes.count, 3)
+        XCTAssertEqual(writes[0], "stty -echo\n")
+        XCTAssertTrue(writes[1].contains("printf ok"))
+        XCTAssertEqual(writes.last, "stty echo\n")
         let visible = await firstVisibleOutput(from: backend)
         XCTAssertEqual(visible, "after")
+    }
+
+    func testRunCommandIgnoresEchoedProbeLineAndParsesMarkerSplitAcrossChunks() async throws {
+        let transport = ControlledTransport()
+        let backend = makeBackend(transport)
+        try await backend.connect(host: host())
+
+        async let output = backend.run(command: "printf split")
+        let commandWrite = await transport.waitForWrite(containing: "printf split")
+        let marker = try XCTUnwrap(Self.marker(in: commandWrite))
+        await transport.emitOutput(Data(commandWrite.utf8))
+        await transport.emitOutput(Data("spl".utf8))
+        await transport.emitOutput(Data("it\n\(marker)".utf8))
+        await transport.emitOutput(Data(":0\nvisible".utf8))
+
+        XCTAssertEqual(try await output, "split")
+        XCTAssertEqual(await firstVisibleOutput(from: backend), "visible")
     }
 
     func testRunCommandCompletesWhenMarkerArrivesBeforeWaiterSuspends() async throws {
@@ -32,6 +54,23 @@ final class SSHTerminalBackendTests: XCTestCase {
         let captured = try await backend.run(command: "printf fast")
 
         XCTAssertEqual(captured, "fast")
+    }
+
+    func testRunCommandHandlesInvalidUTF8AndCapsOutput() async throws {
+        let transport = ControlledTransport()
+        let backend = makeBackend(transport)
+        try await backend.connect(host: host())
+
+        async let output = backend.run(command: "binary")
+        let marker = try XCTUnwrap(Self.marker(in: await transport.waitForWrite(containing: "binary")))
+        var bytes = Data(repeating: 0x61, count: 70 * 1024)
+        bytes.append(contentsOf: [0xff, 0xfe])
+        bytes.append(Data("\n\(marker):0\n".utf8))
+        await transport.emitOutput(bytes)
+
+        let captured = try await output
+        XCTAssertLessThanOrEqual(captured.utf8.count, 64 * 1024 + 8)
+        XCTAssertTrue(captured.contains("�"))
     }
 
     func testRunCommandThrowsCommandFailureForMissingBinary127() async throws {
@@ -67,6 +106,36 @@ final class SSHTerminalBackendTests: XCTestCase {
         } catch {
             // Success: the important contract is immediate failure on terminal state, not timeout expiry.
         }
+    }
+
+    func testRunCommandTimeoutRestoresEchoAndReturnsPromptly() async throws {
+        let transport = ControlledTransport()
+        let backend = makeBackend(transport)
+        try await backend.connect(host: host())
+
+        let started = Date()
+        do {
+            _ = try await backend.run(command: "never-finishes")
+            XCTFail("Expected timeout")
+        } catch {
+            XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        }
+        XCTAssertEqual(await transport.allWrites().last, "stty echo\n")
+    }
+
+    func testDisconnectResumesCaptureBeforeTeardownClearsIt() async throws {
+        let transport = ControlledTransport()
+        let backend = makeBackend(transport)
+        try await backend.connect(host: host())
+
+        async let output = backend.run(command: "long")
+        _ = await transport.waitForWrite(containing: "long")
+        await backend.disconnect()
+
+        do {
+            _ = try await output
+            XCTFail("Expected disconnect failure")
+        } catch {}
     }
 
     func testOrdinaryTerminalOutputStillPublishesWhenNoCaptureIsActive() async throws {
@@ -146,6 +215,10 @@ private actor ControlledTransport: RemoteTransport {
         outputContinuation.yield(Data(text.utf8))
     }
 
+    func emitOutput(_ data: Data) {
+        outputContinuation.yield(data)
+    }
+
     func emitState(_ state: ConnectionState) {
         stateContinuation.yield(state)
     }
@@ -156,4 +229,6 @@ private actor ControlledTransport: RemoteTransport {
             writeWaiters.append((needle, continuation))
         }
     }
+
+    func allWrites() -> [String] { writes }
 }

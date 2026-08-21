@@ -108,21 +108,18 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner {
         self.capture = capture
         defer { self.capture = nil }
 
-        // Disable terminal echo for the probe line so the marker in the typed command cannot satisfy the capture. The
-        // marker printed after the command is the only terminator the parser accepts.
-        try await transport.write(Data("stty -echo\n{ \(command); __openpaw_rc=$?; printf '\\n%s:%s\\n' \(shellQuoted(marker)) \"$__openpaw_rc\"; unset __openpaw_rc; } 2>&1\nstty echo\n".utf8))
-
-        return try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask { try await capture.wait() }
-            group.addTask {
-                // A probe that never returns must not hold the caller forever; a capability check is not worth a
-                // hung UI.
-                try await Task.sleep(for: .seconds(3))
-                throw TransportError.timeout
-            }
-            let result = try await group.next()!
-            group.cancelAll()
+        // Echo is disabled before the probe command is sent, then restored in a separate write on every exit path.
+        // Batching stty/probe/stty in one write can race with remote echo and can leave no recovery point on timeout.
+        try await transport.write(Data("stty -echo\n".utf8))
+        do {
+            try await transport.write(Data("{ \(command); __openpaw_rc=$?; printf '\\n%s:%s\\n' \(shellQuoted(marker)) \"$__openpaw_rc\"; unset __openpaw_rc; } 2>&1\n".utf8))
+            let result = try await capture.wait(timeout: .seconds(3))
+            try? await transport.write(Data("stty echo\n".utf8))
             return result
+        } catch {
+            capture.fail(error)
+            try? await transport.write(Data("stty echo\n".utf8))
+            throw error
         }
     }
 
@@ -214,6 +211,7 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner {
     private func teardown(reason: String?) async {
         for pump in pumps { pump.cancel() }
         pumps.removeAll()
+        capture?.fail(TransportError.notConnected)
         capture = nil
         if let transport {
             await transport.disconnect()
@@ -234,6 +232,7 @@ private final class Capture: @unchecked Sendable {
     private let marker: String
     private let command: String
     private let maxBytes = 64 * 1024
+    private let scanSlack = 256
     private var buffer = Data()
     private var result: Result<String, any Error>?
     private var continuation: CheckedContinuation<String, any Error>?
@@ -247,21 +246,21 @@ private final class Capture: @unchecked Sendable {
     func ingest(_ chunk: Data) -> Data {
         lock.lock()
         buffer.append(chunk)
-        if buffer.count > maxBytes { buffer.removeFirst(buffer.count - maxBytes) }
-        guard let text = String(data: buffer, encoding: .utf8),
-            let markerRange = text.range(of: "\n\(marker):")
-        else {
+        if buffer.count > maxBytes + scanSlack { buffer.removeFirst(buffer.count - maxBytes - scanSlack) }
+        let markerBytes = Data("\n\(marker):".utf8)
+        guard let markerRange = buffer.range(of: markerBytes) else {
             lock.unlock()
             return Data()
         }
-        let statusStart = markerRange.upperBound
-        guard let lineEnd = text[statusStart...].firstIndex(of: "\n") else {
+        guard let lineEnd = buffer[markerRange.upperBound...].firstIndex(of: UInt8(ascii: "\n")) else {
             lock.unlock()
             return Data()
         }
-        let statusText = text[statusStart..<lineEnd].trimmingCharacters(in: .whitespacesAndNewlines)
-        let output = String(text[text.startIndex..<markerRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-        let remainderText = String(text[text.index(after: lineEnd)...])
+        let statusBytes = buffer[markerRange.upperBound..<lineEnd]
+        let statusText = String(decoding: statusBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let outputBytes = buffer[..<markerRange.lowerBound].suffix(maxBytes)
+        let output = String(decoding: outputBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let remainder = Data(buffer[buffer.index(after: lineEnd)...])
         let exitCode = Int32(statusText) ?? 1
         let nextResult: Result<String, any Error> = exitCode == 0
             ? .success(output)
@@ -271,11 +270,15 @@ private final class Capture: @unchecked Sendable {
         continuation = nil
         lock.unlock()
         if let resumed { resumed.resume(with: nextResult) }
-        return Data(remainderText.utf8)
+        return remainder
     }
 
     func fail(_ error: any Error) {
         lock.lock()
+        guard result == nil else {
+            lock.unlock()
+            return
+        }
         let nextResult: Result<String, any Error> = .failure(error)
         result = nextResult
         let resumed = continuation
@@ -284,16 +287,33 @@ private final class Capture: @unchecked Sendable {
         resumed?.resume(with: nextResult)
     }
 
-    func wait() async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            if let result {
-                lock.unlock()
-                continuation.resume(with: result)
-                return
+    func wait(timeout: Duration) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask { try await self.wait() }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw TransportError.timeout
             }
-            self.continuation = continuation
-            lock.unlock()
+            let value = try await group.next()!
+            group.cancelAll()
+            return value
+        }
+    }
+
+    private func wait() async throws -> String {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if let result {
+                    lock.unlock()
+                    continuation.resume(with: result)
+                    return
+                }
+                self.continuation = continuation
+                lock.unlock()
+            }
+        } onCancel: {
+            fail(CancellationError())
         }
     }
 }
