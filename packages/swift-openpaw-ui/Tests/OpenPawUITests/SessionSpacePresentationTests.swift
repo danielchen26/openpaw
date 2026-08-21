@@ -63,12 +63,39 @@ final class SessionSpacePresentationTests: XCTestCase {
         let hostID = UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
         let otherHostID = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
         let plan = SessionRestorationPlan(hostID: hostID, multiplexer: .tmux, multiplexerTarget: "$1", workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
-        let item = SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: plan).restorationItem!
-        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 4, restoration: plan)
+        let remote = RemoteSession(id: "$1", name: "$1", kind: .tmux, isAttached: false, isAlive: true, windowCount: 1)
+        let item = SessionSpacePresentation(agentSessions: [], remoteSessions: [remote], restoration: plan).restorationItem!
+        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 4, remoteSessions: [remote], restoration: plan)
 
         XCTAssertTrue(SessionSpaceActionPolicy.allows("Reattach", item: item, snapshot: snapshot, hostID: hostID, generation: 4, isConnected: true))
         XCTAssertFalse(SessionSpaceActionPolicy.allows("Reattach", item: item, snapshot: snapshot, hostID: otherHostID, generation: 4, isConnected: true))
         XCTAssertEqual(SessionSpaceActionPolicy.navigation(for: item.primaryAction), .opensTerminal)
+    }
+
+    func testStaleSnapshotHasNoNavigationCommandAlertOrStoreSideEffects() {
+        let hostID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let session = RemoteSession(id: "$1", name: "work", kind: .tmux, isAttached: false, isAlive: true, windowCount: 1)
+        let item = SessionSpacePresentation(agentSessions: [], remoteSessions: [session], restoration: nil).items[0]
+        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 1, remoteSessions: [session])
+
+        XCTAssertNil(SessionSpaceActionPolicy.validatedNavigation(for: "Attach", item: item, snapshot: snapshot, hostID: hostID, generation: 2, isConnected: true))
+        XCTAssertNil(SessionSpaceActionPolicy.validatedNavigation(for: "Kill", item: item, snapshot: snapshot, hostID: UUID(), generation: 1, isConnected: true))
+        XCTAssertNil(SessionSpaceActionPolicy.validatedNavigation(for: "Attach", item: item, snapshot: snapshot, hostID: hostID, generation: 1, isConnected: false))
+    }
+
+    func testPersistedRestorationIsReconciledWithDiscoveredSessions() {
+        let hostID = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+        let live = RemoteSession(id: "$live", name: "live", kind: .tmux, isAttached: false, isAlive: true, windowCount: 1)
+        let dead = RemoteSession(id: "$dead", name: "dead", kind: .tmux, isAttached: false, isAlive: false, windowCount: 0)
+        let livePlan = SessionRestorationPlan(hostID: hostID, multiplexer: .tmux, multiplexerTarget: "$live", workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
+        let deadPlan = SessionRestorationPlan(hostID: hostID, multiplexer: .tmux, multiplexerTarget: "$dead", workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
+        let missingPlan = SessionRestorationPlan(hostID: hostID, multiplexer: .tmux, multiplexerTarget: "$missing", workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
+
+        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [live, dead], restoration: livePlan).restorationItem?.primaryAction, "Reattach")
+        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [live, dead], restoration: deadPlan).restorationItem?.stateLabel, "stale target")
+        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [live, dead], restoration: deadPlan).restorationItem?.primaryAction, "Create replacement session")
+        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [live, dead], restoration: missingPlan).restorationItem?.stateLabel, "stale target")
+        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [live, dead], restoration: missingPlan).restorationItem?.primaryAction, "Create replacement session")
     }
 
     func testRestorationPolicyDistinguishesReattachFromBareShellFallback() {
@@ -77,8 +104,10 @@ final class SessionSpacePresentationTests: XCTestCase {
         let replacement = SessionRestorationPlan(hostID: hostID, multiplexer: .tmux, workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
         let fallback = SessionRestorationPlan(hostID: hostID, workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
 
-        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: reattach, transport: .init()).restorationItem?.provenance, .restoration(kind: .herdr, target: "hd_01"))
-        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: reattach, transport: .init()).restorationItem?.primaryAction, "Reattach")
+        let reattachRemote = RemoteSession(id: "hd_01", name: "hd_01", kind: .herdr, isAttached: false, isAlive: true, windowCount: 1)
+
+        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [reattachRemote], restoration: reattach, transport: .init()).restorationItem?.provenance, .restoration(kind: .herdr, target: "hd_01"))
+        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [reattachRemote], restoration: reattach, transport: .init()).restorationItem?.primaryAction, "Reattach")
         XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: replacement, transport: .init()).restorationItem?.provenance, .replacementMultiplexer(kind: .tmux, directory: "/repo"))
         XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: replacement, transport: .init()).restorationItem?.primaryAction, "Create replacement session")
         XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: fallback, transport: .init()).restorationItem?.provenance, .bareShellFallback(directory: "/repo"))

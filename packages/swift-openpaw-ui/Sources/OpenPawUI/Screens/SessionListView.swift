@@ -50,6 +50,7 @@ public struct SessionListView: View {
     private let onRename: (RemoteSession, String) -> Void
     private let onKill: (RemoteSession) -> Void
     private let onRestore: (SessionRestorationPlan) -> Void
+    private let onRefresh: () async -> Void
 
     @State private var newSessionName = ""
     @State private var renamingID: String?
@@ -66,7 +67,8 @@ public struct SessionListView: View {
         onCreate: @escaping (String) -> Void = { _ in },
         onRename: @escaping (RemoteSession, String) -> Void = { _, _ in },
         onKill: @escaping (RemoteSession) -> Void = { _ in },
-        onRestore: @escaping (SessionRestorationPlan) -> Void = { _ in }
+        onRestore: @escaping (SessionRestorationPlan) -> Void = { _ in },
+        onRefresh: @escaping () async -> Void = { }
     ) {
         self.model = model
         self.remoteSessions = remoteSessions
@@ -78,6 +80,7 @@ public struct SessionListView: View {
         self.onRename = onRename
         self.onKill = onKill
         self.onRestore = onRestore
+        self.onRefresh = onRefresh
     }
 
     /// Sessions grouped by owning agent. A named struct rather than a tuple because `ForEach` needs a key path
@@ -128,7 +131,7 @@ public struct SessionListView: View {
                             "Start an agent on the host and it appears here. OpenPaw reads the transcripts the "
                             + "agents already write, so there is nothing extra to configure.",
                         actionTitle: "Refresh",
-                        action: { Task { await model.refresh() } }
+                        action: { Task { await onRefresh() } }
                     )
                 } else {
                     ForEach(groups) { group in
@@ -149,7 +152,7 @@ public struct SessionListView: View {
         }
         .background(OpenPawTheme.ink)
         .navigationTitle("Sessions")
-        .refreshable { await model.refresh() }
+        .refreshable { await onRefresh() }
         .confirmationDialog(
             pendingKill.map { "Kill \($0.name)?" } ?? "Kill session?",
             isPresented: killBinding,
@@ -283,13 +286,14 @@ public struct SessionListView: View {
     // MARK: Restoration
 
     private func restorationBanner(_ plan: SessionRestorationPlan) -> some View {
-        HumanPanel {
+        let item = SessionSpacePresentation(agentSessions: model.sessions, remoteSessions: remoteSessions, restoration: plan, transport: transport).restorationItem
+        return HumanPanel {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.small) {
                 Text("Left running").microLabel()
-                Text("Your session kept working without you.")
+                Text(item?.stateLabel == "stale target" ? "Previous session is gone." : "Your session kept working without you.")
                     .font(OpenPawTheme.Human.title)
                     .foregroundStyle(OpenPawTheme.textPrimary)
-                Text(restorationProse(plan))
+                Text(restorationProse(plan, item: item))
                     .font(OpenPawTheme.Human.prose)
                     .foregroundStyle(OpenPawTheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -297,7 +301,7 @@ public struct SessionListView: View {
                 Button {
                     onRestore(plan)
                 } label: {
-                    Text(plan.isReattachable ? "Reattach" : "Start where you left off")
+                    Text(item?.primaryAction ?? "Start where you left off")
                         .font(OpenPawTheme.Machine.headline)
                         .padding(.horizontal, OpenPawTheme.Space.medium)
                         .frame(minHeight: 44)
@@ -306,15 +310,19 @@ public struct SessionListView: View {
                         .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(restorationActionLabel(plan))
+                .accessibilityLabel(restorationActionLabel(plan, item: item))
             }
         }
     }
 
     /// Says how long it has been and what reattaching will land on. `capturedAt` is when the app last knew the
     /// session's shape, so the elapsed time is measured from there rather than from a guess.
-    private func restorationProse(_ plan: SessionRestorationPlan) -> String {
+    private func restorationProse(_ plan: SessionRestorationPlan, item: SessionSpaceItem?) -> String {
         let elapsed = formatApproximateDuration(Date().timeIntervalSince(plan.capturedAt))
+        if item?.stateLabel == "stale target", let target = plan.multiplexerTarget, let kind = plan.multiplexer {
+            let directory = plan.workingDirectory ?? "the last directory"
+            return "You were away \(elapsed). \(kind.displayName) no longer has \(target) alive, so OpenPaw can start a replacement session in \(directory)."
+        }
         guard plan.isReattachable, let target = plan.multiplexerTarget else {
             let directory = plan.workingDirectory ?? "the last directory"
             return """
@@ -329,7 +337,8 @@ public struct SessionListView: View {
             """
     }
 
-    private func restorationActionLabel(_ plan: SessionRestorationPlan) -> String {
+    private func restorationActionLabel(_ plan: SessionRestorationPlan, item: SessionSpaceItem?) -> String {
+        if item?.stateLabel == "stale target" { return "Create a replacement session in the last working directory" }
         guard let target = plan.multiplexerTarget, plan.isReattachable else {
             return "Open a shell in the last working directory"
         }

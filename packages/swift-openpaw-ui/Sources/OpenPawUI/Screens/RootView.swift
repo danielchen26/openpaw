@@ -578,7 +578,8 @@ public struct RootView: View {
                 onCreate: createSession,
                 onRename: renameSession,
                 onKill: killSession,
-                onRestore: restoreSession
+                onRestore: restoreSession,
+                onRefresh: refreshModelAndSessionSpace
             )
                 .navigationDestination(item: chatSessionBinding) { sessionID in
                     transcript(sessionID)
@@ -595,7 +596,8 @@ public struct RootView: View {
                 onCreate: createSession,
                 onRename: renameSession,
                 onKill: killSession,
-                onRestore: restoreSession
+                onRestore: restoreSession,
+                onRefresh: refreshModelAndSessionSpace
             )
                     .frame(width: 340)
                 Rectangle()
@@ -662,7 +664,16 @@ public struct RootView: View {
         }
     }
 
+    private func canUseCurrentSessionSpace() -> Bool {
+        SessionSpaceActionPolicy.canUseSnapshot(
+            sessionSpace,
+            hostID: model.selectedHostID,
+            generation: model.connectionGeneration,
+            isConnected: model.connection.isConnected)
+    }
+
     private func attachSession(_ session: RemoteSession) {
+        guard canUseCurrentSessionSpace() else { return }
         guard session.isAlive else { presentUnavailableSessionAction(); return }
         recordAttachRestorationPlan(session)
         runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).attach(session), refreshAfterCommand: false)
@@ -670,18 +681,20 @@ public struct RootView: View {
     }
 
     private func createSession(_ name: String) {
+        guard canUseCurrentSessionSpace() else { return }
         let adapter = MultiplexerAdapters.adapter(for: sessionSpace.transport.preferredMultiplexer ?? .tmux)
-        recordCreateRestorationPlan(kind: adapter.kind, name: name)
         runSessionCommand(adapter.create(name: name, directory: nil), refreshAfterCommand: false)
         router.destination = .terminal
     }
 
     private func renameSession(_ session: RemoteSession, to name: String) {
+        guard canUseCurrentSessionSpace() else { return }
         guard session.isAlive else { presentUnavailableSessionAction(); return }
         runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).rename(session, to: name), refreshAfterCommand: true)
     }
 
     private func killSession(_ session: RemoteSession) {
+        guard canUseCurrentSessionSpace() else { return }
         clearRestorationPlan(ifMatches: session)
         runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).kill(session), refreshAfterCommand: true)
     }
@@ -689,8 +702,17 @@ public struct RootView: View {
     private func restoreSession(_ plan: SessionRestorationPlan) {
         guard plan.hostID == model.selectedHostID,
               sessionSpace.hostID == model.selectedHostID,
-              sessionSpace.connectionGeneration == model.connectionGeneration else { presentUnavailableSessionAction(); return }
-        guard let command = plan.restorationCommand() else { presentUnavailableSessionAction(); return }
+              sessionSpace.connectionGeneration == model.connectionGeneration,
+              canUseCurrentSessionSpace() else { return }
+        let command: String?
+        if let kind = plan.multiplexer,
+           let target = plan.multiplexerTarget,
+           !sessionSpace.remoteSessions.contains(where: { $0.kind == kind && $0.id == target && $0.isAlive }) {
+            command = MultiplexerAdapters.adapter(for: kind).create(name: "openpaw", directory: plan.workingDirectory)
+        } else {
+            command = plan.restorationCommand()
+        }
+        guard let command else { presentUnavailableSessionAction(); return }
         runSessionCommand(command, refreshAfterCommand: false)
         router.destination = .terminal
     }

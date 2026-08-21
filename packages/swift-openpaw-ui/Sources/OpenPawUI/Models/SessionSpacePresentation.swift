@@ -81,6 +81,17 @@ public struct SessionSpacePresentation: Sendable, Hashable {
     public var restorationItem: SessionSpaceItem? {
         guard let restoration else { return nil }
         if restoration.isReattachable, let kind = restoration.multiplexer, let target = restoration.multiplexerTarget {
+            guard remoteSessions.contains(where: { $0.kind == kind && $0.id == target && $0.isAlive }) else {
+                return SessionSpaceItem(
+                    id: "restore-stale:\(kind.rawValue):\(target)",
+                    title: target,
+                    subtitle: restoration.workingDirectory,
+                    provenance: .replacementMultiplexer(kind: kind, directory: restoration.workingDirectory),
+                    provenanceBadge: "\(kind.displayName) restoration",
+                    stateLabel: "stale target",
+                    primaryAction: "Create replacement session",
+                    secondaryActions: [])
+            }
             return SessionSpaceItem(
                 id: "restore:\(kind.rawValue):\(target)",
                 title: target,
@@ -168,6 +179,11 @@ public struct SessionSpaceActionPolicy: Sendable, Hashable {
         case ("Reattach", .restoration), ("Create replacement session", .replacementMultiplexer), ("Open shell", .bareShellFallback): true
         default: false
         }
+    }
+
+    public static func validatedNavigation(for action: String, item: SessionSpaceItem, snapshot: SessionSpaceSnapshot, hostID: HostID?, generation: Int, isConnected: Bool) -> SessionSpaceNavigationPolicy? {
+        guard allows(action, item: item, snapshot: snapshot, hostID: hostID, generation: generation, isConnected: isConnected) else { return nil }
+        return navigation(for: action)
     }
 }
 
