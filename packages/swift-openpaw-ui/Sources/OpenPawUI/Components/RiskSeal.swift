@@ -9,7 +9,7 @@ import SwiftUI
 /// `OPEN`. The gesture is not decoration — it is the only thing that puts an approve control on screen, so the
 /// animation is reporting a state change in the safety model rather than entertaining anyone.
 ///
-/// It is one of exactly two animations in the app, and it honours `accessibilityReduceMotion` by switching
+/// It is one of the app's intentionally sparse animations, and it honours `accessibilityReduceMotion` by switching
 /// instantly instead of shortening the curve, because a 0.28 s cross-fade is still motion.
 public struct RiskSeal: View {
 

@@ -7,7 +7,7 @@ import SwiftUI
 /// cell per second across a fixed-width field. One cell per second is deliberately slow: it reads as a machine
 /// ticking rather than a UI trying to look busy, and at 1 Hz it costs one redraw a second.
 ///
-/// This is one of exactly two animations in the app. With reduce-motion on it renders the same line with a steady
+/// This is one of the app's intentionally sparse animations. With reduce-motion on it renders the same line with a steady
 /// block — still legible as "working", with nothing moving.
 public struct WorkingIndicator: View {
     private let label: String?

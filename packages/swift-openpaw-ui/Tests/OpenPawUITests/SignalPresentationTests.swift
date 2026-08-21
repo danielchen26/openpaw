@@ -16,13 +16,27 @@ struct SignalPresentationTests {
         #expect(OpenPawTheme.flagshipHex.caution == 0xF4BE5B)
     }
 
-    @Test("Every connection signal state has nonempty label glyph and tone", arguments: ConnectionSignalState.allCases)
-    func everySignalStateHasSemanticCopy(state: ConnectionSignalState) {
-        let signal = ConnectionSignal(state)
+    @Test("Every connection signal state has exact semantic presentation")
+    func everySignalStateHasExactSemanticPresentation() {
+        let expectations: [(state: ConnectionSignalState, label: String, glyph: String, tone: ConnectionSignalTone, rotatesWhenAllowed: Bool)] = [
+            (.discovering, "Discovering", "dot.radiowaves.left.and.right", .quiet, true),
+            (.connecting, "Connecting", "arrow.triangle.2.circlepath", .signal, true),
+            (.online, "Online", "checkmark.circle.fill", .pulse, false),
+            (.degraded, "Degraded", "exclamationmark.triangle.fill", .caution, true),
+            (.offline, "Offline", "moon.zzz.fill", .quiet, false),
+            (.blocked, "Blocked", "lock.trianglebadge.exclamationmark.fill", .blocked, false),
+        ]
 
-        #expect(signal.label.isEmpty == false)
-        #expect(signal.glyph.isEmpty == false)
-        #expect(ConnectionSignalTone.allCases.contains(signal.tone))
+        #expect(expectations.map(\.state) == ConnectionSignalState.allCases)
+
+        for expectation in expectations {
+            let signal = ConnectionSignal(expectation.state)
+
+            #expect(signal.label == expectation.label)
+            #expect(signal.glyph == expectation.glyph)
+            #expect(signal.tone == expectation.tone)
+            #expect(signal.rotatesWhenAllowed == expectation.rotatesWhenAllowed)
+        }
     }
 
     @Test("Signal states have distinct glyphs")
