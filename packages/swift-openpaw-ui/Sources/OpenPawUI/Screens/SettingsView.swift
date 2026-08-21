@@ -396,14 +396,14 @@ public struct SettingsView: View {
                     }
                     .labelsHidden()
                     .frame(minHeight: 44)
-                    Text("Speech lands in an editable draft first. Send or Execute is always explicit.")
+                    Text(VoicePrivacyDisclosure.appleSpeech)
                         .font(OpenPawTheme.Human.caption)
                         .foregroundStyle(OpenPawTheme.textTertiary)
                 }
 
                 VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
-                    Text("Where speech goes").microLabel()
-                    Picker("Where speech goes", selection: bind(\.dictationMode)) {
+                    Text("Default destination").microLabel()
+                    Picker("Default destination", selection: bind(\.dictationMode)) {
                         ForEach(DictationMode.allCases, id: \.self) { mode in
                             Text(modeName(mode)).tag(mode)
                         }
@@ -428,8 +428,8 @@ public struct SettingsView: View {
 
     private var dictationExplanation: String {
         settings.dictationMode == .terminal
-            ? "Speech lands in an editable terminal draft you can correct before tapping Execute."
-            : "Speech lands in an editable agent draft you can correct before tapping Send."
+            ? "New composers can start on terminal draft where a screen supports it. The visible composer toggle is authoritative, and Execute is always explicit."
+            : "New composers can start on agent draft where a screen supports it. The visible composer toggle is authoritative, and Send is always explicit."
     }
 
     private var localeChoices: [String] {

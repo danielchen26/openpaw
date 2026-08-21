@@ -30,6 +30,29 @@ struct VoiceCompositionTests {
         #expect(voice.draft == "")
     }
 
+    @Test func terminalExecuteActionCarriesExpectedNewlineForBackendSend() {
+        let action = VoiceCommitAction.executeTerminal("echo safe")
+        #expect(action.terminalTextToSend == "echo safe\n")
+        #expect(VoiceCommitAction.executeTerminal("echo safe\n").terminalTextToSend == "echo safe\n")
+        #expect(VoiceCommitAction.sendAgent("echo safe").terminalTextToSend == nil)
+    }
+
+    @Test func terminalActionControllerClearsOnlyAfterSuccessfulNewlineSend() async {
+        var sent: [String] = []
+        var voice = VoiceComposition(destination: .terminal, draft: "echo safe")
+
+        let succeeded = await VoiceTerminalActionController.execute(composition: &voice) { text in sent.append(text) }
+
+        #expect(succeeded)
+        #expect(sent == ["echo safe\n"])
+        #expect(voice.draft == "")
+
+        var failing = VoiceComposition(destination: .terminal, draft: "keep me")
+        let failed = await VoiceTerminalActionController.execute(composition: &failing) { _ in throw FakeSendError() }
+        #expect(!failed)
+        #expect(failing.draft == "keep me")
+    }
+
     @Test func agentSendsOnlyExplicitSendAction() {
         var voice = VoiceComposition(destination: .agent, draft: "please")
         voice.start()
@@ -55,6 +78,34 @@ struct VoiceCompositionTests {
         #expect(voice.draft == "keep late final")
         #expect(voice.partialTranscript == "")
         #expect(!voice.isActive)
+    }
+
+    @Test func lateFinalDoesNotOverwriteUserEditedProvisionalDraft() {
+        var voice = VoiceComposition(destination: .agent, draft: "keep")
+        voice.start()
+        voice.apply(DictationUpdate(text: "partial", isFinal: false))
+        voice.stop()
+        voice.draft = "keep partial plus my edit"
+
+        #expect(voice.apply(DictationUpdate(text: "late final", isFinal: true)) == nil)
+
+        #expect(voice.draft == "keep partial plus my edit")
+        #expect(voice.partialTranscript == "")
+        #expect(!voice.isActive)
+    }
+
+    @Test func oldDictationTurnCannotMutateNewTurn() {
+        var voice = VoiceComposition(destination: .agent)
+        let old = voice.start()
+        voice.apply(DictationUpdate(text: "old partial", isFinal: false), turn: old)
+        voice.stop()
+
+        let current = voice.start()
+        #expect(voice.apply(DictationUpdate(text: "late old", isFinal: true), turn: old) == nil)
+        #expect(voice.draft == "old partial")
+
+        voice.apply(DictationUpdate(text: "new words", isFinal: true), turn: current)
+        #expect(voice.draft == "old partial new words")
     }
 
     @Test func cancelDiscardsTransientPartialButKeepsPreexistingDraft() {
@@ -101,6 +152,54 @@ struct VoiceCompositionTests {
         #expect(terminal.disabledReason == "Remove attachments before executing a terminal draft.")
     }
 
+    @Test func attachmentOnlyAgentCommitIsTypedAndTerminalStillRequiresText() {
+        var agent = VoiceComposition(destination: .agent)
+        #expect(agent.commit(hasAttachments: true) == .sendAgent(""))
+
+        var terminal = VoiceComposition(destination: .terminal)
+        #expect(terminal.commit(hasAttachments: true) == nil)
+    }
+
+    @Test func controlsLockDestinationLocaleAndCommitWhileDictating() {
+        let active = ComposerControlPresentation.make(
+            destination: .agent,
+            hasAttachments: false,
+            hasDraft: true,
+            isSending: false,
+            isDictating: true
+        )
+        #expect(!active.isCommitEnabled)
+        #expect(!active.isDestinationSwitchEnabled)
+        #expect(!active.isLocaleSwitchEnabled)
+
+        let inactive = ComposerControlPresentation.make(
+            destination: .agent,
+            hasAttachments: false,
+            hasDraft: true,
+            isSending: false,
+            isDictating: false
+        )
+        #expect(inactive.isCommitEnabled)
+        #expect(inactive.isDestinationSwitchEnabled)
+        #expect(inactive.isLocaleSwitchEnabled)
+    }
+
+    @Test func microphoneAccessibilitySemanticsChangeWithDictationState() {
+        let stopped = ComposerControlPresentation.make(destination: .agent, hasAttachments: false, hasDraft: false, isSending: false)
+        #expect(stopped.microphoneAccessibilityLabel == "Start dictation")
+        #expect(stopped.microphoneAccessibilityHint == "Double tap to start. Press and hold also works. Words land in the agent draft.")
+
+        let active = ComposerControlPresentation.make(
+            destination: .terminal,
+            hasAttachments: false,
+            hasDraft: false,
+            isSending: false,
+            isDictating: true
+        )
+        #expect(active.microphoneAccessibilityLabel == "Stop dictation")
+        #expect(active.microphoneAccessibilityHint == "Double tap to stop. Words land in the terminal draft until you tap Execute.")
+    }
+
     @Test func agentAttachmentsAreDisabledWhenUploadIsUnsupported() {
         let agent = ComposerControlPresentation.make(
             destination: .agent,
@@ -116,6 +215,28 @@ struct VoiceCompositionTests {
     @MainActor @Test func settingsAndComposerShareLocaleChoices() {
         #expect(DictationDraft.localeChoices(deviceLocale: "fr_FR") == VoiceLocaleChoices.choices(deviceLocale: "fr_FR"))
         #expect(OpenPawSettings.dictationLocaleChoices(deviceLocale: "en_US") == ["en-US", "zh-CN"])
+    }
+
+    @Test func settingsDictationModeMapsToComposerDestination() {
+        #expect(VoiceDestination(dictationMode: .composer) == .agent)
+        #expect(VoiceDestination(dictationMode: .terminal) == .terminal)
+        #expect(VoiceDestination.agent.dictationMode == .composer)
+        #expect(VoiceDestination.terminal.dictationMode == .terminal)
+    }
+
+    @Test func appleSpeechDisclosureMentionsFallbackHonestly() {
+        #expect(VoicePrivacyDisclosure.appleSpeech.contains("on-device"))
+        #expect(VoicePrivacyDisclosure.appleSpeech.contains("fallback recognition outside this app"))
+    }
+
+    @Test func fakeEngineLifecycleCapturesModeAndStop() async {
+        let engine = FakeDictationEngine()
+        _ = engine.transcribe(locale: Locale(identifier: "en-US"), mode: .terminal)
+        await Task.yield()
+        await engine.stop()
+
+        #expect(await engine.requestedModes == [.terminal])
+        #expect(await engine.stopCount == 1)
     }
 
     @MainActor @Test func chatComposerIntegrationKeepsCommitSemanticsTyped() async {
@@ -158,3 +279,20 @@ private actor RecordingTerminalBackend: TerminalBackend {
     func resize(columns: Int, rows: Int) async throws {}
     func run(command: String) async throws -> String { "" }
 }
+
+private actor FakeDictationEngine: DictationEngine {
+    nonisolated var isAvailable: Bool { true }
+    private(set) var requestedModes: [DictationMode] = []
+    private(set) var stopCount = 0
+
+    nonisolated func transcribe(locale: Locale, mode: DictationMode) -> AsyncThrowingStream<DictationUpdate, any Error> {
+        Task { await record(mode) }
+        return AsyncThrowingStream { continuation in continuation.finish() }
+    }
+
+    func stop() async { stopCount += 1 }
+
+    private func record(_ mode: DictationMode) { requestedModes.append(mode) }
+}
+
+private struct FakeSendError: Error {}

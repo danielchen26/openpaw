@@ -5,6 +5,10 @@ public enum VoiceDestination: String, Sendable, Hashable, Codable, CaseIterable 
     case agent
     case terminal
 
+    public init(dictationMode: DictationMode) {
+        self = dictationMode == .terminal ? .terminal : .agent
+    }
+
     public var dictationMode: DictationMode {
         switch self {
         case .agent: .composer
@@ -17,11 +21,40 @@ public enum VoiceDestination: String, Sendable, Hashable, Codable, CaseIterable 
 public enum VoiceCommitAction: Sendable, Hashable {
     case sendAgent(String)
     case executeTerminal(String)
+
+    public var terminalTextToSend: String? {
+        guard case .executeTerminal(let text) = self else { return nil }
+        return text.hasSuffix("\n") ? text : text + "\n"
+    }
+}
+
+public struct VoiceTurnID: Sendable, Hashable {
+    fileprivate let generation: Int
 }
 
 public enum VoiceLifecycle: Sendable, Hashable {
     case stopped
     case active
+}
+
+public enum VoicePrivacyDisclosure {
+    public static let appleSpeech = "Speech may use Apple's on-device recognizer. If on-device recognition is unavailable for the selected language or device, Apple may use fallback recognition outside this app."
+}
+
+public enum VoiceTerminalActionController {
+    public static func execute(
+        composition: inout VoiceComposition,
+        send: (String) async throws -> Void
+    ) async -> Bool {
+        guard let action = composition.commit(), let text = action.terminalTextToSend else { return false }
+        do {
+            try await send(text)
+            composition.clearAfterSuccessfulCommit()
+            return true
+        } catch {
+            return false
+        }
+    }
 }
 
 public enum VoiceCommitError: LocalizedError, Sendable, Equatable {
@@ -51,6 +84,9 @@ public struct VoiceComposition: Sendable, Hashable {
     private var draftAtStart: String
     private var acceptsLateFinal: Bool
     private var provisionalPhrase: String?
+    private var generation: Int
+    private var activeTurn: VoiceTurnID?
+    private var lateFinalTurn: VoiceTurnID?
 
     public init(destination: VoiceDestination, draft: String = "") {
         self.destination = destination
@@ -60,6 +96,9 @@ public struct VoiceComposition: Sendable, Hashable {
         self.draftAtStart = draft
         self.acceptsLateFinal = false
         self.provisionalPhrase = nil
+        self.generation = 0
+        self.activeTurn = nil
+        self.lateFinalTurn = nil
     }
 
     public var isActive: Bool { lifecycle == .active }
@@ -70,12 +109,18 @@ public struct VoiceComposition: Sendable, Hashable {
         return Self.join(draft: draft, phrase: partialTranscript)
     }
 
-    public mutating func start() {
+    @discardableResult
+    public mutating func start() -> VoiceTurnID {
+        generation += 1
+        let turn = VoiceTurnID(generation: generation)
         lifecycle = .active
         draftAtStart = draft
         partialTranscript = ""
         acceptsLateFinal = false
         provisionalPhrase = nil
+        activeTurn = turn
+        lateFinalTurn = nil
+        return turn
     }
 
     public mutating func stop() {
@@ -88,6 +133,8 @@ public struct VoiceComposition: Sendable, Hashable {
             partialTranscript = ""
         }
         acceptsLateFinal = true
+        lateFinalTurn = activeTurn
+        activeTurn = nil
     }
 
     public mutating func cancel() {
@@ -96,16 +143,35 @@ public struct VoiceComposition: Sendable, Hashable {
         lifecycle = .stopped
         acceptsLateFinal = false
         provisionalPhrase = nil
+        activeTurn = nil
+        lateFinalTurn = nil
     }
 
     @discardableResult
     public mutating func apply(_ update: DictationUpdate) -> VoiceCommitAction? {
-        guard lifecycle == .active || (acceptsLateFinal && update.isFinal) else { return nil }
+        apply(update, turn: activeTurn ?? lateFinalTurn)
+    }
+
+    @discardableResult
+    public mutating func apply(_ update: DictationUpdate, turn: VoiceTurnID?) -> VoiceCommitAction? {
+        let ownsActiveTurn = lifecycle == .active && turn == activeTurn
+        let ownsLateFinal = acceptsLateFinal && update.isFinal && turn == lateFinalTurn
+        guard ownsActiveTurn || ownsLateFinal else { return nil }
         if update.isFinal {
+            if acceptsLateFinal, let provisionalPhrase {
+                let stagedProvisional = Self.join(draft: draftAtStart, phrase: provisionalPhrase)
+                guard draft == stagedProvisional else {
+                    partialTranscript = ""
+                    acceptsLateFinal = false
+                    self.provisionalPhrase = nil
+                    return nil
+                }
+            }
             draft = Self.join(draft: draftAtStart, phrase: update.text)
             partialTranscript = ""
             acceptsLateFinal = false
             provisionalPhrase = nil
+            if ownsLateFinal { lateFinalTurn = nil }
         } else if lifecycle == .active {
             partialTranscript = update.text
         }
@@ -116,14 +182,15 @@ public struct VoiceComposition: Sendable, Hashable {
         self.destination = destination
     }
 
-    public mutating func commit() -> VoiceCommitAction? {
+    public mutating func commit(hasAttachments: Bool = false) -> VoiceCommitAction? {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
         lifecycle = .stopped
         switch destination {
         case .agent:
+            guard !text.isEmpty || hasAttachments else { return nil }
             return .sendAgent(text)
         case .terminal:
+            guard !text.isEmpty else { return nil }
             return .executeTerminal(text)
         }
     }
@@ -135,6 +202,8 @@ public struct VoiceComposition: Sendable, Hashable {
         acceptsLateFinal = false
         provisionalPhrase = nil
         lifecycle = .stopped
+        activeTurn = nil
+        lateFinalTurn = nil
     }
 
     static func join(draft: String, phrase: String) -> String {

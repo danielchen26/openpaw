@@ -92,12 +92,17 @@ public struct ComposerControlPresentation: Sendable, Equatable {
     public let accessibilityLabel: String
     public let isCommitEnabled: Bool
     public let disabledReason: String?
+    public let isDestinationSwitchEnabled: Bool
+    public let isLocaleSwitchEnabled: Bool
+    public let microphoneAccessibilityLabel: String
+    public let microphoneAccessibilityHint: String
 
     public static func make(
         destination: VoiceDestination,
         hasAttachments: Bool,
         hasDraft: Bool,
         isSending: Bool,
+        isDictating: Bool = false,
         supportsAgentAttachments: Bool = true
     ) -> Self {
         let title = destination == .agent ? "Send" : "Execute"
@@ -108,11 +113,26 @@ public struct ComposerControlPresentation: Sendable, Equatable {
         return Self(
             commitTitle: title,
             accessibilityLabel: isSending ? (destination == .agent ? "Sending" : "Executing") : label,
-            isCommitEnabled: !isSending && hasPayload && !blockedByAttachments && !blockedByUnsupportedAgentAttachments,
+            isCommitEnabled: !isSending && !isDictating && hasPayload && !blockedByAttachments && !blockedByUnsupportedAgentAttachments,
             disabledReason: blockedByAttachments
                 ? "Remove attachments before executing a terminal draft."
-                : (blockedByUnsupportedAgentAttachments ? "Connect to a host before sending attachments." : nil)
+                : (blockedByUnsupportedAgentAttachments ? "Connect to a host before sending attachments." : nil),
+            isDestinationSwitchEnabled: !isDictating,
+            isLocaleSwitchEnabled: !isDictating,
+            microphoneAccessibilityLabel: isDictating ? "Stop dictation" : "Start dictation",
+            microphoneAccessibilityHint: Self.microphoneHint(destination: destination, isDictating: isDictating)
         )
+    }
+
+    private static func microphoneHint(destination: VoiceDestination, isDictating: Bool) -> String {
+        if isDictating {
+            return destination == .agent
+                ? "Double tap to stop. Words land in the agent draft until you tap Send."
+                : "Double tap to stop. Words land in the terminal draft until you tap Execute."
+        }
+        return destination == .agent
+            ? "Double tap to start. Press and hold also works. Words land in the agent draft."
+            : "Double tap to start. Press and hold also works. Words land in the terminal draft."
     }
 }
 
@@ -141,6 +161,7 @@ public struct ComposerView: View {
 
     @State private var localeID: String
     @State private var dictationTask: Task<Void, Never>?
+    @State private var dictationTurnID: VoiceTurnID?
     @State private var failure: String?
 
     @ScaledMetric(relativeTo: .body) private var lineHeight: CGFloat = 21
@@ -149,12 +170,14 @@ public struct ComposerView: View {
     public init(
         engine: (any DictationEngine)? = nil,
         supportsAgentAttachments: Bool = true,
+        initialDestination: VoiceDestination? = nil,
         onCommit: @escaping (VoiceCommitAction, [ComposerAttachment]) async -> Bool
     ) {
         self.engine = engine
         self.supportsAgentAttachments = supportsAgentAttachments
         self.onCommit = onCommit
-        self._voice = State(initialValue: VoiceComposition(destination: .agent))
+        let destination = initialDestination ?? VoiceDestination(dictationMode: OpenPawSettings().dictationMode)
+        self._voice = State(initialValue: VoiceComposition(destination: destination))
         self._localeID = State(initialValue: VoiceLocaleChoices.normalize(Locale.current.identifier))
     }
 
@@ -168,6 +191,7 @@ public struct ComposerView: View {
             hasAttachments: !attachments.isEmpty,
             hasDraft: !voice.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             isSending: isSending,
+            isDictating: voice.isActive,
             supportsAgentAttachments: supportsAgentAttachments
         )
     }
@@ -206,6 +230,7 @@ public struct ComposerView: View {
             allowsMultipleSelection: true,
             onCompletion: { result in attach(result) }
         )
+        .onDisappear { cancelDictation() }
     }
 
     // MARK: Editor
@@ -322,6 +347,7 @@ public struct ComposerView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!controlPresentation.isDestinationSwitchEnabled)
         .overlay(
             RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card)
                 .strokeBorder(
@@ -334,6 +360,7 @@ public struct ComposerView: View {
                 ? "Dictation goes to the draft. Switches to terminal draft."
                 : "Dictation goes to a terminal draft. Switches to keeping an agent draft."
         )
+        .accessibilityHint(controlPresentation.isDestinationSwitchEnabled ? "" : "Stop dictation before changing destination.")
     }
 
     private var localeMenu: some View {
@@ -352,7 +379,9 @@ public struct ComposerView: View {
                 .contentShape(Rectangle())
         }
         .fixedSize()
+        .disabled(!controlPresentation.isLocaleSwitchEnabled)
         .accessibilityLabel("Dictation language \(Self.name(for: localeID))")
+        .accessibilityHint(controlPresentation.isLocaleSwitchEnabled ? "" : "Stop dictation before changing language.")
     }
 
     /// Press and hold to talk. Holding is the right gesture for a walk-and-talk product: it cannot be left running
@@ -375,8 +404,10 @@ public struct ComposerView: View {
                     .onChanged { _ in startDictation() }
                     .onEnded { _ in stopDictation() }
             )
-            .accessibilityLabel("Hold to dictate")
-            .accessibilityHint(voice.destination == .agent ? "Words land in the draft" : "Words land in a terminal draft")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(controlPresentation.microphoneAccessibilityLabel)
+            .accessibilityHint(controlPresentation.microphoneAccessibilityHint)
+            .accessibilityAction { voice.isActive ? stopDictation() : startDictation() }
     }
 
     private var commitButton: some View {
@@ -495,7 +526,7 @@ public struct ComposerView: View {
     // MARK: Committing
 
     private func commit() {
-        guard canCommit, let action = voice.commit() else { return }
+        guard canCommit, let action = voice.commit(hasAttachments: !attachments.isEmpty) else { return }
         let payload = attachments
         isSending = true
         Task {
@@ -525,18 +556,21 @@ public struct ComposerView: View {
 
     private func startDictation() {
         guard let engine, engine.isAvailable, !voice.isActive else { return }
-        voice.start()
+        let turnID = voice.start()
         failure = nil
         let locale = Locale(identifier: localeID)
         let destination = voice.destination
+        dictationTurnID = turnID
         dictationTask = Task {
             do {
                 for try await update in engine.transcribe(locale: locale, mode: destination.dictationMode) {
-                    voice.apply(update)
+                    guard dictationTurnID == turnID else { return }
+                    voice.apply(update, turn: turnID)
                 }
             } catch is CancellationError {
                 return
             } catch {
+                guard dictationTurnID == turnID else { return }
                 failure = "Dictation stopped: \(error.localizedDescription). Check microphone access and hold again."
                 voice.stop()
             }
@@ -546,6 +580,19 @@ public struct ComposerView: View {
     private func stopDictation() {
         guard voice.isActive else { return }
         voice.stop()
+        let task = dictationTask
+        dictationTask = nil
+        Task {
+            await engine?.stop()
+            try? await Task.sleep(for: .milliseconds(50))
+            task?.cancel()
+        }
+    }
+
+    private func cancelDictation() {
+        guard voice.isActive || dictationTask != nil else { return }
+        voice.cancel()
+        dictationTurnID = nil
         let task = dictationTask
         dictationTask = nil
         Task {

@@ -98,6 +98,7 @@ public struct TerminalScreenView: View {
     @State private var pinchBase: CGFloat?
     @State private var voice = VoiceComposition(destination: .terminal)
     @State private var dictationTask: Task<Void, Never>?
+    @State private var dictationTurnID: VoiceTurnID?
 
     #if os(iOS)
         @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -394,9 +395,7 @@ public struct TerminalScreenView: View {
                 .foregroundStyle(OpenPawTheme.textPrimary)
                 .textFieldStyle(.plain)
             Button("Execute") {
-                guard case .executeTerminal(let text) = voice.commit() else { return }
-                stopDictation()
-                send(text: text)
+                executeTerminalDraft()
             }
             .buttonStyle(.plain)
             .font(OpenPawTheme.Machine.label)
@@ -525,6 +524,19 @@ public struct TerminalScreenView: View {
         }
     }
 
+    private func executeTerminalDraft() {
+        guard let terminal = model.terminal, let action = voice.commit(), let text = action.terminalTextToSend else { return }
+        stopDictation()
+        Task {
+            do {
+                try await terminal.send(text: text)
+                voice.clearAfterSuccessfulCommit()
+            } catch {
+                model.present(error, while: "executing a terminal draft")
+            }
+        }
+    }
+
     private func apply(fontSize: CGFloat) {
         let clamped = min(
             max(fontSize.rounded(), OpenPawSettings.fontSizeRange.lowerBound),
@@ -544,17 +556,21 @@ public struct TerminalScreenView: View {
         guard let engine = model.dictation, engine.isAvailable else { return }
         let mode = VoiceDestination.terminal.dictationMode
         let locale = settings.dictationLocale
-        voice.start()
+        let turnID = voice.start()
+        dictationTurnID = turnID
         dictationTask = Task {
             do {
                 for try await update in engine.transcribe(locale: locale, mode: mode) {
-                    voice.apply(update)
+                    guard dictationTurnID == turnID else { return }
+                    voice.apply(update, turn: turnID)
                 }
             } catch is CancellationError {
                 // Stopping is not a failure.
             } catch {
+                guard dictationTurnID == turnID else { return }
                 model.present(error, while: "listening for dictation")
             }
+            guard dictationTurnID == turnID else { return }
             voice.stop()
         }
     }
@@ -566,6 +582,7 @@ public struct TerminalScreenView: View {
         dictationTask = nil
         Task {
             await engine?.stop()
+            try? await Task.sleep(for: .milliseconds(50))
             task?.cancel()
         }
     }
