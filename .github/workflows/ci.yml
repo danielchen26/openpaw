@@ -54,7 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [swift-agent-protocol, swift-terminal-core, swift-ssh-transport, swift-openpaw-ui, swift-openpaw-notifications]
+        package: [swift-agent-protocol, swift-terminal-core, swift-ssh-transport, swift-et-transport, swift-openpaw-ui, swift-openpaw-notifications]
     steps:
       - uses: actions/checkout@v5
       - name: test

@@ -18,6 +18,16 @@ final class ETStrictCorrectionTests: XCTestCase {
         XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 22, terminalId: "tid", passkey: "p\nk"))
     }
 
+    func testRawBootstrapInitializerSharesHostAndPortValidation() throws {
+        let raw = try ETSSHBootstrapRequest(host: "safe.example", port: 22, stdinPayload: Data("tid/pk_TERM\n".utf8))
+        XCTAssertEqual(raw.arguments, ["-T", "-p", "22", "safe.example", "etterminal", "--protocol", "6"])
+        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "-oProxyCommand=sh", port: 22, stdinPayload: Data()))
+        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "", port: 22, stdinPayload: Data()))
+        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "bad host", port: 22, stdinPayload: Data()))
+        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 0, stdinPayload: Data()))
+        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 65536, stdinPayload: Data()))
+    }
+
     func testProtoFrameDecoderRejectsExtremaBeforeIntConversionAndEncoderCaps() throws {
         XCTAssertThrowsError(try ETProtoFraming.frame(Data(repeating: 0, count: ETProtocolV6.defaultMaxProtoLength + 1)))
         let maxSignedNative = Data([0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x7f])

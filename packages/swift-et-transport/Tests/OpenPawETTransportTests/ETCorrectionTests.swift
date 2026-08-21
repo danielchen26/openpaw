@@ -58,8 +58,8 @@ final class ETCorrectionTests: XCTestCase {
         XCTAssertEqual(replay.disconnectedBytes, 0)
     }
 
-    func testBootstrapUsesFixedRemoteEtterminalCommandAndNoCallerShellText() {
-        let req = ETSSHBootstrapRequest(host: "h", port: 22, stdinPayload: ETProto.initialPayload(environment: [("A", "B")]))
+    func testBootstrapUsesFixedRemoteEtterminalCommandAndNoCallerShellText() throws {
+        let req = try ETSSHBootstrapRequest(host: "h", port: 22, stdinPayload: ETProto.initialPayload(environment: [("A", "B")]))
         XCTAssertEqual(req.executable, "ssh")
         XCTAssertEqual(req.arguments, ["-T", "-p", "22", "h", "etterminal", "--protocol", "6"])
         XCTAssertFalse(req.arguments.joined(separator: " ").contains("$("))

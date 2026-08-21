@@ -74,9 +74,9 @@ final class OpenPawETTransportTests: XCTestCase {
         XCTAssertThrowsError(try b.recordSent(Data(repeating: 9, count: 20), connected: false))
         XCTAssertThrowsError(try b.recover(after: 3))
     }
-    func testBootstrapCarriesDynamicValuesInStdinNotShellInterpolation() {
+    func testBootstrapCarriesDynamicValuesInStdinNotShellInterpolation() throws {
         let payload = Data("user=$(rm -rf /)\nkey=abc".utf8)
-        let req = ETSSHBootstrapRequest(host: "example.com", port: 2222, stdinPayload: payload)
+        let req = try ETSSHBootstrapRequest(host: "example.com", port: 2222, stdinPayload: payload)
         XCTAssertEqual(req.executable, "ssh")
         XCTAssertEqual(req.arguments, ["-T", "-p", "2222", "example.com", "etterminal", "--protocol", "6"])
         XCTAssertEqual(req.stdinPayload, payload)
