@@ -319,9 +319,9 @@ public enum ConnectionState: Sendable, Equatable {
 
 // MARK: - The seam
 
-/// The single seam every transport implements. `OpenPawSSH` provides the SSH,
-/// mosh and Eternal Terminal conformances; `MockTransport` provides the
-/// in-memory one used by tests and previews.
+/// The single seam every transport implements. `OpenPawSSH` provides the production SSH
+/// conformance; experimental or future transports can conform here without changing the terminal UI.
+/// `MockTransport` provides the in-memory implementation used by tests and previews.
 public protocol RemoteTransport: Sendable {
     var state: AsyncStream<ConnectionState> { get }
     var output: AsyncStream<Data> { get }
