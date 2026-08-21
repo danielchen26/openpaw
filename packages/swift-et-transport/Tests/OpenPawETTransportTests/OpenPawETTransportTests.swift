@@ -34,7 +34,7 @@ final class OpenPawETTransportTests: XCTestCase {
         XCTAssertEqual(ETProto.terminalBuffer(Data("hi".utf8)).hex, "0a026869")
         XCTAssertEqual(ETProto.terminalInfo(id: "t", row: 24, column: 80, width: 640, height: 480).hex, "0a01741018185020800528e003")
         XCTAssertEqual(ETProto.terminalUserInfo(id: "t", passkey: "p", uid: 501, gid: 20, fd: 7).hex, "0a017412017018f50320142807")
-        XCTAssertEqual(ETProto.terminalInit(environment: [("TERM", "xterm")]).hex, "0a045445524d1205787465726d")
+        XCTAssertEqual(ETProto.termInit(ETTermInit(environment: [("TERM", "xterm")])).hex, "0a045445524d1205787465726d")
         XCTAssertEqual(ETProto.initialPayload(jumphost: true, environment: [("A", "B")]).hex, "08011a060a0141120142")
     }
     func testPacketAndFramingGoldenVectors() throws {
@@ -75,11 +75,10 @@ final class OpenPawETTransportTests: XCTestCase {
         XCTAssertThrowsError(try b.recover(after: 3))
     }
     func testBootstrapCarriesDynamicValuesInStdinNotShellInterpolation() throws {
-        let payload = Data("user=$(rm -rf /)\nkey=abc".utf8)
-        let req = try ETSSHBootstrapRequest(host: "example.com", port: 2222, stdinPayload: payload)
+        let req = try ETSSHBootstrapRequest(host: "example.com", port: 2222, terminalId: "user", passkey: "abc", term: "xterm")
         XCTAssertEqual(req.executable, "ssh")
         XCTAssertEqual(req.arguments, ["-T", "-p", "2222", "example.com", "etterminal", "--protocol", "6"])
-        XCTAssertEqual(req.stdinPayload, payload)
-        XCTAssertFalse(req.arguments.joined(separator: " ").contains("rm -rf"))
+        XCTAssertEqual(String(data: req.stdinPayload, encoding: .utf8), "user/abc_xterm\n")
+        XCTAssertFalse(req.arguments.joined(separator: " ").contains("abc"))
     }
 }

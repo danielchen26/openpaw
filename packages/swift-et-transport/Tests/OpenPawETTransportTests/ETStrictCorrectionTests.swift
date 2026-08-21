@@ -8,7 +8,7 @@ final class ETStrictCorrectionTests: XCTestCase {
         let bootstrap = try ETSSHBootstrapRequest(host: "example.com", port: 2022, terminalId: "tid", passkey: "pk")
         XCTAssertEqual(bootstrap.executable, "ssh")
         XCTAssertEqual(bootstrap.arguments, ["-T", "-p", "2022", "example.com", "etterminal", "--protocol", "6"])
-        XCTAssertEqual(String(data: bootstrap.stdinPayload, encoding: .utf8), "tid/pk_xterm\n")
+        XCTAssertEqual(String(data: bootstrap.stdinPayload, encoding: .utf8), "tid/pk_xterm-256color\n")
         XCTAssertFalse(bootstrap.arguments.contains("--"), "OpenSSH treats arguments after host as the remote command. Do not inject a post-host -- argument into the remote command.")
         XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "-oProxyCommand=sh", port: 22, terminalId: "tid", passkey: "pk"))
         XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "good host", port: 22, terminalId: "tid", passkey: "pk"))
@@ -16,16 +16,6 @@ final class ETStrictCorrectionTests: XCTestCase {
         XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 65536, terminalId: "tid", passkey: "pk"))
         XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 22, terminalId: "ti/d", passkey: "pk"))
         XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 22, terminalId: "tid", passkey: "p\nk"))
-    }
-
-    func testRawBootstrapInitializerSharesHostAndPortValidation() throws {
-        let raw = try ETSSHBootstrapRequest(host: "safe.example", port: 22, stdinPayload: Data("tid/pk_xterm\n".utf8))
-        XCTAssertEqual(raw.arguments, ["-T", "-p", "22", "safe.example", "etterminal", "--protocol", "6"])
-        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "-oProxyCommand=sh", port: 22, stdinPayload: Data()))
-        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "", port: 22, stdinPayload: Data()))
-        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "bad host", port: 22, stdinPayload: Data()))
-        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 0, stdinPayload: Data()))
-        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "example.com", port: 65536, stdinPayload: Data()))
     }
 
     func testProtoFrameDecoderRejectsExtremaBeforeIntConversionAndEncoderCaps() throws {
@@ -36,6 +26,25 @@ final class ETStrictCorrectionTests: XCTestCase {
         for prefix in [maxSignedNative, minSignedNative, allOnes] {
             var decoder = ETProtoFrameDecoder(maxLength: ETProtocolV6.defaultMaxProtoLength)
             XCTAssertThrowsError(try decoder.feed(prefix))
+        }
+    }
+
+    func testLegacyTerminalInitSchemaAndRawBootstrapBypassAreNotPublicSurface() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(contentsOf: packageRoot.appendingPathComponent("Sources/OpenPawETTransport/OpenPawETTransport.swift"), encoding: .utf8)
+        XCTAssertFalse(source.contains("public struct ETTerminalInit"))
+        XCTAssertFalse(source.contains("public static func terminalInit(_ m: ETTerminalInit)"))
+        XCTAssertFalse(source.contains("public static func decodeTerminalInit"))
+        XCTAssertFalse(source.contains("public init(host: String, port: Int? = nil, stdinPayload: Data)"))
+    }
+
+    func testProtoFrameDecoderRejectsNegativeMaxLengthWithoutTrapping() throws {
+        var decoder = ETProtoFrameDecoder(maxLength: -1)
+        XCTAssertThrowsError(try decoder.feed(Data([0, 0, 0, 0, 0, 0, 0, 0]))) { error in
+            XCTAssertEqual(error as? ETTransportError, .frameTooLarge(0))
         }
     }
 
@@ -59,20 +68,41 @@ final class ETStrictCorrectionTests: XCTestCase {
         XCTAssertEqual(try afterRejected.nextNonceForTesting().hex, "ff0000000000000000000000000000000000000000000000")
     }
 
-    func testTerminalInitRepeatedFieldOrderAndMissingDecoders() throws {
-        let user1 = ETTerminalUserInfo(id: "A", passkey: "P", uid: 1, gid: 2, fd: 3)
-        let user2 = ETTerminalUserInfo(id: "B", passkey: "Q", uid: 4, gid: 5, fd: 6)
-        let initMessage = ETTerminalInit(users: [user1, user2])
-        let encoded = ETProto.terminalInit(initMessage)
-        XCTAssertEqual(encoded.hex, "0a0c0a01411201501801200228030a0c0a0142120151180420052806")
-        XCTAssertEqual(try ETProto.decodeTerminalUserInfo(ETProto.terminalUserInfo(user1)), user1)
-        XCTAssertEqual(try ETProto.decodeTerminalInit(encoded), initMessage)
+    func testUpstreamTermInitOnlyAndMissingDecoders() throws {
+        let user = ETTerminalUserInfo(id: "A", passkey: "P", uid: 1, gid: 2, fd: 3)
+        XCTAssertEqual(try ETProto.decodeTerminalUserInfo(ETProto.terminalUserInfo(user)), user)
 
-        let payload = ETInitialPayload(jumphost: true, terminalInit: initMessage)
+        let term = ETTermInit(environment: [("TERM", "xterm"), ("LANG", "en_US.UTF-8")])
+        XCTAssertEqual(try ETProto.decodeTermInit(ETProto.termInit(term)), term)
+
+        let payload = ETInitialPayload(jumphost: true, environmentVariables: term.environment)
         XCTAssertEqual(try ETProto.decodeInitialPayload(ETProto.initialPayload(payload)), payload)
         let response = ETInitialResponse(connectResponse: ETConnectResponse(status: .returningClient), sequenceHeader: ETSequenceHeader(sequenceNumber: 42))
         XCTAssertEqual(try ETProto.decodeInitialResponse(ETProto.initialResponse(response)), response)
     }
+    func testNonceCarriesThroughDirectionByteAfterDirectionValidation() throws {
+        let key = Data(repeating: 3, count: ETSecretBox.keyBytes)
+        let nonce = Data(Array(repeating: UInt8(0xff), count: 23) + [ETNonceDirection.clientToServer.msb])
+        let box = try ETSecretBox(key: key, direction: .clientToServer, initialNonce: nonce)
+        XCTAssertEqual(try box.nextNonceForTesting().hex, "000000000000000000000000000000000000000000000001")
+    }
+
+    func testBootstrapDefaultTermAndTermBoundsAreStrict() throws {
+        let boot = try ETSSHBootstrapRequest(host: "host", terminalId: "id", passkey: "secret")
+        XCTAssertEqual(String(data: boot.stdinPayload, encoding: .utf8), "id/secret_xterm-256color\n")
+        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "host", terminalId: "id", passkey: "secret", term: ""))
+        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "host", terminalId: "id", passkey: "secret", term: String(repeating: "a", count: 65)))
+        XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "host", terminalId: "id", passkey: "secret", term: "bad/term"))
+    }
+
+    func testReplayReviveWhileAlreadyConnectedIsRejected() throws {
+        var replay = ETReplayBuffer()
+        XCTAssertThrowsError(try replay.revive())
+        try replay.markDisconnected()
+        try replay.revive()
+        XCTAssertThrowsError(try replay.revive())
+    }
+
     func testDuckUpstreamProtobufGoldensBootstrapTermNonceAndExtrema() throws {
         let term = ETTermInit(environment: [("TERM", "xterm-256color"), ("LANG", "en_US.UTF-8")])
         XCTAssertEqual(ETProto.termInit(term).hex, "0a045445524d0a044c414e47120e787465726d2d323536636f6c6f72120b656e5f55532e5554462d38")
@@ -97,9 +127,8 @@ final class ETStrictCorrectionTests: XCTestCase {
         XCTAssertThrowsError(try ETSecretBox(key: Data(repeating: 1, count: ETSecretBox.keyBytes), direction: .clientToServer, initialNonce: Data(repeating: 0xff, count: ETSecretBox.nonceBytes)))
         let key = Data(repeating: 2, count: ETSecretBox.keyBytes)
         let nearEnd = Data(Array(repeating: UInt8(0xff), count: 23) + [ETNonceDirection.clientToServer.msb])
-        let overflowBox = try ETSecretBox(key: key, direction: .clientToServer, initialNonce: nearEnd)
-        XCTAssertThrowsError(try overflowBox.nextNonceForTesting())
-        XCTAssertThrowsError(try overflowBox.nextNonceForTesting())
+        let carryBox = try ETSecretBox(key: key, direction: .clientToServer, initialNonce: nearEnd)
+        XCTAssertEqual(try carryBox.nextNonceForTesting().hex, "000000000000000000000000000000000000000000000001")
         XCTAssertThrowsError(try ETSecretBox(key: key, direction: .clientToServer, initialNonce: Data(Array(repeating: UInt8(0), count: 23) + [ETNonceDirection.serverToClient.msb])))
 
         XCTAssertThrowsError(try ETAckArithmetic.distance(from: Int64.min, to: Int64.max))

@@ -53,15 +53,16 @@ final class ETCorrectionTests: XCTestCase {
         try replay.recordSent(Data([9,9,9]), connected: false)
         XCTAssertEqual(replay.disconnectedBytes, 3)
         XCTAssertThrowsError(try replay.recordSent(Data([8,8,8]), connected: false))
-        replay.revive()
+        try replay.revive()
         XCTAssertEqual(replay.disconnectedBytes, 0)
     }
 
     func testBootstrapUsesFixedRemoteEtterminalCommandAndNoCallerShellText() throws {
-        let req = try ETSSHBootstrapRequest(host: "h", port: 22, stdinPayload: ETProto.initialPayload(environment: [("A", "B")]))
+        let req = try ETSSHBootstrapRequest(host: "h", port: 22, terminalId: "tid", passkey: "pk")
         XCTAssertEqual(req.executable, "ssh")
         XCTAssertEqual(req.arguments, ["-T", "-p", "22", "h", "etterminal", "--protocol", "6"])
-        XCTAssertFalse(req.arguments.joined(separator: " ").contains("$("))
+        XCTAssertEqual(String(data: req.stdinPayload, encoding: .utf8), "tid/pk_xterm-256color\n")
+        XCTAssertFalse(req.arguments.joined(separator: " ").contains("pk"))
     }
 
     func testLifecycleStateMachine() throws {

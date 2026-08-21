@@ -35,4 +35,4 @@ ET packet encryption authenticates the encrypted payload bytes through libsodium
 
 ## Swift 6 concurrency probe
 
-The package is probed with `-swift-version 6 -strict-concurrency=complete -warnings-as-errors`. If this fails in a future toolchain because swift-sodium exposes non-Sendable implementation details, keep CI at the strongest passing mode and record the external dependency failure rather than hiding product-code warnings.
+The package was checked with debug and release SwiftPM builds/tests. A full package-level Swift 6 `-strict-concurrency=complete` probe is currently blocked in pinned `swift-sodium` 0.11.0 before this package's sources are the limiting factor, for example by non-Sendable/global `keygen` declarations under `.build/checkouts/swift-sodium/Sources/Sodium`. Do not document that command as passing for this package until the pinned dependency graph supports it. Keep product-code strictness at the strongest passing boundary and record dependency-only failures separately.
