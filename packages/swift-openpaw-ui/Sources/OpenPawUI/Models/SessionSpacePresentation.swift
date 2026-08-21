@@ -194,13 +194,75 @@ public final class LiveMultiplexerSessionSpaceProvider: SessionSpaceProviding {
 public protocol SessionRestorationStoring: AnyObject {
     func loadPlan(for hostID: HostID) async -> SessionRestorationPlan?
     func save(_ plan: SessionRestorationPlan) async
+    func clearPlan(for hostID: HostID) async
 }
 
-public final class MemorySessionRestorationStore: SessionRestorationStoring {
-    private var plans: [HostID: SessionRestorationPlan] = [:]
-    public init() {}
-    public func loadPlan(for hostID: HostID) async -> SessionRestorationPlan? { plans[hostID] }
-    public func save(_ plan: SessionRestorationPlan) async { plans[plan.hostID] = plan }
+public final class LocalSessionRestorationStore: SessionRestorationStoring {
+    private struct Envelope: Codable { var plans: [String: SessionRestorationPlan] }
+
+    private let url: URL
+    private let maxPlans: Int
+    private let fileManager: FileManager
+    private var plans: [HostID: SessionRestorationPlan]?
+
+    public convenience init(maxPlans: Int = 20) {
+        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        self.init(directory: directory, maxPlans: maxPlans)
+    }
+
+    public init(directory: URL, maxPlans: Int = 20, fileManager: FileManager = .default) {
+        self.url = directory.appendingPathComponent("session-restoration.json")
+        self.maxPlans = max(1, maxPlans)
+        self.fileManager = fileManager
+    }
+
+    public func loadPlan(for hostID: HostID) async -> SessionRestorationPlan? {
+        loadIfNeeded()[hostID]
+    }
+
+    public func save(_ plan: SessionRestorationPlan) async {
+        var current = loadIfNeeded()
+        current[plan.hostID] = plan
+        plans = bounded(current)
+        persist()
+    }
+
+    public func clearPlan(for hostID: HostID) async {
+        var current = loadIfNeeded()
+        current.removeValue(forKey: hostID)
+        plans = current
+        persist()
+    }
+
+    private func loadIfNeeded() -> [HostID: SessionRestorationPlan] {
+        if let plans { return plans }
+        guard let data = try? Data(contentsOf: url) else {
+            plans = [:]
+            return [:]
+        }
+        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data) else {
+            plans = [:]
+            return [:]
+        }
+        let decoded = envelope.plans.reduce(into: [HostID: SessionRestorationPlan]()) { partial, entry in
+            guard let hostID = UUID(uuidString: entry.key), entry.value.hostID == hostID else { return }
+            partial[hostID] = entry.value
+        }
+        plans = bounded(decoded)
+        return plans ?? [:]
+    }
+
+    private func bounded(_ input: [HostID: SessionRestorationPlan]) -> [HostID: SessionRestorationPlan] {
+        Dictionary(uniqueKeysWithValues: input.sorted { $0.value.capturedAt > $1.value.capturedAt }.prefix(maxPlans).map { ($0.key, $0.value) })
+    }
+
+    private func persist() {
+        let directory = url.deletingLastPathComponent()
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let keyed = (plans ?? [:]).reduce(into: [String: SessionRestorationPlan]()) { $0[$1.key.uuidString] = $1.value }
+        guard let data = try? JSONEncoder().encode(Envelope(plans: keyed)) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
 }
 
 @MainActor
@@ -211,4 +273,31 @@ public protocol SessionSpaceCommandExecuting: AnyObject {
 public final class EmptySessionSpaceCommandExecutor: SessionSpaceCommandExecuting {
     public init() {}
     public func executeSessionCommand(_ command: String) async throws {}
+}
+
+public struct SessionRestorationRecorder: Sendable {
+    public init() {}
+
+    public func planForAttach(hostID: HostID, session: RemoteSession, capturedAt: Date = Date()) -> SessionRestorationPlan? {
+        guard session.isAlive else { return nil }
+        return SessionRestorationPlan(
+            hostID: hostID,
+            multiplexer: session.kind,
+            multiplexerTarget: session.id,
+            workingDirectory: session.workingDirectory,
+            capturedAt: capturedAt)
+    }
+
+    public func planForCreate(hostID: HostID, kind: MultiplexerKind, name: String, capturedAt: Date = Date()) -> SessionRestorationPlan? {
+        guard !name.isEmpty else { return nil }
+        return SessionRestorationPlan(hostID: hostID, multiplexer: kind, multiplexerTarget: name, capturedAt: capturedAt)
+    }
+
+    public func bareShellPlanIfAppropriate(hostID: HostID, remoteDirectory: String, existingPlan: SessionRestorationPlan?, capturedAt: Date = Date()) -> SessionRestorationPlan? {
+        guard existingPlan?.isReattachable != true else { return nil }
+        return SessionRestorationPlan(
+            hostID: hostID,
+            workingDirectory: remoteDirectory.isEmpty ? nil : remoteDirectory,
+            capturedAt: capturedAt)
+    }
 }

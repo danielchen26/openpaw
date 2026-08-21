@@ -121,7 +121,7 @@ final class AppWiring {
     let terminal: SSHTerminalBackend
     let hostAPI: HostAPIBackend
     let gate: GateController
-    let restorationStore = MemorySessionRestorationStore()
+    let restorationStore = LocalSessionRestorationStore()
 
     /// A device preference, so it lives in `UserDefaults` rather than in the model, which holds host state.
     var terminalFontSize: CGFloat {
@@ -161,7 +161,8 @@ final class AppWiring {
                 )
             },
             sessionSpaceProvider: LiveMultiplexerSessionSpaceProvider(runner: terminal, restorationStore: restorationStore),
-            sessionCommandExecutor: TerminalSessionCommandExecutor(terminal: terminal)
+            sessionCommandExecutor: TerminalSessionCommandExecutor(terminal: terminal),
+            restorationStore: restorationStore
         )
         cachedRoot = created
         return created
@@ -269,7 +270,17 @@ final class AppWiring {
 
     func handleBackground() {
         gate.handleBackground()
+        recordBareShellRestorationPlanIfNeeded()
         persistHosts()
+    }
+
+    private func recordBareShellRestorationPlanIfNeeded() {
+        guard let hostID = model.selectedHostID, model.connection.isConnected else { return }
+        Task {
+            let existing = await restorationStore.loadPlan(for: hostID)
+            guard let plan = SessionRestorationRecorder().bareShellPlanIfAppropriate(hostID: hostID, remoteDirectory: remoteDirectory, existingPlan: existing) else { return }
+            await restorationStore.save(plan)
+        }
     }
 
     func persistHosts() {

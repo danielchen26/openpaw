@@ -114,8 +114,85 @@ final class SessionSpacePresentationTests: XCTestCase {
         XCTAssertEqual(snapshot.issues, ["Herdr: discovery command failed with exit 2"])
     }
 
+    @MainActor
+    func testLocalRestorationStoreRoundTripsByHost() async throws {
+        let directory = try temporaryDirectory()
+        let hostID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+        let otherHostID = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        let plan = SessionRestorationPlan(hostID: hostID, multiplexer: .tmux, multiplexerTarget: "$1", workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 1))
+        await LocalSessionRestorationStore(directory: directory).save(plan)
+
+        let reloaded = LocalSessionRestorationStore(directory: directory)
+        let loaded = await reloaded.loadPlan(for: hostID)
+        let otherLoaded = await reloaded.loadPlan(for: otherHostID)
+        XCTAssertEqual(loaded, plan)
+        XCTAssertNil(otherLoaded)
+    }
+
+    @MainActor
+    func testLocalRestorationStoreFailsClosedForCorruptData() async throws {
+        let directory = try temporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("not json".utf8).write(to: directory.appendingPathComponent("session-restoration.json"))
+
+        let store = LocalSessionRestorationStore(directory: directory)
+        let loaded = await store.loadPlan(for: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!)
+        XCTAssertNil(loaded)
+    }
+
+    @MainActor
+    func testLocalRestorationStoreBoundsPlansByNewestCapture() async throws {
+        let directory = try temporaryDirectory()
+        let store = LocalSessionRestorationStore(directory: directory, maxPlans: 2)
+        let old = UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+        let middle = UUID(uuidString: "77777777-7777-7777-7777-777777777777")!
+        let newest = UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
+        await store.save(SessionRestorationPlan(hostID: old, workingDirectory: "/old", capturedAt: Date(timeIntervalSince1970: 1)))
+        await store.save(SessionRestorationPlan(hostID: middle, workingDirectory: "/middle", capturedAt: Date(timeIntervalSince1970: 2)))
+        await store.save(SessionRestorationPlan(hostID: newest, workingDirectory: "/new", capturedAt: Date(timeIntervalSince1970: 3)))
+
+        let reloaded = LocalSessionRestorationStore(directory: directory, maxPlans: 2)
+        let oldPlan = await reloaded.loadPlan(for: old)
+        let middlePlan = await reloaded.loadPlan(for: middle)
+        let newestPlan = await reloaded.loadPlan(for: newest)
+        XCTAssertNil(oldPlan)
+        XCTAssertEqual(middlePlan?.workingDirectory, "/middle")
+        XCTAssertEqual(newestPlan?.workingDirectory, "/new")
+    }
+
+    func testRecorderTruthfullyRecordsAttachCreateAndBareShellPlans() {
+        let hostID = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
+        let recorder = SessionRestorationRecorder()
+        let capturedAt = Date(timeIntervalSince1970: 10)
+        let session = RemoteSession(id: "$2", name: "api", kind: .zellij, isAttached: false, isAlive: true, windowCount: 1, workingDirectory: "/work")
+
+        let attach = recorder.planForAttach(hostID: hostID, session: session, capturedAt: capturedAt)
+        XCTAssertEqual(attach?.hostID, hostID)
+        XCTAssertEqual(attach?.multiplexer, .zellij)
+        XCTAssertEqual(attach?.multiplexerTarget, "$2")
+        XCTAssertEqual(attach?.workingDirectory, "/work")
+
+        let create = recorder.planForCreate(hostID: hostID, kind: .screen, name: "created", capturedAt: capturedAt)
+        XCTAssertEqual(create?.multiplexer, .screen)
+        XCTAssertEqual(create?.multiplexerTarget, "created")
+        XCTAssertNil(create?.workingDirectory)
+
+        let bareShell = recorder.bareShellPlanIfAppropriate(hostID: hostID, remoteDirectory: "/latest", existingPlan: create, capturedAt: capturedAt)
+        XCTAssertNil(bareShell)
+        let replacement = recorder.bareShellPlanIfAppropriate(hostID: hostID, remoteDirectory: "/latest", existingPlan: nil, capturedAt: capturedAt)
+        XCTAssertNil(replacement?.multiplexer)
+        XCTAssertNil(replacement?.multiplexerTarget)
+        XCTAssertEqual(replacement?.workingDirectory, "/latest")
+    }
+
     private func testHost() -> HostRecord {
         HostRecord(nickname: "test", hostname: "test.local", username: "dev", auth: .agentForwarding)
+    }
+
+    private func temporaryDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
     }
 }
 

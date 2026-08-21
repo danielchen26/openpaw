@@ -166,6 +166,7 @@ public struct RootView: View {
     private let scrollback: ScrollbackStore
     private let sessionSpaceProvider: any SessionSpaceProviding
     private let sessionCommandExecutor: any SessionSpaceCommandExecuting
+    private let restorationStore: (any SessionRestorationStoring)?
     @State private var sessionSpace = SessionSpaceSnapshot()
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -179,12 +180,14 @@ public struct RootView: View {
         model: OpenPawModel,
         terminalSurface: @escaping () -> AnyView,
         sessionSpaceProvider: any SessionSpaceProviding = EmptySessionSpaceProvider(),
-        sessionCommandExecutor: any SessionSpaceCommandExecuting = EmptySessionSpaceCommandExecutor()
+        sessionCommandExecutor: any SessionSpaceCommandExecuting = EmptySessionSpaceCommandExecutor(),
+        restorationStore: (any SessionRestorationStoring)? = nil
     ) {
         self.model = model
         self.terminalSurface = terminalSurface
         self.sessionSpaceProvider = sessionSpaceProvider
         self.sessionCommandExecutor = sessionCommandExecutor
+        self.restorationStore = restorationStore
         self.router = ShellRouter()
         let settings = OpenPawSettings()
         self.settings = settings
@@ -632,11 +635,13 @@ public struct RootView: View {
 
     private func attachSession(_ session: RemoteSession) {
         guard session.isAlive else { return }
+        recordAttachRestorationPlan(session)
         runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).attach(session), refreshAfterCommand: false)
     }
 
     private func createSession(_ name: String) {
         let adapter = MultiplexerAdapters.adapter(for: sessionSpace.transport.preferredMultiplexer ?? .tmux)
+        recordCreateRestorationPlan(kind: adapter.kind, name: name)
         runSessionCommand(adapter.create(name: name, directory: nil), refreshAfterCommand: false)
     }
 
@@ -646,6 +651,7 @@ public struct RootView: View {
     }
 
     private func killSession(_ session: RemoteSession) {
+        clearRestorationPlan(ifMatches: session)
         runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).kill(session), refreshAfterCommand: true)
     }
 
@@ -653,6 +659,28 @@ public struct RootView: View {
         guard plan.hostID == model.selectedHostID, sessionSpace.hostID == model.selectedHostID else { return }
         guard let command = plan.restorationCommand() else { return }
         runSessionCommand(command, refreshAfterCommand: false)
+    }
+
+    private func recordAttachRestorationPlan(_ session: RemoteSession) {
+        guard let hostID = model.selectedHostID, sessionSpace.hostID == hostID else { return }
+        if let plan = SessionRestorationRecorder().planForAttach(hostID: hostID, session: session) {
+            Task { await restorationStore?.save(plan) }
+        }
+    }
+
+    private func recordCreateRestorationPlan(kind: MultiplexerKind, name: String) {
+        guard let hostID = model.selectedHostID, sessionSpace.hostID == hostID else { return }
+        if let plan = SessionRestorationRecorder().planForCreate(hostID: hostID, kind: kind, name: name) {
+            Task { await restorationStore?.save(plan) }
+        }
+    }
+
+    private func clearRestorationPlan(ifMatches session: RemoteSession) {
+        guard let hostID = model.selectedHostID, sessionSpace.hostID == hostID else { return }
+        Task {
+            guard let plan = await restorationStore?.loadPlan(for: hostID), plan.multiplexer == session.kind, plan.multiplexerTarget == session.id else { return }
+            await restorationStore?.clearPlan(for: hostID)
+        }
     }
 
     private enum SessionSpaceActionError: Error { case unavailable }
