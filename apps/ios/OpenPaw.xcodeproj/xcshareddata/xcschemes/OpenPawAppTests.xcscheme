@@ -14,6 +14,20 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "1A2B3C000000000000000006"
+               BuildableName = "OpenPaw.app"
+               BlueprintName = "OpenPaw"
+               ReferencedContainer = "container:OpenPaw.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "1A2B3C000000000000000007"
                BuildableName = "OpenPawAppTests.xctest"
                BlueprintName = "OpenPawAppTests"

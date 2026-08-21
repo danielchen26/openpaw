@@ -9,6 +9,7 @@ final class SSHTerminalBackendTests: XCTestCase {
         let transport = ControlledTransport()
         let backend = makeBackend(transport)
         try await backend.connect(host: host())
+        let visibleStream = Self.visibleOutput(from: backend)
 
         async let output = backend.run(command: "printf ok")
         let written = await transport.waitForWrite(containing: "printf ok")
@@ -23,7 +24,7 @@ final class SSHTerminalBackendTests: XCTestCase {
         XCTAssertEqual(writes[0], "stty -echo\n")
         XCTAssertTrue(writes[1].contains("printf ok"))
         XCTAssertEqual(writes.last, "stty echo\n")
-        let visible = await Self.firstVisibleOutput(from: backend)
+        let visible = await Self.firstVisibleOutput(from: visibleStream)
         XCTAssertEqual(visible, "after")
     }
 
@@ -31,6 +32,7 @@ final class SSHTerminalBackendTests: XCTestCase {
         let transport = ControlledTransport()
         let backend = makeBackend(transport)
         try await backend.connect(host: host())
+        let visibleStream = Self.visibleOutput(from: backend)
 
         async let output = backend.run(command: "printf split")
         let commandWrite = await transport.waitForWrite(containing: "printf split")
@@ -43,7 +45,7 @@ final class SSHTerminalBackendTests: XCTestCase {
         await transport.emitOutput(Data(":0\nvisible".utf8))
 
         let captured = try await output
-        let visible = await Self.firstVisibleOutput(from: backend)
+        let visible = await Self.firstVisibleOutput(from: visibleStream)
         XCTAssertEqual(captured, "split")
         XCTAssertEqual(visible, "visible")
     }
@@ -52,6 +54,7 @@ final class SSHTerminalBackendTests: XCTestCase {
         let transport = ControlledTransport()
         let backend = makeBackend(transport)
         try await backend.connect(host: host())
+        let visibleStream = Self.visibleOutput(from: backend)
 
         async let output = backend.run(command: "printf clean")
         _ = await transport.waitForWrite(containing: "stty -echo")
@@ -63,7 +66,7 @@ final class SSHTerminalBackendTests: XCTestCase {
         await transport.emitOutput("clean\n\(marker):0\nvisible")
 
         let captured = try await output
-        let visible = await Self.firstVisibleOutput(from: backend)
+        let visible = await Self.firstVisibleOutput(from: visibleStream)
         XCTAssertEqual(captured, "clean")
         XCTAssertEqual(visible, "visible")
     }
@@ -72,6 +75,7 @@ final class SSHTerminalBackendTests: XCTestCase {
         let transport = ControlledTransport()
         let backend = makeBackend(transport)
         try await backend.connect(host: host())
+        let visibleStream = Self.visibleOutput(from: backend)
 
         async let output = backend.run(command: "printf split")
         let commandWrite = await transport.waitForWrite(containing: "printf split")
@@ -88,7 +92,7 @@ final class SSHTerminalBackendTests: XCTestCase {
         await transport.emitOutput(Data("\(marker[splitEnd...]):0\nvisible".utf8))
 
         let captured = try await output
-        let visible = await Self.firstVisibleOutput(from: backend)
+        let visible = await Self.firstVisibleOutput(from: visibleStream)
         XCTAssertEqual(captured, "split")
         XCTAssertEqual(visible, "visible")
     }
@@ -199,7 +203,7 @@ final class SSHTerminalBackendTests: XCTestCase {
         let backend = makeBackend(transport)
         try await backend.connect(host: host())
 
-        async let visible = Self.firstVisibleOutput(from: backend)
+        async let visible = Self.firstVisibleOutput(from: Self.visibleOutput(from: backend))
         await transport.emitOutput("ordinary")
 
         let captured = await visible
@@ -217,21 +221,42 @@ final class SSHTerminalBackendTests: XCTestCase {
         HostRecord(nickname: "test", hostname: "example.invalid", username: "me", auth: .agentForwarding)
     }
 
-    private static func firstVisibleOutput(from backend: SSHTerminalBackend) async -> String {
-        for await chunk in backend.outputStream {
+    /// Subscribes to the visible terminal output *before* the command under test runs.
+    ///
+    /// `outputStream` is a live broadcast, so a subscription taken after the backend has already relayed the
+    /// post-marker remainder would wait forever for bytes that were published to nobody. Every assertion about what
+    /// the user sees therefore opens its stream first and reads from it afterwards.
+    private static func visibleOutput(from backend: SSHTerminalBackend) -> AsyncStream<Data> {
+        backend.outputStream
+    }
+
+    private static func firstVisibleOutput(from stream: AsyncStream<Data>) async -> String {
+        for await chunk in stream {
             return String(decoding: chunk, as: UTF8.self)
         }
         return ""
     }
 
     private static func marker(in text: String) -> String? {
-        let tokens = text.split(whereSeparator: { $0.isWhitespace || $0 == "'" }).map(String.init)
+        let tokens = tokens(in: text)
         return tokens.first { $0.hasPrefix("__openpaw_end_") }
             ?? tokens.first { $0.hasPrefix("__openpaw_") && !$0.hasPrefix("__openpaw_start_") }
     }
 
     private static func startMarker(in text: String) -> String? {
-        text.split(whereSeparator: { $0.isWhitespace || $0 == "'" }).first { $0.hasPrefix("__openpaw_start_") }.map(String.init)
+        tokens(in: text).first { $0.hasPrefix("__openpaw_start_") }
+    }
+
+    /// Extracts the nonce markers as the shell would see them.
+    ///
+    /// The probe embeds the start marker as `printf '%s\n' __openpaw_start_X__; { ... }`, so splitting on whitespace
+    /// alone keeps the trailing `;` attached. Echoing that back would never match the marker the backend is scanning
+    /// for, and the test would sit until the capture timeout for a reason that has nothing to do with the code under
+    /// test — so shell punctuation is stripped here rather than papered over with a longer timeout.
+    private static func tokens(in text: String) -> [String] {
+        text
+            .split(whereSeparator: { $0.isWhitespace || $0 == "'" })
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ";{}()&|<>\"")) }
     }
 }
 

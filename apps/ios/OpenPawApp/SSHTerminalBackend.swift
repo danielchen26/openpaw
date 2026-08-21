@@ -171,6 +171,14 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner {
         do {
             try await transport.connect(configuration: configuration)
             reconnectAttempt = 0
+            // `connect` returning without throwing *is* the connection, so the state is settled here rather than
+            // left to the pump task that drains `transport.state`. That task is scheduled independently, so waiting
+            // on it would leave `connect(host:)` returning while `lastState` is still `.resolving` — and the first
+            // thing the app does after connecting is probe the host with `run(command:)`, which would then fail with
+            // `notConnected` purely because a task had not run yet. The pump re-publishing `.connected` is harmless.
+            if !lastState.isConnected {
+                publish(.connected(configuration.requestedTransport ?? .ssh))
+            }
         } catch let error as TransportError {
             switch error {
             case .hostKeyUnknown, .hostKeyChanged:
@@ -267,7 +275,9 @@ private final class Capture: @unchecked Sendable {
         switch phase {
         case .awaitingStart:
             preStartBuffer.append(chunk)
-            if preStartBuffer.count > maxBytes + scanSlack { preStartBuffer.removeFirst(preStartBuffer.count - maxBytes - scanSlack) }
+            // The buffer is deliberately *not* trimmed before this search. Everything before the start marker is
+            // prompt noise that gets discarded anyway, and a command whose first chunk is larger than the cap would
+            // otherwise have the marker itself sliced off the front and capture nothing at all.
             guard let startRange = startLineRange(in: preStartBuffer) else {
                 keepPossibleStartSuffix()
                 lock.unlock()
@@ -327,7 +337,19 @@ private final class Capture: @unchecked Sendable {
         return nil
     }
 
+    /// Drops pre-start noise while keeping every byte that could still become the start marker.
+    ///
+    /// A marker split across chunks is the normal case on a real PTY, so the tail that could be a marker prefix is
+    /// always retained. When the marker has fully arrived but its terminating newline has not, the whole marker is
+    /// kept: trimming to a fixed suffix length here would shear off its first bytes and strand the capture until it
+    /// timed out.
     private func keepPossibleStartSuffix() {
+        if let markerStart = preStartBuffer.range(of: startMarker)?.lowerBound {
+            if markerStart > preStartBuffer.startIndex {
+                preStartBuffer.removeFirst(preStartBuffer.distance(from: preStartBuffer.startIndex, to: markerStart))
+            }
+            return
+        }
         let keep = max(0, startMarker.count - 1)
         if preStartBuffer.count > keep { preStartBuffer.removeFirst(preStartBuffer.count - keep) }
     }
