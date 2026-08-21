@@ -148,7 +148,7 @@ Response data is sanitized candidate metadata only:
 
 The response never includes raw `tailscale status` JSON, users, keys, route advertisements, credentials, or command output. Candidates are metadata only. They are not SSH-ready, trusted, or verified, and clients must not label them that way.
 
-Typed unavailable states include missing Tailscale CLI and logged-out Tailscale. Malformed or unsupported CLI JSON is a hard server error with safe user text.
+Typed unavailable states include missing Tailscale CLI, logged-out Tailscale, timeout, output limit, and busy when another process-backed discovery is already running. Malformed or unsupported CLI JSON is a hard server error with safe user text.
 
 ### `POST /v1/uploads` — `uploads.write`
 

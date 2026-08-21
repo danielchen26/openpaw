@@ -6,6 +6,7 @@
 
 use std::future::Future;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 
 use super::ApiError;
 
@@ -34,14 +36,43 @@ pub trait TailscaleStatusRunner: Send + Sync + 'static {
 }
 
 /// Process-backed fixed argv runner.
-#[derive(Debug, Default)]
-pub struct ProcessTailscaleStatusRunner;
+#[derive(Debug)]
+pub struct ProcessTailscaleStatusRunner {
+    executable: PathBuf,
+    semaphore: Arc<Semaphore>,
+}
+
+impl Default for ProcessTailscaleStatusRunner {
+    fn default() -> Self {
+        Self::new("tailscale")
+    }
+}
+
+impl ProcessTailscaleStatusRunner {
+    /// Create a process runner for an executable path or name.
+    pub fn new(executable: impl Into<PathBuf>) -> Self {
+        Self {
+            executable: executable.into(),
+            semaphore: Arc::new(Semaphore::new(1)),
+        }
+    }
+}
 
 impl TailscaleStatusRunner for ProcessTailscaleStatusRunner {
     fn status_json(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TailscaleUnavailable>> + Send + '_>> {
-        Box::pin(async move { run_status_command(MAX_STATUS_BYTES, STATUS_TIMEOUT).await })
+        Box::pin(async move {
+            let permit = self
+                .semaphore
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| TailscaleUnavailable::busy())?;
+            let result =
+                run_status_command(&self.executable, MAX_STATUS_BYTES, STATUS_TIMEOUT).await;
+            drop(permit);
+            result
+        })
     }
 }
 
@@ -57,6 +88,8 @@ pub enum TailscaleUnavailable {
     Timeout(String),
     /// The fixed command produced more output than the bounded limit.
     OutputLimit(String),
+    /// Another process-backed discovery is already running.
+    Busy(String),
 }
 
 /// Structured unavailable response body.
@@ -91,6 +124,9 @@ impl TailscaleUnavailable {
         Self::OutputLimit(
             "Tailscale discovery returned too much data on the connected host.".to_owned(),
         )
+    }
+    fn busy() -> Self {
+        Self::Busy("Tailscale discovery is already running on the connected host.".to_owned())
     }
 }
 
@@ -149,7 +185,9 @@ fn unavailable_response(err: TailscaleUnavailable) -> ApiError {
             StatusCode::SERVICE_UNAVAILABLE
         }
         TailscaleUnavailable::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
-        TailscaleUnavailable::OutputLimit(_) => StatusCode::BAD_GATEWAY,
+        TailscaleUnavailable::OutputLimit(_) | TailscaleUnavailable::Busy(_) => {
+            StatusCode::BAD_GATEWAY
+        }
     };
     ApiError::json(status, serde_json::json!({ "error": err }))
 }
@@ -187,9 +225,7 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, Tails
 
     let mut candidates = Vec::new();
     for peer in values {
-        if let Some(candidate) = candidate_from_peer(peer) {
-            candidates.push(candidate);
-        }
+        candidates.push(candidate_from_peer(peer)?);
     }
     candidates.sort_by(|a, b| a.display_name.cmp(&b.display_name).then(a.id.cmp(&b.id)));
     Ok(TailscaleDevicesResponse {
@@ -211,9 +247,15 @@ fn is_logged_out_status(value: &Value) -> bool {
     )
 }
 
-fn candidate_from_peer(peer: &Value) -> Option<TailscaleDeviceCandidate> {
+fn candidate_from_peer(peer: &Value) -> Result<TailscaleDeviceCandidate, TailscaleParseError> {
+    if !peer.is_object() {
+        return Err(TailscaleParseError::Malformed(
+            "tailscale peer entry is not an object".to_owned(),
+        ));
+    }
     let id = string_at(peer, &["ID", "Id", "id", "NodeID", "StableID"])
-        .or_else(|| string_at(peer, &["DNSName", "HostName", "Name"]))?;
+        .or_else(|| string_at(peer, &["DNSName", "HostName", "Name"]))
+        .ok_or_else(|| TailscaleParseError::Malformed("tailscale peer is missing id".to_owned()))?;
     let display_name =
         string_at(peer, &["HostName", "Name", "DNSName"]).unwrap_or_else(|| id.clone());
     let dns_name = string_at(peer, &["DNSName"]);
@@ -221,7 +263,7 @@ fn candidate_from_peer(peer: &Value) -> Option<TailscaleDeviceCandidate> {
     let last_seen = string_at(peer, &["LastSeen"]);
     let online = peer.get("Online").and_then(Value::as_bool).unwrap_or(false);
     let tailscale_ips = ip_list(peer)?;
-    Some(TailscaleDeviceCandidate {
+    Ok(TailscaleDeviceCandidate {
         id,
         display_name,
         dns_name,
@@ -242,29 +284,48 @@ fn string_at(value: &Value, keys: &[&str]) -> Option<String> {
     })
 }
 
-fn ip_list(peer: &Value) -> Option<Vec<String>> {
+fn ip_list(peer: &Value) -> Result<Vec<String>, TailscaleParseError> {
     let raw = peer
         .get("TailscaleIPs")
-        .or_else(|| peer.get("TailscaleIP"))?;
+        .or_else(|| peer.get("TailscaleIP"))
+        .ok_or_else(|| {
+            TailscaleParseError::Malformed("tailscale peer is missing tailscale IPs".to_owned())
+        })?;
     let mut ips = Vec::new();
     match raw {
         Value::Array(items) => {
             for item in items {
-                if let Some(ip) = item.as_str().and_then(normalize_ip) {
-                    ips.push(ip);
-                }
-            }
-        }
-        Value::String(s) => {
-            if let Some(ip) = normalize_ip(s) {
+                let ip = item.as_str().and_then(normalize_ip).ok_or_else(|| {
+                    TailscaleParseError::Malformed(
+                        "tailscale peer contains invalid tailscale IP".to_owned(),
+                    )
+                })?;
                 ips.push(ip);
             }
         }
-        _ => {}
+        Value::String(s) => {
+            let ip = normalize_ip(s).ok_or_else(|| {
+                TailscaleParseError::Malformed(
+                    "tailscale peer contains invalid tailscale IP".to_owned(),
+                )
+            })?;
+            ips.push(ip);
+        }
+        _ => {
+            return Err(TailscaleParseError::Malformed(
+                "tailscale peer has unsupported tailscale IP shape".to_owned(),
+            ));
+        }
     }
     ips.sort();
     ips.dedup();
-    (!ips.is_empty()).then_some(ips)
+    if ips.is_empty() {
+        Err(TailscaleParseError::Malformed(
+            "tailscale peer has no valid tailscale IPs".to_owned(),
+        ))
+    } else {
+        Ok(ips)
+    }
 }
 
 fn normalize_ip(value: &str) -> Option<String> {
@@ -272,10 +333,11 @@ fn normalize_ip(value: &str) -> Option<String> {
 }
 
 async fn run_status_command(
+    executable: &Path,
     max_bytes: usize,
     timeout: Duration,
 ) -> Result<Vec<u8>, TailscaleUnavailable> {
-    let mut child = Command::new("tailscale")
+    let mut child = Command::new(executable)
         .arg("status")
         .arg("--json")
         .kill_on_drop(true)
@@ -292,38 +354,51 @@ async fn run_status_command(
         })?;
 
     let mut stdout = child.stdout.take().expect("stdout piped");
-    let output = async move {
-        let mut bytes = Vec::new();
-        let mut limited = (&mut stdout).take((max_bytes + 1) as u64);
-        limited
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|_| TailscaleUnavailable::logged_out())?;
-        let status = child
-            .wait()
-            .await
-            .map_err(|_| TailscaleUnavailable::logged_out())?;
-        if bytes.len() > max_bytes {
-            return Err(TailscaleUnavailable::output_limit());
+    let mut bytes = Vec::new();
+    let mut limited = (&mut stdout).take((max_bytes + 1) as u64);
+    match tokio::time::timeout(timeout, limited.read_to_end(&mut bytes)).await {
+        Ok(result) => {
+            result.map_err(|_| TailscaleUnavailable::logged_out())?;
         }
-        if !status.success() {
-            return Err(TailscaleUnavailable::logged_out());
+        Err(_) => {
+            // `kill_on_drop` is a backstop. Explicit kill/reap prevents an orphan
+            // or zombie when the timeout wins while the child is still running.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(TailscaleUnavailable::timeout());
         }
-        Ok(bytes)
+    }
+
+    if bytes.len() > max_bytes {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err(TailscaleUnavailable::output_limit());
+    }
+
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(result) => result.map_err(|_| TailscaleUnavailable::logged_out())?,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(TailscaleUnavailable::timeout());
+        }
     };
-    tokio::time::timeout(timeout, output)
-        .await
-        .map_err(|_| TailscaleUnavailable::timeout())?
+    if !status.success() {
+        return Err(TailscaleUnavailable::logged_out());
+    }
+    Ok(bytes)
 }
 
 /// Shared default runner.
 pub fn default_runner() -> Arc<dyn TailscaleStatusRunner> {
-    Arc::new(ProcessTailscaleStatusRunner)
+    Arc::new(ProcessTailscaleStatusRunner::default())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
 
     #[test]
     fn parses_real_peer_map_shape_and_sanitizes_fields() {
@@ -363,11 +438,133 @@ mod tests {
     }
 
     #[test]
+    fn rejects_mixed_valid_and_invalid_peer_entries() {
+        let err = parse_status_json(
+            br#"{"Peer":{"good":{"ID":"n1","HostName":"ok","TailscaleIP":"100.64.0.2"},"bad":{"ID":"n2","HostName":"bad"}}}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, TailscaleParseError::Malformed(_)));
+    }
+
+    #[test]
     fn backend_state_needs_login_is_typed_logged_out() {
         let err = parse_status_json(br#"{"BackendState":"NeedsLogin","Peer":{}}"#).unwrap_err();
         assert!(matches!(
             err,
             TailscaleParseError::Unavailable(TailscaleUnavailable::LoggedOut(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn process_runner_reports_missing_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing-tailscale");
+        let err = run_status_command(&missing, MAX_STATUS_BYTES, STATUS_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TailscaleUnavailable::MissingCli(_)));
+    }
+
+    #[tokio::test]
+    async fn process_runner_maps_nonzero_to_logged_out_without_stderr_leak() {
+        let (_temp, script) = executable_script("nonzero", "echo secret-stderr >&2\nexit 1\n");
+        let err = run_status_command(&script, MAX_STATUS_BYTES, STATUS_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, TailscaleUnavailable::LoggedOut(message) if !message.contains("secret-stderr"))
+        );
+    }
+
+    #[tokio::test]
+    async fn process_runner_discards_stderr_flood() {
+        let (_temp, script) = executable_script(
+            "stderr-flood",
+            "i=0\nwhile [ $i -lt 20000 ]; do echo stderr-flood >&2; i=$((i+1)); done\nprintf '%s' '[{\"id\":\"n1\",\"Name\":\"ok\",\"TailscaleIP\":\"100.64.0.2\"}]'\n",
+        );
+        let out = run_status_command(&script, MAX_STATUS_BYTES, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("100.64.0.2"));
+    }
+
+    #[tokio::test]
+    async fn process_runner_kills_and_reaps_on_stdout_overflow_promptly() {
+        let (_temp, script) = executable_script(
+            "overflow",
+            "i=0\nwhile [ $i -lt 10000 ]; do printf x; i=$((i+1)); done\nsleep 5\n",
+        );
+        let started = Instant::now();
+        let err = run_status_command(&script, 16, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TailscaleUnavailable::OutputLimit(_)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn process_runner_rejects_concurrent_process_discovery_as_busy() {
+        let (_temp, script) = executable_script(
+            "slow-ok",
+            "sleep 1\nprintf '%s' '[{\"id\":\"n1\",\"Name\":\"ok\",\"TailscaleIP\":\"100.64.0.2\"}]'\n",
+        );
+        let runner = Arc::new(ProcessTailscaleStatusRunner::new(script));
+        let first = {
+            let runner = Arc::clone(&runner);
+            tokio::spawn(async move { runner.status_json().await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let err = runner.status_json().await.unwrap_err();
+        assert!(
+            matches!(err, TailscaleUnavailable::Busy(message) if !message.contains("100.64.0.2"))
+        );
+        first.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn process_runner_kills_and_reaps_on_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pid");
+        let script = temp.path().join("timeout");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho $$ > {}\nsleep 10\n", pid_file.display()),
+        )
+        .unwrap();
+        make_executable(&script);
+
+        let err = run_status_command(&script, MAX_STATUS_BYTES, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TailscaleUnavailable::Timeout(_)));
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let still_alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!still_alive, "timed out child should be killed and reaped");
+    }
+
+    fn executable_script(name: &str, body: &str) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join(name);
+        std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
+        make_executable(&script);
+        (temp, script)
+    }
+
+    fn make_executable(path: &Path) {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
     }
 }

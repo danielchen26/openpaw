@@ -1223,12 +1223,20 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
             502,
             "output_limit",
         ),
+        (
+            TailscaleUnavailable::Busy(
+                "Tailscale discovery is already running on the connected host.".to_owned(),
+            ),
+            502,
+            "busy",
+        ),
     ] {
         let expected_message = match &unavailable {
             TailscaleUnavailable::MissingCli(message)
             | TailscaleUnavailable::LoggedOut(message)
             | TailscaleUnavailable::Timeout(message)
-            | TailscaleUnavailable::OutputLimit(message) => message.clone(),
+            | TailscaleUnavailable::OutputLimit(message)
+            | TailscaleUnavailable::Busy(message) => message.clone(),
         };
         let runner = Arc::new(FakeTailscaleRunner {
             result: Err(unavailable),
