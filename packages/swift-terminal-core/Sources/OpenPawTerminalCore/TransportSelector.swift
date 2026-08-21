@@ -39,25 +39,42 @@ public struct TransportAttempt: Sendable, Hashable, Codable {
     }
 }
 
+/// Feature switches for experimental transport integrations.
+public struct ExperimentalTransportFeatures: Sendable, Equatable {
+    public var eternalTerminalInterop: Bool
+
+    public init(eternalTerminalInterop: Bool = false) {
+        self.eternalTerminalInterop = eternalTerminalInterop
+    }
+
+    public static let disabled = ExperimentalTransportFeatures()
+}
+
 /// The `auto` transport policy.
 ///
-/// Default preference is mosh → Eternal Terminal → SSH: mosh gives local echo
-/// and survives IP changes, ET reconnects but echoes remotely, SSH always works.
+/// Default preference is mosh → SSH unless experimental ET interoperability is
+/// explicitly enabled. With that gate enabled the order is mosh → Eternal
+/// Terminal → SSH: mosh gives local echo and survives IP changes, ET reconnects
+/// but echoes remotely, SSH always works.
 /// A host's pinned choice comes first, then whatever succeeded last time (see
 /// ``HostStore/recordSuccessfulTransport(_:for:)``, which is where that fact is
 /// persisted), then the default order. Transports absent from `available` — not
-/// compiled into this build — never appear in a plan.
+/// compiled into this build or disabled by feature gate — never appear in a plan.
 public struct TransportSelector: Sendable {
     /// Default order, best first.
     public static let canonicalOrder: [TransportKind] = [.mosh, .eternalTerminal, .ssh]
+    public let experimentalFeatures: ExperimentalTransportFeatures
 
-    public init() {}
+    public init(experimentalFeatures: ExperimentalTransportFeatures = .disabled) {
+        self.experimentalFeatures = experimentalFeatures
+    }
 
     public func plan(for host: HostRecord, available: Set<TransportKind>) -> [TransportAttempt] {
         var ordered: [(kind: TransportKind, reason: SelectionReason)] = []
 
         func push(_ kind: TransportKind, _ reason: SelectionReason) {
             guard available.contains(kind) else { return }
+            guard kind != .eternalTerminal || experimentalFeatures.eternalTerminalInterop else { return }
             guard !ordered.contains(where: { $0.kind == kind }) else { return }
             ordered.append((kind, reason))
         }

@@ -4,39 +4,74 @@ import XCTest
 
 final class TransportSelectorTests: XCTestCase {
     private let selector = TransportSelector()
+    private let etEnabledSelector = TransportSelector(
+        experimentalFeatures: ExperimentalTransportFeatures(eternalTerminalInterop: true))
     private let everything: Set<TransportKind> = [.ssh, .mosh, .eternalTerminal]
 
-    func testDefaultOrderIsMoshThenEternalTerminalThenSSH() {
+    func testExperimentalTransportFeaturesDefaultToDisabled() {
+        XCTAssertEqual(ExperimentalTransportFeatures(), .disabled)
+        XCTAssertFalse(ExperimentalTransportFeatures().eternalTerminalInterop)
+    }
+
+    func testDefaultOrderExcludesEternalTerminalWhenFeatureGateIsDisabled() {
         let plan = selector.plan(for: Fixtures.host(), available: everything)
+        XCTAssertEqual(plan.map(\.kind), [.mosh, .ssh])
+        XCTAssertEqual(plan.map(\.reason), [.latencyPreference, .fallback])
+        XCTAssertEqual(plan.map(\.priority), [0, 1])
+    }
+
+    func testDefaultOrderIncludesEternalTerminalWhenFeatureGateIsExplicitlyEnabled() {
+        let plan = etEnabledSelector.plan(for: Fixtures.host(), available: everything)
         XCTAssertEqual(plan.map(\.kind), [.mosh, .eternalTerminal, .ssh])
         XCTAssertEqual(plan.map(\.reason), [.latencyPreference, .fallback, .fallback])
         XCTAssertEqual(plan.map(\.priority), [0, 1, 2])
     }
 
-    func testLastSuccessfulTransportLeadsThePlan() {
+    func testLastSuccessfulEternalTerminalIsExcludedWhenFeatureGateIsDisabled() {
         let host = Fixtures.host(lastSuccessful: .eternalTerminal)
         let plan = selector.plan(for: host, available: everything)
+        XCTAssertEqual(plan.map(\.kind), [.mosh, .ssh])
+        XCTAssertEqual(plan.map(\.reason), [.latencyPreference, .fallback])
+    }
+
+    func testLastSuccessfulEternalTerminalLeadsThePlanWhenFeatureGateIsEnabled() {
+        let host = Fixtures.host(lastSuccessful: .eternalTerminal)
+        let plan = etEnabledSelector.plan(for: host, available: everything)
         XCTAssertEqual(plan.map(\.kind), [.eternalTerminal, .mosh, .ssh])
         XCTAssertEqual(plan.map(\.reason), [.lastKnownGood, .latencyPreference, .fallback])
     }
 
-    func testPinnedTransportBeatsLastKnownGood() {
-        let host = Fixtures.host(preferred: .ssh, lastSuccessful: .eternalTerminal)
+    func testPinnedEternalTerminalIsExcludedWhenFeatureGateIsDisabled() {
+        let host = Fixtures.host(preferred: .eternalTerminal, lastSuccessful: .ssh)
         let plan = selector.plan(for: host, available: everything)
+        XCTAssertEqual(plan.map(\.kind), [.ssh, .mosh])
+        XCTAssertEqual(plan.map(\.reason), [.lastKnownGood, .latencyPreference])
+    }
+
+    func testPreferredEternalTerminalIsExcludedWhenFeatureGateIsDisabled() {
+        let host = Fixtures.host(preferred: .eternalTerminal)
+        let plan = selector.plan(for: host, available: everything)
+        XCTAssertEqual(plan.map(\.kind), [.mosh, .ssh])
+        XCTAssertEqual(plan.map(\.reason), [.latencyPreference, .fallback])
+    }
+
+    func testPinnedTransportBeatsLastKnownGoodWhenFeatureGateAllowsIt() {
+        let host = Fixtures.host(preferred: .ssh, lastSuccessful: .eternalTerminal)
+        let plan = etEnabledSelector.plan(for: host, available: everything)
         XCTAssertEqual(plan.map(\.kind), [.ssh, .eternalTerminal, .mosh])
         XCTAssertEqual(plan.map(\.reason), [.pinned, .lastKnownGood, .latencyPreference])
     }
 
     func testUnavailableTransportsAreFilteredOut() {
         let host = Fixtures.host(preferred: .mosh, lastSuccessful: .mosh)
-        let plan = selector.plan(for: host, available: [.ssh, .eternalTerminal])
+        let plan = etEnabledSelector.plan(for: host, available: [.ssh, .eternalTerminal])
         XCTAssertEqual(plan.map(\.kind), [.eternalTerminal, .ssh])
         XCTAssertEqual(plan.map(\.reason), [.fallback, .fallback])
     }
 
     func testExplainsFallbackForHostWhoseLastSuccessWasEternalTerminal() {
         let host = Fixtures.host(lastSuccessful: .eternalTerminal)
-        let plan = selector.plan(for: host, available: everything)
+        let plan = etEnabledSelector.plan(for: host, available: everything)
         let outcome: [TransportAttempt: TransportError] = [
             plan[0]: .connectionRefused(host: "beta.local", port: 2022),
             plan[1]: .remoteBinaryMissing(.mosh, command: "mosh-server"),
@@ -54,7 +89,7 @@ final class TransportSelectorTests: XCTestCase {
     func testExplainsTotalFailureWhenSSHAlsoFailed() {
         let plan = selector.plan(for: Fixtures.host(), available: everything)
         let outcome: [TransportAttempt: TransportError] = [
-            plan[2]: .authenticationFailed(reason: "no acceptable key")
+            plan[1]: .authenticationFailed(reason: "no acceptable key")
         ]
         XCTAssertEqual(
             selector.explain(outcome),
@@ -78,10 +113,15 @@ final class TransportSelectorTests: XCTestCase {
         XCTAssertEqual(store[alpha.id]?.lastSuccessfulTransport, .eternalTerminal)
         XCTAssertNil(store[beta.id]?.lastSuccessfulTransport)
 
-        // The recorded transport is exactly what the next plan leads with.
-        let plan = selector.plan(for: store[alpha.id]!, available: everything)
-        XCTAssertEqual(plan.first?.kind, .eternalTerminal)
-        XCTAssertEqual(plan.first?.reason, .lastKnownGood)
+        // The disabled default plan excludes ET, while the explicitly enabled
+        // plan preserves the previous last-success behavior.
+        let disabledPlan = selector.plan(for: store[alpha.id]!, available: everything)
+        XCTAssertEqual(disabledPlan.first?.kind, .mosh)
+        XCTAssertEqual(disabledPlan.first?.reason, .latencyPreference)
+
+        let enabledPlan = etEnabledSelector.plan(for: store[alpha.id]!, available: everything)
+        XCTAssertEqual(enabledPlan.first?.kind, .eternalTerminal)
+        XCTAssertEqual(enabledPlan.first?.reason, .lastKnownGood)
 
         XCTAssertThrowsError(try store.recordSuccessfulTransport(.mosh, for: UUID())) { error in
             guard case HostStoreError.unknownHost = error else {
