@@ -6,7 +6,7 @@ private extension Data { var hex: String { map { String(format: "%02x", $0) }.jo
 final class ETCorrectionTests: XCTestCase {
     func testProtoFramesUseEightByteHostEndianLengthAndDecodeStreaming() throws {
         let body = ETProto.connectRequest(clientId: "cid", version: 6)
-        let frame = ETProtoFraming.frame(body)
+        let frame = try ETProtoFraming.frame(body)
         XCTAssertEqual(frame.prefix(8).hex, "0700000000000000")
         var decoder = ETProtoFrameDecoder(maxLength: ETProtocolV6.maxHandshakeProtoLength)
         XCTAssertEqual(try decoder.feed(frame.prefix(3)), [])
@@ -61,7 +61,7 @@ final class ETCorrectionTests: XCTestCase {
     func testBootstrapUsesFixedRemoteEtterminalCommandAndNoCallerShellText() {
         let req = ETSSHBootstrapRequest(host: "h", port: 22, stdinPayload: ETProto.initialPayload(environment: [("A", "B")]))
         XCTAssertEqual(req.executable, "ssh")
-        XCTAssertEqual(req.arguments, ["-T", "-p", "22", "h", "--", "etterminal", "--protocol", "6"])
+        XCTAssertEqual(req.arguments, ["-T", "-p", "22", "h", "etterminal", "--protocol", "6"])
         XCTAssertFalse(req.arguments.joined(separator: " ").contains("$("))
     }
 

@@ -34,8 +34,8 @@ final class OpenPawETTransportTests: XCTestCase {
         XCTAssertEqual(ETProto.terminalBuffer(Data("hi".utf8)).hex, "0a026869")
         XCTAssertEqual(ETProto.terminalInfo(id: "t", row: 24, column: 80, width: 640, height: 480).hex, "0a01741018185020800528e003")
         XCTAssertEqual(ETProto.terminalUserInfo(id: "t", passkey: "p", uid: 501, gid: 20, fd: 7).hex, "0a017412017018f50320142807")
-        XCTAssertEqual(ETProto.terminalInit(environment: [("TERM", "xterm")]).hex, "0a045445524d1205787465726d")
-        XCTAssertEqual(ETProto.initialPayload(jumphost: true, environment: [("A", "B")]).hex, "08011a060a0141120142")
+        XCTAssertEqual(ETProto.terminalInit(environment: [("TERM", "xterm")]).hex, "0a130a045445524d1205787465726d180020002800")
+        XCTAssertEqual(ETProto.initialPayload(jumphost: true, environment: [("A", "B")]).hex, "08011a0e0a0c0a0141120142180020002800")
     }
     func testPacketAndFramingGoldenVectors() throws {
         let packet = ETPacket(header: ETTerminalPacketType.terminalBuffer.rawValue, payload: Data("hi".utf8))
@@ -78,7 +78,7 @@ final class OpenPawETTransportTests: XCTestCase {
         let payload = Data("user=$(rm -rf /)\nkey=abc".utf8)
         let req = ETSSHBootstrapRequest(host: "example.com", port: 2222, stdinPayload: payload)
         XCTAssertEqual(req.executable, "ssh")
-        XCTAssertEqual(req.arguments, ["-T", "-p", "2222", "example.com", "--", "etterminal", "--protocol", "6"])
+        XCTAssertEqual(req.arguments, ["-T", "-p", "2222", "example.com", "etterminal", "--protocol", "6"])
         XCTAssertEqual(req.stdinPayload, payload)
         XCTAssertFalse(req.arguments.joined(separator: " ").contains("rm -rf"))
     }
