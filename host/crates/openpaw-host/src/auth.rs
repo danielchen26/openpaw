@@ -152,13 +152,15 @@ pub enum Capability {
     FilesRead,
     /// Proxy to allowlisted loopback ports.
     PreviewProxy,
+    /// Read Tailscale device metadata.
+    DevicesRead,
     /// Write attachments into the upload directory.
     UploadsWrite,
 }
 
 impl Capability {
     /// Every capability, in spec order.
-    pub const ALL: [Capability; 8] = [
+    pub const ALL: [Capability; 9] = [
         Capability::SessionsRead,
         Capability::EventsRead,
         Capability::InboxRead,
@@ -166,6 +168,7 @@ impl Capability {
         Capability::ReposRead,
         Capability::FilesRead,
         Capability::PreviewProxy,
+        Capability::DevicesRead,
         Capability::UploadsWrite,
     ];
 
@@ -179,6 +182,7 @@ impl Capability {
             Capability::ReposRead => "repos.read",
             Capability::FilesRead => "files.read",
             Capability::PreviewProxy => "preview.proxy",
+            Capability::DevicesRead => "devices.read",
             Capability::UploadsWrite => "uploads.write",
         }
     }
@@ -205,6 +209,7 @@ impl Profile {
                 Capability::InboxRead,
                 Capability::ReposRead,
                 Capability::FilesRead,
+                Capability::DevicesRead,
             ],
             Profile::Operator => &Capability::ALL,
         }
@@ -666,14 +671,15 @@ mod tests {
                 "events.read",
                 "inbox.read",
                 "repos.read",
-                "files.read"
+                "files.read",
+                "devices.read"
             ]
         );
         assert!(!observer.contains(&"approvals.write".to_owned()));
         assert!(!observer.contains(&"uploads.write".to_owned()));
 
         let operator = Profile::Operator.capability_names();
-        assert_eq!(operator.len(), 8);
+        assert_eq!(operator.len(), 9);
         for capability in Capability::ALL {
             assert!(operator.contains(&capability.as_str().to_owned()));
         }

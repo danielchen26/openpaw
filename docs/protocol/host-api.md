@@ -125,6 +125,31 @@ that rejects `..`, absolute paths, NUL bytes and symlinks that escape the root. 
 conservative character set and can never be read as a `git` flag. Diffs are parsed into hunks and lines with
 correct old/new numbering, including renames, binary files and missing trailing newlines.
 
+### `GET /v1/tailscale/devices` — `devices.read`
+
+Runs exactly the fixed host-side argv `tailscale status --json` with no shell, no request-controlled path, and no request-controlled arguments. The command is read-only and bounded by timeout and output-size limits.
+
+Response data is sanitized candidate metadata only:
+
+```json
+{
+  "version": 1,
+  "candidates": [{
+    "id": "n123",
+    "display_name": "macbook",
+    "dns_name": "macbook.tailnet.ts.net",
+    "tailscale_ips": ["100.64.0.2", "fd7a:115c:a1e0::2"],
+    "os": "macOS",
+    "online": true,
+    "last_seen": "2026-08-21T07:00:00Z"
+  }]
+}
+```
+
+The response never includes raw `tailscale status` JSON, users, keys, route advertisements, credentials, or command output. Candidates are metadata only. They are not SSH-ready, trusted, or verified, and clients must not label them that way.
+
+Typed unavailable states include missing Tailscale CLI and logged-out Tailscale. Malformed or unsupported CLI JSON is a hard server error with safe user text.
+
 ### `POST /v1/uploads` — `uploads.write`
 
 Raw bytes with `X-OpenPaw-Filename: shot.png`. The filename must be a bare basename with an allowlisted

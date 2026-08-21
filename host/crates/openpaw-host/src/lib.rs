@@ -68,6 +68,8 @@ pub struct AppState {
     pub roots: Arc<openpaw_files::Roots>,
     /// Live session registry.
     pub sessions: Arc<supervisor::Registry>,
+    /// Fixed read-only Tailscale status runner.
+    pub tailscale: Arc<dyn api::tailscale::TailscaleStatusRunner>,
     /// Home directory adapters discover sessions under.
     pub home: PathBuf,
     /// Boot time, reported by `/v1/health`.
@@ -95,6 +97,7 @@ impl AppState {
             proxy: Arc::new(proxy),
             roots: Arc::new(roots),
             sessions: Arc::new(supervisor::Registry::new()),
+            tailscale: api::tailscale::default_runner(),
             home,
             started_at: OffsetDateTime::now_utc(),
         }

@@ -29,6 +29,10 @@
       "description": "Proxy HTTP/WebSocket/SSE to allowlisted loopback ports.",
       "read_only": false
     },
+    "devices.read": {
+      "description": "Read sanitized Tailscale device candidate metadata from the connected host.",
+      "read_only": true
+    },
     "uploads.write": {
       "description": "Write image/file attachments into the upload directory only.",
       "read_only": false
@@ -40,7 +44,8 @@
       "events.read",
       "inbox.read",
       "repos.read",
-      "files.read"
+      "files.read",
+      "devices.read"
     ],
     "operator": [
       "sessions.read",
@@ -49,6 +54,7 @@
       "approvals.write",
       "repos.read",
       "files.read",
+      "devices.read",
       "preview.proxy",
       "uploads.write"
     ]

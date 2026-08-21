@@ -18,6 +18,7 @@ pub mod pair;
 pub mod preview;
 pub mod repos;
 pub mod sessions;
+pub mod tailscale;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -178,6 +179,12 @@ pub fn router(app: AppState) -> Router {
             .route("/v1/preview/{port}/{*rest}", any(preview::proxy)),
     );
 
+    let tailscale = guard(
+        &app,
+        Capability::DevicesRead,
+        Router::new().route("/v1/tailscale/devices", get(tailscale::devices)),
+    );
+
     public
         .merge(local)
         .merge(sessions)
@@ -188,6 +195,7 @@ pub fn router(app: AppState) -> Router {
         .merge(files)
         .merge(uploads)
         .merge(preview)
+        .merge(tailscale)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(app)
 }

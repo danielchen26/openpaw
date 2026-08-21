@@ -7,12 +7,16 @@
 //! detail-expansion gate, single-use action tokens, and the continued absence of
 //! any endpoint that runs a command.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
 use futures::StreamExt;
 use openpaw_host::api::inbox::Decision;
+use openpaw_host::api::tailscale::{TailscaleStatusRunner, TailscaleUnavailable};
 use openpaw_host::audit::AuditEntry;
 use openpaw_host::auth::{self, Profile};
 use openpaw_host::state::{Device, Store};
@@ -54,6 +58,13 @@ impl Harness {
     }
 
     async fn boot_with(repos: Vec<PathBuf>) -> Harness {
+        Harness::boot_with_runner(repos, None).await
+    }
+
+    async fn boot_with_runner(
+        repos: Vec<PathBuf>,
+        tailscale: Option<Arc<dyn TailscaleStatusRunner>>,
+    ) -> Harness {
         let temp = tempfile::tempdir().expect("temp dir");
         let state_dir = temp.path().join("state");
 
@@ -65,7 +76,10 @@ impl Harness {
         };
         let store = Store::open(&state_dir).expect("state dir");
         let roots = openpaw_files::Roots::new(repos).expect("roots");
-        let app = AppState::new(config, store, roots, temp.path().to_path_buf());
+        let mut app = AppState::new(config, store, roots, temp.path().to_path_buf());
+        if let Some(tailscale) = tailscale {
+            app.tailscale = tailscale;
+        }
 
         let operator = enroll(&app, "dev_operator", Profile::Operator);
         let observer = enroll(&app, "dev_observer", Profile::Observer);
@@ -1069,6 +1083,195 @@ async fn repository_routes_are_scoped_to_allowlisted_roots() {
         "traversal must not succeed, got {}",
         response.status()
     );
+}
+
+#[derive(Clone)]
+struct FakeTailscaleRunner {
+    result: Result<Vec<u8>, TailscaleUnavailable>,
+    calls: Arc<Mutex<Vec<()>>>,
+}
+
+impl TailscaleStatusRunner for FakeTailscaleRunner {
+    fn status_json(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TailscaleUnavailable>> + Send + '_>> {
+        let result = self.result.clone();
+        let calls = Arc::clone(&self.calls);
+        Box::pin(async move {
+            calls.lock().unwrap().push(());
+            result
+        })
+    }
+}
+
+#[tokio::test]
+async fn tailscale_devices_requires_signature_pairing_and_capability() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runner = Arc::new(FakeTailscaleRunner {
+        result: Ok(
+            br#"[{"id":"n1","Name":"mac","TailscaleIP":"100.64.0.2","Online":true}]"#.to_vec(),
+        ),
+        calls: Arc::clone(&calls),
+    });
+    let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
+
+    let unsigned = harness
+        .client
+        .get(format!("{}/v1/tailscale/devices", harness.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsigned.status(), 401);
+
+    let unknown = Creds {
+        device_id: "unknown".to_owned(),
+        token: harness.operator.token.clone(),
+        key: harness.operator.key.clone(),
+    };
+    let unpaired = harness
+        .signed(
+            reqwest::Method::GET,
+            "/v1/tailscale/devices",
+            None,
+            &unknown,
+        )
+        .await;
+    assert_eq!(unpaired.status(), 401);
+
+    let limited = enroll_custom(&harness.app, "limited", &["sessions.read"]);
+    let missing_cap = harness
+        .signed(
+            reqwest::Method::GET,
+            "/v1/tailscale/devices",
+            None,
+            &limited,
+        )
+        .await;
+    assert_eq!(missing_cap.status(), 403);
+    assert_eq!(
+        missing_cap
+            .headers()
+            .get(auth::REQUIRED_CAPABILITY_HEADER)
+            .unwrap(),
+        "devices.read"
+    );
+
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tailscale_devices_authorized_success_ignores_request_command_data() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let runner = Arc::new(FakeTailscaleRunner {
+        result: Ok(br#"[{"id":"n1","Name":"mac","DNSName":"mac.tailnet.ts.net.","TailscaleIP":"100.64.0.2","Online":true,"OS":"macOS"}]"#.to_vec()),
+        calls: Arc::clone(&calls),
+    });
+    let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
+
+    let response = harness
+        .signed(
+            reqwest::Method::GET,
+            "/v1/tailscale/devices?command=sh&path=/bin/sh&argv=evil",
+            Some(json!({ "command": "rm -rf /", "path": "/bin/sh" })),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["version"], 1);
+    assert_eq!(body["candidates"][0]["id"], "n1");
+    assert_eq!(body["candidates"][0]["display_name"], "mac");
+    assert_eq!(body["candidates"][0]["dns_name"], "mac.tailnet.ts.net");
+    assert_eq!(body["candidates"][0]["online"], true);
+    let text = serde_json::to_string(&body).unwrap();
+    assert!(!text.contains("ready"));
+    assert!(!text.contains("trusted"));
+    assert!(!text.contains("verified"));
+    assert!(!text.contains("rm -rf"));
+}
+
+#[tokio::test]
+async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors() {
+    for (unavailable, expected_status, expected_code) in [
+        (
+            TailscaleUnavailable::MissingCli(
+                "Tailscale is not installed on the connected host.".to_owned(),
+            ),
+            503,
+            "missing_cli",
+        ),
+        (
+            TailscaleUnavailable::LoggedOut(
+                "Tailscale is installed but not logged in on the connected host.".to_owned(),
+            ),
+            503,
+            "logged_out",
+        ),
+        (
+            TailscaleUnavailable::Timeout(
+                "Tailscale discovery timed out on the connected host.".to_owned(),
+            ),
+            504,
+            "timeout",
+        ),
+        (
+            TailscaleUnavailable::OutputLimit(
+                "Tailscale discovery returned too much data on the connected host.".to_owned(),
+            ),
+            502,
+            "output_limit",
+        ),
+    ] {
+        let runner = Arc::new(FakeTailscaleRunner {
+            result: Err(unavailable),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
+        let response = harness.get("/v1/tailscale/devices").await;
+        assert_eq!(response.status(), expected_status);
+        let body: Value = response.json().await.unwrap();
+        assert!(body["error"].as_str().unwrap().contains(expected_code));
+    }
+
+    let runner = Arc::new(FakeTailscaleRunner {
+        result: Ok(b"not json".to_vec()),
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
+    let malformed = harness.get("/v1/tailscale/devices").await;
+    assert_eq!(malformed.status(), 500);
+    let body: Value = malformed.json().await.unwrap();
+    assert_eq!(body["error"], "internal error");
+}
+
+/// Register a device with explicit capability names.
+fn enroll_custom(app: &AppState, device_id: &str, capabilities: &[&str]) -> Creds {
+    let token = auth::mint_secret();
+    let hmac_key_b64 = auth::mint_hmac_key_b64();
+    app.store
+        .insert_device(Device {
+            device_id: device_id.to_owned(),
+            name: device_id.to_owned(),
+            platform: "ios".to_owned(),
+            hmac_key_b64: hmac_key_b64.clone(),
+            token_sha256: auth::sha256_hex(token.as_bytes()),
+            capabilities: capabilities
+                .iter()
+                .map(|capability| (*capability).to_owned())
+                .collect(),
+            paired_at: OffsetDateTime::now_utc(),
+            last_seen: None,
+        })
+        .expect("insert device");
+    Creds {
+        device_id: device_id.to_owned(),
+        token,
+        key: base64::engine::general_purpose::STANDARD
+            .decode(hmac_key_b64)
+            .expect("hmac key"),
+    }
 }
 
 // ---------------------------------------------------------------------------
