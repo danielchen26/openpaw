@@ -97,6 +97,23 @@ cd apps/ios
 xcodebuild -project OpenPaw.xcodeproj -scheme OpenPaw -destination 'generic/platform=iOS Simulator' build
 ```
 
+If `xcodebuild` refuses to load its plug-ins, that machine's Xcode first-launch content is stale — run
+`sudo xcodebuild -runFirstLaunch`. Without a working Xcode you can still type-check the app against the iOS
+simulator SDK with `apps/ios/scripts/typecheck-ios.sh`.
+
+### Verify everything
+
+```sh
+bash scripts/check.sh
+```
+
+Formatting, lints, 268 Rust tests, 375 Swift tests, the app build, 140 headless UI snapshots, and
+`scripts/smoke.py` driving the built daemon end to end — pairing, request signing, replay rejection, the approval
+gate, git routes, the preview proxy, uploads, and the absence of a remote-command endpoint.
+
+Picking this up on a different machine, or wondering what has never been verified anywhere?
+[`docs/handoff.md`](docs/handoff.md).
+
 ## Security model
 
 The short version — the long version is [`docs/threat-model/README.md`](docs/threat-model/README.md).
