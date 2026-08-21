@@ -78,12 +78,58 @@ final class TransportSelectorTests: XCTestCase {
         ]
 
         XCTAssertEqual(
-            selector.explain(outcome),
+            selector.explain(outcome, plan: plan),
             """
             Eternal Terminal (last known good for this host) failed: connection refused by \
             beta.local:2022. Mosh (preferred for latency) failed: Mosh is not installed on the \
             host (`mosh-server` not found). Continued with SSH.
             """)
+    }
+
+    func testExplainsSingleAttemptExhaustionWithoutClaimingSSH() {
+        let plan = selector.plan(for: Fixtures.host(), available: [.mosh, .eternalTerminal])
+        XCTAssertEqual(plan.map(\.kind), [.mosh])
+        let outcome: [TransportAttempt: TransportError] = [
+            plan[0]: .remoteBinaryMissing(.mosh, command: "mosh-server")
+        ]
+
+        XCTAssertEqual(
+            selector.explain(outcome, plan: plan),
+            "Mosh (preferred for latency) failed: Mosh is not installed on the host "
+                + "(`mosh-server` not found). No transport was able to connect.")
+    }
+
+    func testExplainsMoshToSSHContinuationFromActualPlan() {
+        let plan = selector.plan(for: Fixtures.host(), available: everything)
+        let outcome: [TransportAttempt: TransportError] = [
+            plan[0]: .remoteBinaryMissing(.mosh, command: "mosh-server")
+        ]
+
+        XCTAssertEqual(
+            selector.explain(outcome, plan: plan),
+            "Mosh (preferred for latency) failed: Mosh is not installed on the host "
+                + "(`mosh-server` not found). Continued with SSH.")
+    }
+
+    func testExplainsPinnedContinuationFromActualPlan() {
+        let host = Fixtures.host(preferred: .ssh, lastSuccessful: .eternalTerminal)
+        let plan = etEnabledSelector.plan(for: host, available: everything)
+        let outcome: [TransportAttempt: TransportError] = [
+            plan[0]: .connectionRefused(host: "beta.local", port: 22)
+        ]
+
+        XCTAssertEqual(
+            selector.explain(outcome, plan: plan),
+            "SSH (pinned for this host) failed: connection refused by beta.local:22. "
+                + "Continued with Eternal Terminal.")
+    }
+
+    func testExplainsNoAvailableTransportsAsExhaustion() {
+        let plan = selector.plan(for: Fixtures.host(), available: [])
+        XCTAssertTrue(plan.isEmpty)
+        XCTAssertEqual(
+            selector.explain([:], plan: plan),
+            "No transport was available to connect.")
     }
 
     func testExplainsTotalFailureWhenSSHAlsoFailed() {
@@ -92,7 +138,7 @@ final class TransportSelectorTests: XCTestCase {
             plan[1]: .authenticationFailed(reason: "no acceptable key")
         ]
         XCTAssertEqual(
-            selector.explain(outcome),
+            selector.explain(outcome, plan: plan),
             "SSH (fallback) failed: authentication failed (no acceptable key). "
                 + "No transport was able to connect.")
     }

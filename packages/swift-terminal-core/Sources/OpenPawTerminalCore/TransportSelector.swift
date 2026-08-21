@@ -98,19 +98,37 @@ public struct TransportSelector: Sendable {
         guard !outcome.isEmpty else {
             return "The preferred transport connected; no fallback was needed."
         }
-        let ordered = outcome.sorted {
-            ($0.key.priority, $0.key.kind.rawValue) < ($1.key.priority, $1.key.kind.rawValue)
+        return explain(outcome, plan: Array(outcome.keys))
+    }
+
+    /// The sentence the UI shows after a fallback, using the original plan to
+    /// name only transports that were actually planned.
+    public func explain(_ outcome: [TransportAttempt: TransportError], plan: [TransportAttempt]) -> String {
+        guard !plan.isEmpty else {
+            return "No transport was available to connect."
         }
-        var sentences = ordered.map { attempt, error in
-            "\(attempt.kind.displayName) (\(attempt.reason.explanation)) failed: \(error)."
+        guard !outcome.isEmpty else {
+            return "The preferred transport connected; no fallback was needed."
         }
-        // SSH needs nothing on the host beyond sshd, so it is the last resort in
-        // every plan: if it is not among the failures, it is what carried the
-        // session.
-        if outcome.keys.contains(where: { $0.kind == .ssh }) {
+        let planByAttempt = Set(plan)
+        let failedAttempts = outcome.keys.filter { planByAttempt.contains($0) }
+        let ordered = failedAttempts.sorted {
+            ($0.priority, $0.kind.rawValue) < ($1.priority, $1.kind.rawValue)
+        }
+        var sentences = ordered.map { attempt in
+            let error = outcome[attempt]!
+            return "\(attempt.kind.displayName) (\(attempt.reason.explanation)) failed: \(error)."
+        }
+
+        let highestFailedPriority = failedAttempts.map(\.priority).max() ?? -1
+        if let continued = plan.sorted(by: { ($0.priority, $0.kind.rawValue) < ($1.priority, $1.kind.rawValue) })
+            .first(where: { $0.priority > highestFailedPriority })
+        {
+            sentences.append("Continued with \(continued.kind.displayName).")
+        } else if sentences.isEmpty {
             sentences.append("No transport was able to connect.")
         } else {
-            sentences.append("Continued with \(TransportKind.ssh.displayName).")
+            sentences.append("No transport was able to connect.")
         }
         return sentences.joined(separator: " ")
     }
