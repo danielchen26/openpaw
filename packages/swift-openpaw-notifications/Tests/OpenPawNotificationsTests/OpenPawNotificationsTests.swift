@@ -34,7 +34,7 @@ struct OpenPawNotificationsTests {
         #expect(title.value.unicodeScalars.count <= 8)
     }
 
-    @Test func gateRejectsExpiredFutureSkewStaleOversizedDuplicateAndEvicts() throws {
+    @Test func gateRejectsExpiredFutureSkewStaleOversizedDuplicateAndCapacityPressure() throws {
         var gate = NotificationReplayExpiryGate(capacity: 2, maxPayloadBytes: 512, maxClockSkewSeconds: 30, maxAgeSeconds: 120)
         let fresh = validPayload(id: "a", created: 100, expires: 150, nonce: "na")
         try gate.accept(fresh, payloadByteCount: 100, now: 100)
@@ -44,8 +44,8 @@ struct OpenPawNotificationsTests {
         #expect(throws: NotificationPayloadError.stale) { try gate.accept(validPayload(id: "d", created: 1, expires: 121, nonce: "nd"), payloadByteCount: 100, now: 150) }
         #expect(throws: NotificationPayloadError.oversized) { try gate.accept(validPayload(id: "e", created: 100, expires: 150, nonce: "ne"), payloadByteCount: 513, now: 100) }
         try gate.accept(validPayload(id: "b", created: 100, expires: 150, nonce: "nb"), payloadByteCount: 100, now: 100)
-        try gate.accept(validPayload(id: "c", created: 100, expires: 150, nonce: "nc"), payloadByteCount: 100, now: 100)
-        try gate.accept(fresh, payloadByteCount: 100, now: 102)
+        #expect(throws: NotificationPayloadError.replayStorePressure) { try gate.accept(validPayload(id: "c", created: 100, expires: 150, nonce: "nc"), payloadByteCount: 100, now: 100) }
+        #expect(throws: NotificationPayloadError.duplicate) { try gate.accept(fresh, payloadByteCount: 100, now: 102) }
     }
 
     @Test func strictSchemaRejectsUnknownCaseVariantAliasAndNestedForbiddenFields() throws {
@@ -105,12 +105,40 @@ struct OpenPawNotificationsTests {
     }
 
     @Test func safeTitlesFailClosedForUnsafeStringsAndInvalidBounds() throws {
-        #expect(try SafeNotificationTitle("hello", maxUTF8Bytes: 0, maxScalars: 10).value == "OpenPaw notification")
-        #expect(try SafeNotificationTitle("hello", maxUTF8Bytes: 10, maxScalars: -1).value == "OpenPaw notification")
+        #expect(throws: NotificationPayloadError.invalidTitleConfiguration) { try SafeNotificationTitle("hello", maxUTF8Bytes: 0, maxScalars: 10) }
+        #expect(throws: NotificationPayloadError.invalidTitleConfiguration) { try SafeNotificationTitle("hello", maxUTF8Bytes: 10, maxScalars: -1) }
         #expect(try SafeNotificationTitle("deploy 🚀", maxUTF8Bytes: 9, maxScalars: 20).value == "deploy")
         let unsafe = ["/Users/alice/.ssh/id_rsa", "prod.example.com", "git@github.com:org/private.git", "password=hunter2", "token abc", "ssh://host/repo"]
         for raw in unsafe {
             #expect(try SafeNotificationTitle(raw).value == "OpenPaw notification")
+        }
+    }
+
+    @Test func safeTitleDecodingSanitizesAndInvalidBoundsThrow() throws {
+        let unsafe = try JSONDecoder().decode(SafeNotificationTitle.self, from: Data(#"{"value":"/Users/alice/.ssh/id_rsa"}"#.utf8))
+        #expect(unsafe.value == "OpenPaw notification")
+        #expect(throws: NotificationPayloadError.invalidTitleConfiguration) { try SafeNotificationTitle("hello", maxUTF8Bytes: 0, maxScalars: 10) }
+        #expect(throws: NotificationPayloadError.invalidTitleConfiguration) { try SafeNotificationTitle("hello", maxUTF8Bytes: 10, maxScalars: -1) }
+    }
+
+    @Test func threadIdentifiersAreCollisionFreeForOpaqueIDsWithDelimiters() throws {
+        let first = validPayload(id: "first", created: 10, expires: 20, nonce: "n1", intent: .openDetail(inboxID: "c"))
+        let second = try NotificationHint(id: "second", hostID: "a", deviceID: "d", sessionID: "b|session:c", inboxID: "c", category: .message, risk: .low, createdAt: 10, expiresAt: 20, nonce: "n2", title: "Safe title", actionIntent: .openDetail(inboxID: "c"))
+        let firstPresentation = LocalNotificationPresentationMapper.map(try NotificationHint(id: "first", hostID: "a|session:b", deviceID: "d", sessionID: "c", inboxID: "c", category: .message, risk: .low, createdAt: 10, expiresAt: 20, nonce: "n1", title: "Safe title", actionIntent: .openDetail(inboxID: "c")))
+        let secondPresentation = LocalNotificationPresentationMapper.map(second)
+        #expect(first != second)
+        #expect(firstPresentation.threadIdentifier != secondPresentation.threadIdentifier)
+    }
+
+    @Test func replayGateRejectsCapacityPressureInsteadOfEvictingUnexpiredIdentities() throws {
+        var gate = NotificationReplayExpiryGate(capacity: 1, maxPayloadBytes: 4096, maxClockSkewSeconds: 10, maxAgeSeconds: 100)
+        let first = validPayload(id: "first", created: 100, expires: 180, nonce: "n1")
+        try gate.accept(first, payloadByteCount: 100, now: 100)
+        #expect(throws: NotificationPayloadError.replayStorePressure) {
+            try gate.accept(validPayload(id: "second", created: 101, expires: 181, nonce: "n2"), payloadByteCount: 100, now: 101)
+        }
+        #expect(throws: NotificationPayloadError.duplicate) {
+            try gate.accept(first, payloadByteCount: 100, now: 102)
         }
     }
 
@@ -134,7 +162,7 @@ struct OpenPawNotificationsTests {
         #expect(presentation.title == hint.title.value)
         #expect(presentation.body == "Open OpenPaw to review")
         #expect(presentation.categoryIdentifier == "openpaw.decision_required")
-        #expect(presentation.threadIdentifier == "host:h/session:s/inbox:inbox")
+        #expect(presentation.threadIdentifier == "1:h|1:s|5:inbox")
         #expect(ActionRouter.route(hint.actionIntent) == .openDetail(inboxID: "inbox", requiresAuthenticatedRefresh: true))
         #expect(ActionRouter.directAuthorizationIntent(for: hint.actionIntent) == nil)
     }

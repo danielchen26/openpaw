@@ -13,6 +13,8 @@ public enum NotificationPayloadError: Error, Equatable, Sendable {
     case stale
     case invalidIdentifier
     case invalidGateConfiguration
+    case invalidTitleConfiguration
+    case replayStorePressure
 }
 
 public struct SafeNotificationTitle: Hashable, Codable, Sendable {
@@ -21,7 +23,7 @@ public struct SafeNotificationTitle: Hashable, Codable, Sendable {
     public let value: String
 
     public init(_ raw: String, maxUTF8Bytes: Int = Self.defaultMaxUTF8Bytes, maxScalars: Int = Self.defaultMaxScalars) throws {
-        guard maxUTF8Bytes > 0, maxScalars > 0 else { self.value = "OpenPaw notification"; return }
+        guard maxUTF8Bytes > 0, maxScalars > 0 else { throw NotificationPayloadError.invalidTitleConfiguration }
         var sanitized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if Self.looksUnsafe(raw) || Self.looksUnsafe(sanitized) { sanitized = "OpenPaw notification" }
         sanitized = sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -35,6 +37,22 @@ public struct SafeNotificationTitle: Hashable, Codable, Sendable {
             result = candidate
         }
         self.value = result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "OpenPaw notification" : result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private enum CodingKeys: String, CodingKey { case value }
+
+    public init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(), let raw = try? single.decode(String.self) {
+            try self.init(raw)
+            return
+        }
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(c.decode(String.self, forKey: .value))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(value, forKey: .value)
     }
 
     private static func looksUnsafe(_ raw: String) -> Bool {
@@ -225,8 +243,17 @@ public struct NotificationReplayExpiryGate: Sendable {
         guard now < hint.expiresAt else { throw NotificationPayloadError.expired }
         let key = ReplayIdentity([hint.id, hint.nonce])
         guard seen[key] == nil else { throw NotificationPayloadError.duplicate }
-        seen[key] = now; order.append(key)
-        while order.count > capacity { seen.removeValue(forKey: order.removeFirst()) }
+        pruneExpired(now: now)
+        guard seen.count < capacity else { throw NotificationPayloadError.replayStorePressure }
+        seen[key] = hint.expiresAt; order.append(key)
+    }
+
+    private mutating func pruneExpired(now: Int64) {
+        order.removeAll { key in
+            guard let expiresAt = seen[key] else { return true }
+            if now >= expiresAt { seen.removeValue(forKey: key); return true }
+            return false
+        }
     }
 
     private func validateIdentifiers(_ hint: NotificationHint) throws {
@@ -252,7 +279,11 @@ public struct LocalNotificationPresentation: Hashable, Sendable {
 public enum LocalNotificationPresentationMapper {
     public static func map(_ hint: NotificationHint) -> LocalNotificationPresentation {
         let body = hint.category == .decisionRequired || hint.actionIntent.requiresForegroundAuthenticatedRefresh ? "Open OpenPaw to review" : "Open OpenPaw"
-        return LocalNotificationPresentation(title: hint.title.value, body: body, categoryIdentifier: "openpaw.\(hint.category.rawValue)", threadIdentifier: "host:\(hint.hostID)/session:\(hint.sessionID)/inbox:\(hint.inboxID)")
+        return LocalNotificationPresentation(title: hint.title.value, body: body, categoryIdentifier: "openpaw.\(hint.category.rawValue)", threadIdentifier: [hint.hostID, hint.sessionID, hint.inboxID].map(lengthPrefixed).joined(separator: "|"))
+    }
+
+    private static func lengthPrefixed(_ value: String) -> String {
+        "\(value.utf8.count):\(value)"
     }
 }
 

@@ -20,7 +20,7 @@ The hint is allowed to contain only:
 
 It must never contain `action_token`, `command`, `credentials`, `raw_detail`, `secret`, aliases, case variants, or equivalent authorization material. The only public validated decode path requires a replay/expiry gate, rejects oversized `Data` before JSON parsing, and then enforces a recursive exact-key schema allowlist at every object level before model decode. Unknown fields, nested forbidden fields, case-variant forbidden fields, and alias-like authorization fields fail closed.
 
-Opaque identifiers, including action IDs, are bounded to a conservative character set and byte length. Action intents that carry an inbox ID must match the outer `inbox_id`. Titles are capped by UTF-8 bytes and Unicode scalars on grapheme boundaries. Potential paths, hostnames, repository locators, credential-like strings, or otherwise unsafe free-form strings are replaced with a generic safe title rather than heuristically redacted.
+Opaque identifiers, including action IDs, are bounded to a conservative character set and byte length. Action intents that carry an inbox ID must match the outer `inbox_id`. Titles are capped by UTF-8 bytes and Unicode scalars on grapheme boundaries. `SafeNotificationTitle` sanitizes both normal construction and direct Codable decoding so decoded values cannot bypass the same rules. Invalid title bound configuration fails closed with a typed error rather than returning a value that exceeds caller limits. Potential paths, hostnames, repository locators, credential-like strings, or otherwise unsafe free-form strings are replaced with a generic safe title rather than heuristically redacted.
 
 ## Action intent policy
 
@@ -40,11 +40,11 @@ A decision representation may use `decisionReview(inboxID:decisionID:)`, but thi
 - maximum age
 - expiry timestamp
 - duplicate rejection
-- bounded replay memory with FIFO eviction
+- bounded replay memory without evicting unexpired replay identities
 - valid gate configuration
 - expiry no farther than the configured maximum age from creation
 
-Timestamp comparisons are overflow-safe and fail closed. This gate is suitable for simulator tests and for future app integration as a local preflight. Production delivery authenticity is out of scope for this slice and must be added before remote push claims.
+Timestamp comparisons are overflow-safe and fail closed. If the replay store is full and no expired identity can be pruned, the gate rejects the new notification instead of evicting an unexpired identity and re-allowing replay. This gate is suitable for simulator tests and for future app integration as a local preflight. Production delivery authenticity is out of scope for this slice and must be added before remote push claims.
 
 ## Local presentation mapping
 
@@ -53,6 +53,6 @@ Timestamp comparisons are overflow-safe and fail closed. This gate is suitable f
 - safe title from the redacted capped title
 - safe body
 - category identifier `openpaw.<category>`
-- thread identifier derived only from opaque host/session/inbox IDs
+- collision-free thread identifier derived only from length-prefixed opaque host/session/inbox IDs
 
 For consequential or decision-review notifications, the body truthfully says: `Open OpenPaw to review`.
