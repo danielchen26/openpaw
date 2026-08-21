@@ -121,6 +121,7 @@ final class AppWiring {
     let terminal: SSHTerminalBackend
     let hostAPI: HostAPIBackend
     let gate: GateController
+    let restorationStore = MemorySessionRestorationStore()
 
     /// A device preference, so it lives in `UserDefaults` rather than in the model, which holds host state.
     var terminalFontSize: CGFloat {
@@ -159,7 +160,7 @@ final class AppWiring {
                     )
                 )
             },
-            sessionSpaceProvider: LiveMultiplexerSessionSpaceProvider(runner: terminal),
+            sessionSpaceProvider: LiveMultiplexerSessionSpaceProvider(runner: terminal, restorationStore: restorationStore),
             sessionCommandExecutor: TerminalSessionCommandExecutor(terminal: terminal)
         )
         cachedRoot = created

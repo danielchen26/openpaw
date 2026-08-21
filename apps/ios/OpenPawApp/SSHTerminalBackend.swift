@@ -40,8 +40,8 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner {
     /// Scrollback survives a reconnect, so a dropped connection does not erase what the agent just printed.
     private let scrollback = ScrollbackStore()
 
-    /// Output that `run(command:)` is currently collecting. While non-nil the same bytes still reach `outputRelay`,
-    /// because hiding a probe's output would leave the user staring at a terminal that silently ran something.
+    /// Output that `run(command:)` is currently collecting. Probe bytes are deliberately not relayed into the visible
+    /// terminal: discovery commands are implementation detail, not scrollback.
     private var capture: Capture?
 
     private var lastState: ConnectionState = .idle
@@ -100,21 +100,24 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner {
     /// marker is a random hex string, so no plausible command output can terminate the capture early, and the exit
     /// status rides back on the same line.
     func run(command: String) async throws -> String {
-        guard transport != nil else { throw TransportError.notConnected }
+        guard let transport else { throw TransportError.notConnected }
+        guard lastState.isConnected else { throw TransportError.notConnected }
+        guard capture == nil else { throw TransportError.connectionFailed("another command probe is already running") }
         let marker = "__openpaw_" + UUID().uuidString.replacingOccurrences(of: "-", with: "") + "__"
-        let capture = Capture(marker: marker)
+        let capture = Capture(marker: marker, command: command)
         self.capture = capture
         defer { self.capture = nil }
 
-        // `printf` rather than `echo` because `echo` is a builtin with three incompatible dialects for escapes.
-        try await send(text: "\(command); printf '%s%s\\n' \(shellQuoted(marker)) \"$?\"\n")
+        // Disable terminal echo for the probe line so the marker in the typed command cannot satisfy the capture. The
+        // marker printed after the command is the only terminator the parser accepts.
+        try await transport.write(Data("stty -echo\n{ \(command); __openpaw_rc=$?; printf '\\n%s:%s\\n' \(shellQuoted(marker)) \"$__openpaw_rc\"; unset __openpaw_rc; } 2>&1\nstty echo\n".utf8))
 
         return try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask { await capture.wait() }
+            group.addTask { try await capture.wait() }
             group.addTask {
                 // A probe that never returns must not hold the caller forever; a capability check is not worth a
                 // hung UI.
-                try await Task.sleep(for: .seconds(15))
+                try await Task.sleep(for: .seconds(3))
                 throw TransportError.timeout
             }
             let result = try await group.next()!
@@ -183,13 +186,23 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner {
 
     private func handle(state: ConnectionState) {
         publish(state)
+        if state.isTerminal {
+            capture?.fail(TransportError.notConnected)
+        }
     }
 
     private func handle(output chunk: Data) async {
-        // The view is fed from `outputRelay` first: a keystroke echo that waits on the scrollback actor is a
-        // keystroke the user sees late, and latency is the whole experience of a terminal.
+        if let capture {
+            let remainder = capture.ingest(chunk)
+            if !remainder.isEmpty {
+                outputRelay.yield(remainder)
+                await scrollback.append(remainder)
+            }
+            return
+        }
+        // The view is fed from `outputRelay` first: a keystroke echo that waits on the scrollback actor is a keystroke
+        // the user sees late, and latency is the whole experience of a terminal.
         outputRelay.yield(chunk)
-        capture?.ingest(chunk)
         await scrollback.append(chunk)
     }
 
@@ -219,38 +232,66 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner {
 private final class Capture: @unchecked Sendable {
 
     private let marker: String
+    private let command: String
+    private let maxBytes = 64 * 1024
     private var buffer = Data()
-    private var continuation: CheckedContinuation<String, Never>?
+    private var result: Result<String, any Error>?
+    private var continuation: CheckedContinuation<String, any Error>?
     private let lock = NSLock()
 
-    init(marker: String) {
+    init(marker: String, command: String) {
         self.marker = marker
+        self.command = command
     }
 
-    func ingest(_ chunk: Data) {
+    func ingest(_ chunk: Data) -> Data {
         lock.lock()
         buffer.append(chunk)
+        if buffer.count > maxBytes { buffer.removeFirst(buffer.count - maxBytes) }
         guard let text = String(data: buffer, encoding: .utf8),
-            let markerRange = text.range(of: marker)
+            let markerRange = text.range(of: "\n\(marker):")
         else {
             lock.unlock()
-            return
+            return Data()
         }
-        // Everything before the marker is the command's own output. The echoed command line itself is the first
-        // line, so it is dropped: the caller asked for output, not for a transcript.
-        var output = String(text[text.startIndex..<markerRange.lowerBound])
-        if let firstNewline = output.firstIndex(of: "\n") {
-            output = String(output[output.index(after: firstNewline)...])
+        let statusStart = markerRange.upperBound
+        guard let lineEnd = text[statusStart...].firstIndex(of: "\n") else {
+            lock.unlock()
+            return Data()
         }
+        let statusText = text[statusStart..<lineEnd].trimmingCharacters(in: .whitespacesAndNewlines)
+        let output = String(text[text.startIndex..<markerRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let remainderText = String(text[text.index(after: lineEnd)...])
+        let exitCode = Int32(statusText) ?? 1
+        let nextResult: Result<String, any Error> = exitCode == 0
+            ? .success(output)
+            : .failure(CommandFailure(command: command, exitCode: exitCode, output: output))
+        result = nextResult
         let resumed = continuation
         continuation = nil
         lock.unlock()
-        resumed?.resume(returning: output.trimmingCharacters(in: .whitespacesAndNewlines))
+        if let resumed { resumed.resume(with: nextResult) }
+        return Data(remainderText.utf8)
     }
 
-    func wait() async -> String {
-        await withCheckedContinuation { continuation in
+    func fail(_ error: any Error) {
+        lock.lock()
+        let nextResult: Result<String, any Error> = .failure(error)
+        result = nextResult
+        let resumed = continuation
+        continuation = nil
+        lock.unlock()
+        resumed?.resume(with: nextResult)
+    }
+
+    func wait() async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
             lock.lock()
+            if let result {
+                lock.unlock()
+                continuation.resume(with: result)
+                return
+            }
             self.continuation = continuation
             lock.unlock()
         }

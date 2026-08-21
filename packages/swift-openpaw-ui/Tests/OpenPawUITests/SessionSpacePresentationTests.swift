@@ -35,10 +35,13 @@ final class SessionSpacePresentationTests: XCTestCase {
     func testRestorationPolicyDistinguishesReattachFromBareShellFallback() {
         let hostID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
         let reattach = SessionRestorationPlan(hostID: hostID, multiplexer: .herdr, multiplexerTarget: "hd_01", workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
+        let replacement = SessionRestorationPlan(hostID: hostID, multiplexer: .tmux, workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
         let fallback = SessionRestorationPlan(hostID: hostID, workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
 
         XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: reattach, transport: .init()).restorationItem?.provenance, .restoration(kind: .herdr, target: "hd_01"))
         XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: reattach, transport: .init()).restorationItem?.primaryAction, "Reattach")
+        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: replacement, transport: .init()).restorationItem?.provenance, .replacementMultiplexer(kind: .tmux, directory: "/repo"))
+        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: replacement, transport: .init()).restorationItem?.primaryAction, "Create replacement session")
         XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: fallback, transport: .init()).restorationItem?.provenance, .bareShellFallback(directory: "/repo"))
         XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: fallback, transport: .init()).restorationItem?.primaryAction, "Open shell")
     }
@@ -59,11 +62,13 @@ final class SessionSpacePresentationTests: XCTestCase {
             adapters: [ProviderAdapter(kind: .tmux, result: .success([RemoteSession.target("$0", kind: .tmux)]))],
             preferred: .zellij)
 
-        let snapshot = await provider.snapshot(for: OpenPawModel())
+        let model = OpenPawModel(hostStore: HostStore(hosts: [testHost()]))
+        model.connection = .connected(.ssh)
+        let snapshot = await provider.snapshot(for: model)
         XCTAssertEqual(snapshot.remoteSessions.map(\.id), ["$0"])
         XCTAssertEqual(snapshot.transport.preferredMultiplexer, .zellij)
         XCTAssertEqual(snapshot.transport.attemptedMultiplexers, [.tmux])
-        XCTAssertNil(snapshot.restoration, "No production persisted restoration source exists yet, so the live provider must not fabricate one.")
+        XCTAssertNil(snapshot.restoration)
     }
 
     @MainActor
@@ -75,7 +80,9 @@ final class SessionSpacePresentationTests: XCTestCase {
                 ProviderAdapter(kind: .herdr, result: .failure(MultiplexerError.malformedOutput(kind: .herdr, detail: "{"))),
             ])
 
-        let snapshot = await provider.snapshot(for: OpenPawModel())
+        let model = OpenPawModel(hostStore: HostStore(hosts: [testHost()]))
+        model.connection = .connected(.ssh)
+        let snapshot = await provider.snapshot(for: model)
         XCTAssertTrue(snapshot.remoteSessions.isEmpty)
         XCTAssertEqual(snapshot.transport.attemptedMultiplexers, [.tmux, .herdr])
         XCTAssertEqual(snapshot.issues.count, 1)
@@ -93,6 +100,7 @@ final class SessionSpacePresentationTests: XCTestCase {
             auth: .password(reference: try! KeychainReference(identifier: "kc://openpaw/beta/password")),
             multiplexerPreference: .screen)
         let model = OpenPawModel(hostStore: HostStore(hosts: [host]))
+        model.connection = .connected(.ssh)
         let provider = LiveMultiplexerSessionSpaceProvider(
             runner: RecordingRunner(),
             adapters: [
@@ -104,6 +112,10 @@ final class SessionSpacePresentationTests: XCTestCase {
         let snapshot = await provider.snapshot(for: model)
         XCTAssertEqual(snapshot.transport.preferredMultiplexer, .screen)
         XCTAssertEqual(snapshot.issues, ["Herdr: discovery command failed with exit 2"])
+    }
+
+    private func testHost() -> HostRecord {
+        HostRecord(nickname: "test", hostname: "test.local", username: "dev", auth: .agentForwarding)
     }
 }
 

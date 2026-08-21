@@ -5,12 +5,14 @@ import OpenPawTerminalCore
 /// The truthful inputs Root can hand to the session list. Empty means OpenPaw did not discover anything, not that a
 /// transport is healthy or unhealthy.
 public struct SessionSpaceSnapshot: Sendable, Hashable {
+    public var hostID: HostID?
     public var remoteSessions: [RemoteSession]
     public var restoration: SessionRestorationPlan?
     public var transport: SessionTransportPresentation
     public var issues: [String]
 
-    public init(remoteSessions: [RemoteSession] = [], restoration: SessionRestorationPlan? = nil, transport: SessionTransportPresentation = .init(), issues: [String] = []) {
+    public init(hostID: HostID? = nil, remoteSessions: [RemoteSession] = [], restoration: SessionRestorationPlan? = nil, transport: SessionTransportPresentation = .init(), issues: [String] = []) {
+        self.hostID = hostID
         self.remoteSessions = remoteSessions
         self.restoration = restoration
         self.transport = transport
@@ -42,6 +44,7 @@ public enum SessionSpaceProvenance: Sendable, Hashable {
     case agentSession(String)
     case multiplexerSession(kind: MultiplexerKind, id: String)
     case restoration(kind: MultiplexerKind, target: String)
+    case replacementMultiplexer(kind: MultiplexerKind, directory: String?)
     case bareShellFallback(directory: String?)
 }
 
@@ -84,6 +87,17 @@ public struct SessionSpacePresentation: Sendable, Hashable {
                 provenanceBadge: "\(kind.displayName) restoration",
                 stateLabel: "reattachable",
                 primaryAction: "Reattach",
+                secondaryActions: [])
+        }
+        if let kind = restoration.multiplexer {
+            return SessionSpaceItem(
+                id: "restore-create:\(kind.rawValue):\(restoration.workingDirectory ?? "")",
+                title: "New \(kind.displayName) session",
+                subtitle: restoration.workingDirectory,
+                provenance: .replacementMultiplexer(kind: kind, directory: restoration.workingDirectory),
+                provenanceBadge: "\(kind.displayName) restoration",
+                stateLabel: "replacement session",
+                primaryAction: "Create replacement session",
                 secondaryActions: [])
         }
         return SessionSpaceItem(
@@ -140,36 +154,53 @@ public final class LiveMultiplexerSessionSpaceProvider: SessionSpaceProviding {
     private let runner: any CommandRunner
     private let adapters: [any MultiplexerAdapter]
     private let preferred: MultiplexerKind?
+    private let restorationStore: (any SessionRestorationStoring)?
 
-    public init(runner: any CommandRunner, adapters: [any MultiplexerAdapter] = MultiplexerAdapters.all, preferred: MultiplexerKind? = nil) {
+    public init(runner: any CommandRunner, adapters: [any MultiplexerAdapter] = MultiplexerAdapters.all, preferred: MultiplexerKind? = nil, restorationStore: (any SessionRestorationStoring)? = nil) {
         self.runner = runner
         self.adapters = adapters
         self.preferred = preferred
+        self.restorationStore = restorationStore
     }
 
     public func snapshot(for model: OpenPawModel) async -> SessionSpaceSnapshot {
+        guard let hostID = model.selectedHostID, model.connection.isConnected else { return SessionSpaceSnapshot() }
         var sessions: [RemoteSession] = []
         var issues: [String] = []
         for adapter in adapters {
             do {
                 sessions.append(contentsOf: try await adapter.discoverSessions(runner: runner))
-            } catch let error as MultiplexerError {
-                issues.append("\(adapter.kind.displayName): \(error)")
+            } catch is MultiplexerError {
+                issues.append("\(adapter.kind.displayName): discovery output could not be read")
             } catch let failure as CommandFailure {
                 if failure.exitCode != 127 {
                     issues.append("\(adapter.kind.displayName): discovery command failed with exit \(failure.exitCode)")
                 }
             } catch {
-                issues.append("\(adapter.kind.displayName): \(String(describing: error))")
+                issues.append("\(adapter.kind.displayName): discovery is unavailable")
             }
         }
-        // No restoration plan is fabricated here. Production can only return one once a real persisted plan exists.
+        let restoration = await restorationStore?.loadPlan(for: hostID)
         return SessionSpaceSnapshot(
+            hostID: hostID,
             remoteSessions: sessions,
-            restoration: nil,
+            restoration: restoration,
             transport: SessionTransportPresentation(preferredMultiplexer: model.selectedHost?.multiplexerPreference ?? preferred, attemptedMultiplexers: adapters.map(\.kind)),
             issues: issues)
     }
+}
+
+@MainActor
+public protocol SessionRestorationStoring: AnyObject {
+    func loadPlan(for hostID: HostID) async -> SessionRestorationPlan?
+    func save(_ plan: SessionRestorationPlan) async
+}
+
+public final class MemorySessionRestorationStore: SessionRestorationStoring {
+    private var plans: [HostID: SessionRestorationPlan] = [:]
+    public init() {}
+    public func loadPlan(for hostID: HostID) async -> SessionRestorationPlan? { plans[hostID] }
+    public func save(_ plan: SessionRestorationPlan) async { plans[plan.hostID] = plan }
 }
 
 @MainActor

@@ -602,7 +602,10 @@ public struct RootView: View {
     }
 
     private func refreshSessionSpace() async {
+        let requestedHostID = model.selectedHostID
+        guard model.connection.isConnected else { sessionSpace = SessionSpaceSnapshot(); return }
         let snapshot = await sessionSpaceProvider.snapshot(for: model)
+        guard requestedHostID == model.selectedHostID, snapshot.hostID == model.selectedHostID else { return }
         sessionSpace = snapshot
         if !snapshot.issues.isEmpty {
             model.lastError = PresentedError(
@@ -615,11 +618,14 @@ public struct RootView: View {
     private func runSessionCommand(_ command: String, refreshAfterCommand: Bool) {
         Task {
             do {
+                guard sessionSpace.hostID == model.selectedHostID, model.connection.isConnected else {
+                    throw SessionSpaceActionError.unavailable
+                }
                 try await sessionCommandExecutor.executeSessionCommand(command)
                 router.destination = .terminal
                 if refreshAfterCommand { await refreshSessionSpace() }
             } catch {
-                model.lastError = PresentedError(title: "Session command failed", detail: String(describing: error), isRecoverable: true)
+                model.lastError = PresentedError(title: "Session command failed", detail: safeSessionActionMessage(error), isRecoverable: true)
             }
         }
     }
@@ -635,6 +641,7 @@ public struct RootView: View {
     }
 
     private func renameSession(_ session: RemoteSession, to name: String) {
+        guard session.isAlive else { return }
         runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).rename(session, to: name), refreshAfterCommand: true)
     }
 
@@ -643,8 +650,18 @@ public struct RootView: View {
     }
 
     private func restoreSession(_ plan: SessionRestorationPlan) {
+        guard plan.hostID == model.selectedHostID, sessionSpace.hostID == model.selectedHostID else { return }
         guard let command = plan.restorationCommand() else { return }
         runSessionCommand(command, refreshAfterCommand: false)
+    }
+
+    private enum SessionSpaceActionError: Error { case unavailable }
+
+    private func safeSessionActionMessage(_ error: any Error) -> String {
+        if let failure = error as? CommandFailure {
+            return "The remote command exited with status \(failure.exitCode)."
+        }
+        return "The session action could not be completed. Check the connection and try again."
     }
 
     @ViewBuilder
