@@ -9,7 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 #[cfg(unix)]
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -497,35 +497,78 @@ async fn run_status_command(
         }
     })?;
 
+    let child_pid = child.id();
     let mut stdout = child.stdout.take().expect("stdout piped");
+    let mut wait = tokio::spawn(async move { child.wait().await });
     let mut bytes = Vec::new();
     let mut limited = (&mut stdout).take((max_bytes + 1) as u64);
-    match timeout_at(deadline, limited.read_to_end(&mut bytes)).await {
-        Ok(result) => {
-            result.map_err(|_| TailscaleUnavailable::unavailable())?;
+    let read = limited.read_to_end(&mut bytes);
+    tokio::pin!(read);
+
+    let status = tokio::select! {
+        result = &mut read => {
+            if result.is_err() {
+                cleanup_process(child_pid, &mut wait).await;
+                return Err(TailscaleUnavailable::unavailable());
+            }
+            if bytes.len() > max_bytes {
+                cleanup_process(child_pid, &mut wait).await;
+                return Err(TailscaleUnavailable::output_limit());
+            }
+            match timeout_at(deadline, &mut wait).await {
+                Ok(result) => match flatten_wait_result(result) {
+                    Ok(status) => status,
+                    Err(err) => {
+                        cleanup_process(child_pid, &mut wait).await;
+                        return Err(err);
+                    }
+                },
+                Err(_) => {
+                    cleanup_process(child_pid, &mut wait).await;
+                    return Err(TailscaleUnavailable::timeout());
+                }
+            }
         }
-        Err(_) => {
+        result = &mut wait => {
+            let status = match flatten_wait_result(result) {
+                Ok(status) => status,
+                Err(err) => {
+                    cleanup_process(child_pid, &mut wait).await;
+                    return Err(err);
+                }
+            };
+            if !status.success() {
+                cleanup_process(child_pid, &mut wait).await;
+                return Err(TailscaleUnavailable::unavailable());
+            }
+            match timeout_at(deadline, &mut read).await {
+                Ok(result) => {
+                    if result.is_err() {
+                        cleanup_process(child_pid, &mut wait).await;
+                        return Err(TailscaleUnavailable::unavailable());
+                    }
+                    if bytes.len() > max_bytes {
+                        cleanup_process(child_pid, &mut wait).await;
+                        return Err(TailscaleUnavailable::output_limit());
+                    }
+                }
+                Err(_) => {
+                    cleanup_process(child_pid, &mut wait).await;
+                    return Err(TailscaleUnavailable::timeout());
+                }
+            }
+            status
+        }
+        _ = tokio::time::sleep_until(deadline) => {
             // `kill_on_drop` is a backstop. Explicit kill/reap prevents an orphan
             // or zombie when the timeout wins while the child is still running.
-            cleanup_child(&mut child).await;
-            return Err(TailscaleUnavailable::timeout());
-        }
-    }
-
-    if bytes.len() > max_bytes {
-        cleanup_child(&mut child).await;
-        return Err(TailscaleUnavailable::output_limit());
-    }
-
-    let status = match timeout_at(deadline, child.wait()).await {
-        Ok(result) => result.map_err(|_| TailscaleUnavailable::unavailable())?,
-        Err(_) => {
-            cleanup_child(&mut child).await;
+            cleanup_process(child_pid, &mut wait).await;
             return Err(TailscaleUnavailable::timeout());
         }
     };
+
     if !status.success() {
-        cleanup_child(&mut child).await;
+        cleanup_process(child_pid, &mut wait).await;
         return Err(TailscaleUnavailable::unavailable());
     }
     Ok(bytes)
@@ -537,8 +580,20 @@ fn make_process_group(command: &mut Command) {
 }
 
 #[cfg(unix)]
-async fn cleanup_child(child: &mut tokio::process::Child) {
-    if let Some(pid) = child.id() {
+fn flatten_wait_result(
+    result: Result<Result<ExitStatus, std::io::Error>, tokio::task::JoinError>,
+) -> Result<ExitStatus, TailscaleUnavailable> {
+    result
+        .map_err(|_| TailscaleUnavailable::unavailable())?
+        .map_err(|_| TailscaleUnavailable::unavailable())
+}
+
+#[cfg(unix)]
+async fn cleanup_process(
+    child_pid: Option<u32>,
+    wait: &mut tokio::task::JoinHandle<Result<ExitStatus, std::io::Error>>,
+) {
+    if let Some(pid) = child_pid {
         let _ = tokio::process::Command::new("/bin/kill")
             .arg("-KILL")
             .arg(format!("-{}", pid))
@@ -549,7 +604,9 @@ async fn cleanup_child(child: &mut tokio::process::Child) {
             .await;
     }
     let reap_deadline = Instant::now() + POST_KILL_REAP_GRACE;
-    let _ = timeout_at(reap_deadline, child.wait()).await;
+    if !wait.is_finished() {
+        let _ = timeout_at(reap_deadline, wait).await;
+    }
 }
 
 /// Shared default runner.
@@ -734,6 +791,37 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, TailscaleUnavailable::Unavailable(message) if !message.contains("secret-stderr"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_runner_kills_process_group_descendants_on_nonzero_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let child_pid_file = temp.path().join("child_pid");
+        let script = temp.path().join("nonzero-with-child");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nsleep 10 &\necho $! > {}\necho failed >&2\nexit 2\n",
+                child_pid_file.display()
+            ),
+        )
+        .unwrap();
+        make_executable(&script);
+
+        let err = run_status_command(&script, MAX_STATUS_BYTES, STATUS_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TailscaleUnavailable::Unavailable(_)));
+        let child_pid: i32 = std::fs::read_to_string(&child_pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !pid_is_alive(child_pid),
+            "nonzero parent exit must still kill process-group descendants"
         );
     }
 

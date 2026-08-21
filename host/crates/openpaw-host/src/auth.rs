@@ -565,7 +565,11 @@ pub async fn authorize(
         Some(timestamp) => timestamp,
         None => return unauthorized("missing or malformed timestamp"),
     };
-    if (OffsetDateTime::now_utc().unix_timestamp() - timestamp).abs() > MAX_SKEW {
+    let skew = OffsetDateTime::now_utc()
+        .unix_timestamp()
+        .checked_sub(timestamp)
+        .map(i64::unsigned_abs);
+    if skew.is_none_or(|skew| skew > MAX_SKEW as u64) {
         return unauthorized("timestamp outside the allowed skew");
     }
 

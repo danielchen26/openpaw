@@ -494,6 +494,27 @@ async fn a_stale_timestamp_is_rejected() {
 }
 
 #[tokio::test]
+async fn minimum_i64_timestamp_is_rejected_without_overflow() {
+    let harness = Harness::boot().await;
+    let nonce = auth::mint_secret();
+    let response = harness
+        .raw(
+            reqwest::Method::GET,
+            "/v1/sessions",
+            Vec::new(),
+            &harness.operator,
+            &harness.operator.key,
+            i64::MIN,
+            &nonce,
+            None,
+        )
+        .await;
+    assert_eq!(response.status(), 401);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["detail"], "timestamp outside the allowed skew");
+}
+
+#[tokio::test]
 async fn a_correctly_signed_request_succeeds_and_reflects_state() {
     let harness = Harness::boot().await;
     let item = seed(&harness, destructive_permission());
