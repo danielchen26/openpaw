@@ -28,6 +28,7 @@ public final class OpenPawModel {
 
     public private(set) var backend: (any OpenPawBackend)?
     public private(set) var terminal: (any TerminalBackend)?
+    public private(set) var structuredBackendReady = false
     public var dictation: (any DictationEngine)?
 
     // MARK: - Hosts and connection
@@ -89,11 +90,13 @@ public final class OpenPawModel {
         self.terminal = terminal
         self.dictation = dictation
         self.selectedHostID = hostStore.hosts.first?.id
+        self.structuredBackendReady = backend.map { !($0 is any StructuredBackendLifecycle) } ?? false
     }
 
     public func attach(backend: (any OpenPawBackend)?, terminal: (any TerminalBackend)?) {
         self.backend = backend
         self.terminal = terminal
+        structuredBackendReady = backend.map { !($0 is any StructuredBackendLifecycle) } ?? false
     }
 
     // MARK: - Derived state
@@ -104,7 +107,7 @@ public final class OpenPawModel {
     }
 
     public var canRefreshRemoteState: Bool {
-        backend != nil && selectedHost != nil
+        backend != nil && selectedHost != nil && structuredBackendReady
     }
 
     public var pendingInbox: [InboxItem] {
@@ -178,7 +181,8 @@ public final class OpenPawModel {
     // MARK: - Loading
 
     public func refresh() async {
-        guard canRefreshRemoteState, let backend else { return }
+        guard canRefreshRemoteState, let backend, let hostID = selectedHostID else { return }
+        let generation = connectionGeneration
         isRefreshing = true
         defer { isRefreshing = false }
         do {
@@ -186,13 +190,19 @@ public final class OpenPawModel {
             async let sessions = backend.sessions()
             async let inbox = backend.inbox(status: nil)
             async let repos = backend.repos()
-            self.health = try await health
-            self.sessions = try await sessions
-            self.inbox = try await inbox
-            self.repos = try await repos
+            let loadedHealth = try await health
+            let loadedSessions = try await sessions
+            let loadedInbox = try await inbox
+            let loadedRepos = try await repos
+            guard selectedHostID == hostID, connectionGeneration == generation, structuredBackendReady else { return }
+            self.health = loadedHealth
+            self.sessions = loadedSessions
+            self.inbox = loadedInbox
+            self.repos = loadedRepos
             if selectedSessionID == nil { selectedSessionID = self.sessions.first?.sessionID }
             if selectedRepo == nil { selectedRepo = self.repos.first?.name }
         } catch {
+            guard selectedHostID == hostID, connectionGeneration == generation else { return }
             present(error, while: "loading host state")
         }
     }
@@ -200,19 +210,21 @@ public final class OpenPawModel {
     /// Follows the host's SSE stream. Resumes from the highest `seq` we already hold, which is exact because
     /// `seq` is dense per session and `event_id` is content addressed, so a reconnect cannot duplicate a row.
     public func startFollowing(session sessionID: String?) {
-        guard canRefreshRemoteState, let backend else { return }
+        guard canRefreshRemoteState, let backend, let hostID = selectedHostID else { return }
+        let generation = connectionGeneration
         eventTask?.cancel()
         let afterSeq = sessionID.flatMap { transcripts[$0]?.map(\.seq).max() }
-        eventTask = Task { [weak self] in
+        eventTask = Task { [weak self, backend] in
             do {
                 for try await event in backend.events(session: sessionID, afterSeq: afterSeq) {
-                    guard let self else { return }
+                    guard let self, self.selectedHostID == hostID, self.connectionGeneration == generation, self.structuredBackendReady else { return }
                     self.ingest(event)
                 }
             } catch is CancellationError {
                 return
             } catch {
-                self?.present(error, while: "following the event stream")
+                guard let self, self.selectedHostID == hostID, self.connectionGeneration == generation else { return }
+                self.present(error, while: "following the event stream")
             }
         }
     }
@@ -221,29 +233,30 @@ public final class OpenPawModel {
         tailscaleDiscoveryGeneration += 1
         let generation = tailscaleDiscoveryGeneration
         tailscaleDiscoveryTask?.cancel()
-        guard selectedHost != nil, connection.isConnected, let backend else {
+        guard selectedHost != nil, connection.isConnected, structuredBackendReady, let backend, let hostID = selectedHostID else {
             tailscaleDiscovery = .noConnectedHost
             return
         }
+        let connectionGeneration = connectionGeneration
         tailscaleDiscovery = .loading
         tailscaleDiscoveryTask = Task { [weak self, backend] in
             do {
                 let response = try await backend.tailscaleDevices()
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
-                    guard let self, self.tailscaleDiscoveryGeneration == generation else { return }
+                    guard let self, self.tailscaleDiscoveryGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration, self.structuredBackendReady else { return }
                     self.tailscaleDiscovery = response.candidates.isEmpty ? .empty : .candidates(response.candidates)
                 }
             } catch is CancellationError {
             } catch HostClientError.tailscaleDiscovery(let code, let message) {
                 await MainActor.run {
-                    guard let self, self.tailscaleDiscoveryGeneration == generation else { return }
+                    guard let self, self.tailscaleDiscoveryGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration else { return }
                     self.tailscaleDiscovery = .unavailable(code: code, message: message)
                 }
             } catch {
                 await MainActor.run {
-                    guard let self, self.tailscaleDiscoveryGeneration == generation else { return }
-                    self.tailscaleDiscovery = .failure(message: String(describing: error))
+                    guard let self, self.tailscaleDiscoveryGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration else { return }
+                    self.tailscaleDiscovery = .failure(message: "Tailscale discovery failed. Retry or add SSH details manually.")
                 }
             }
         }
@@ -424,15 +437,26 @@ public final class OpenPawModel {
         return prompt + "\n\nAttached files uploaded to:\n" + paths
     }
 
-    public func canSendAgentAttachments() -> Bool { backend != nil && connection.isConnected }
+    public func canSendAgentAttachments() -> Bool { backend != nil && structuredBackendReady && connection.isConnected }
 
     public func connectSelectedHost() async {
         guard let terminal, let host = selectedHost else { return }
+        stopFollowing()
+        cancelTailscaleDiscovery()
+        clearHostDerivedState()
+        structuredBackendReady = backend.map { !($0 is any StructuredBackendLifecycle) } ?? false
+        if let lifecycle = backend as? any StructuredBackendLifecycle { await lifecycle.disconnect() }
+        await terminal.disconnect()
+        let targetHostID = host.id
         stateTask?.cancel()
-        stateTask = Task { [weak self] in
+        stateTask = Task { [weak self, terminal] in
             for await state in terminal.stateStream {
-                guard let self else { return }
+                guard let self, self.selectedHostID == targetHostID else { return }
                 self.connection = state
+                if state.isTerminal, let lifecycle = self.backend as? any StructuredBackendLifecycle {
+                    self.structuredBackendReady = false
+                    await lifecycle.disconnect()
+                }
                 if case .failed(let error) = state {
                     self.present(error, while: "connecting to \(host.nickname)")
                 }
@@ -440,17 +464,58 @@ public final class OpenPawModel {
         }
         do {
             try await terminal.connect(host: host)
+            guard selectedHostID == targetHostID else { return }
+            if let lifecycle = backend as? any StructuredBackendLifecycle {
+                do {
+                    try await lifecycle.connect(hostID: targetHostID)
+                    structuredBackendReady = await lifecycle.isReady
+                    await refresh()
+                    startFollowing(session: selectedSessionID)
+                } catch {
+                    structuredBackendReady = false
+                    clearHostDerivedState()
+                    presentStructuredBackendUnavailable(error)
+                }
+            } else {
+                structuredBackendReady = backend != nil
+                await refresh()
+                startFollowing(session: selectedSessionID)
+            }
         } catch {
+            structuredBackendReady = false
             present(error, while: "connecting to \(host.nickname)")
         }
     }
 
     public func disconnect() async {
         stopFollowing()
+        cancelTailscaleDiscovery()
+        clearHostDerivedState()
         stateTask?.cancel()
         stateTask = nil
+        if let lifecycle = backend as? any StructuredBackendLifecycle { await lifecycle.disconnect() }
+        structuredBackendReady = false
         await terminal?.disconnect()
         connection = .disconnected(reason: nil)
+    }
+
+    private func clearHostDerivedState() {
+        health = nil
+        sessions = []
+        selectedSessionID = nil
+        inbox = []
+        repos = []
+        selectedRepo = nil
+        transcripts = [:]
+        acknowledgedDetails = []
+    }
+
+    private func presentStructuredBackendUnavailable(_ error: any Error) {
+        lastError = PresentedError(
+            title: "Structured host features are unavailable",
+            detail: "The terminal is connected, but OpenPaw could not reach the structured host service. Sessions, approvals, previews, uploads, and Tailscale discovery will stay unavailable until the service is reachable.",
+            isRecoverable: true
+        )
     }
 
     // MARK: - Errors

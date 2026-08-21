@@ -22,14 +22,14 @@ protocol LoopbackForwarder: Sendable {
 /// to it through a `direct-tcpip` channel on the SSH connection the terminal already established. That is the whole
 /// security model of the structured side: there is no port to scan, no certificate to get wrong, and no path that
 /// works when the SSH connection is down.
-final class HostAPIBackend: OpenPawBackend {
+final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle {
 
     /// The port `openpaw-host` binds on the remote machine. Configurable because a user may run two hosts, and
     /// defaulted because almost nobody does.
     static let defaultRemotePort: UInt16 = 8_787
 
     private let forwarder: any LoopbackForwarder
-    private let credentials: DeviceCredentialStore
+    private let credentials: any DeviceCredentialStoring
     private let remotePort: UInt16
     private let urlSession: URLSession
 
@@ -37,10 +37,11 @@ final class HostAPIBackend: OpenPawBackend {
     /// Read without awaiting by `previewURL`, which the protocol declares synchronous because a URL for a WebView is
     /// not worth an actor hop.
     private let localPort = LockedBox<UInt16?>(nil)
+    private let activeHostID = LockedBox<HostRecord.ID?>(nil)
 
     init(
         forwarder: any LoopbackForwarder,
-        credentials: DeviceCredentialStore = DeviceCredentialStore(),
+        credentials: any DeviceCredentialStoring = DeviceCredentialStore(),
         remotePort: UInt16 = HostAPIBackend.defaultRemotePort,
         urlSession: URLSession = .shared
     ) {
@@ -54,14 +55,18 @@ final class HostAPIBackend: OpenPawBackend {
 
     /// Opens the tunnel and restores the stored pairing, if there is one. Idempotent: calling it again after the SSH
     /// connection dropped rebuilds the tunnel on a fresh local port.
-    func connect() async throws {
+    var isReady: Bool { get async { await state.client != nil } }
+
+    func connect(hostID: HostRecord.ID) async throws {
+        await disconnect()
+        activeHostID.set(hostID)
         let port = try await forwarder.start(remotePort: remotePort)
         localPort.set(port)
         guard let base = URL(string: "http://127.0.0.1:\(port)") else {
             throw HostClientError.transport(URLError(.badURL))
         }
         let client = HostClient(baseURL: base, session: urlSession)
-        if let signer = credentials.loadSigner() {
+        if let signer = credentials.loadSigner(hostID: hostID) {
             await client.setSigner(signer)
         }
         await state.install(client: client)
@@ -70,6 +75,7 @@ final class HostAPIBackend: OpenPawBackend {
     func disconnect() async {
         await state.install(client: nil)
         localPort.set(nil)
+        activeHostID.set(nil)
         await forwarder.stop()
     }
 
@@ -94,7 +100,8 @@ final class HostAPIBackend: OpenPawBackend {
                 )
             )
         }
-        try credentials.save(result)
+        guard let hostID = activeHostID.get() else { throw HostClientError.transport(URLError(.notConnectedToInternet)) }
+        try credentials.save(result, hostID: hostID)
         await client.setSigner(signer)
         return result
     }
@@ -102,13 +109,14 @@ final class HostAPIBackend: OpenPawBackend {
     /// Forgets the pairing on this device. The host keeps its own record until the user revokes it there, which is
     /// why the copy says "this device" rather than "revoke".
     func unpair() async throws {
-        try credentials.clear()
+        guard let hostID = activeHostID.get() else { return }
+        try credentials.clear(hostID: hostID)
         if let client = await state.client {
             await client.setSigner(nil)
         }
     }
 
-    var isPaired: Bool { credentials.loadSigner() != nil }
+    var isPaired: Bool { activeHostID.get().flatMap { credentials.loadSigner(hostID: $0) } != nil }
 
     // MARK: OpenPawBackend
 
@@ -278,12 +286,18 @@ actor SSHLoopbackForwarder: LoopbackForwarder {
 
 // MARK: - Device credentials
 
+protocol DeviceCredentialStoring: Sendable {
+    func save(_ result: PairingResult, hostID: HostRecord.ID) throws
+    func loadSigner(hostID: HostRecord.ID) -> RequestSigner?
+    func clear(hostID: HostRecord.ID) throws
+}
+
 /// The device token and HMAC key from pairing, in the keychain.
 ///
 /// `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` on purpose: these credentials authorise approving a destructive
 /// command on someone's workstation, so they must not travel in an iCloud keychain to a device the user has not
 /// paired, and they must not be readable while the phone is locked in a stranger's hand.
-struct DeviceCredentialStore: Sendable {
+struct DeviceCredentialStore: DeviceCredentialStoring {
 
     static let defaultService = "dev.openpaw.app.pairing"
 
@@ -299,24 +313,24 @@ struct DeviceCredentialStore: Sendable {
         case hmacKey = "hmac_key_b64"
     }
 
-    func save(_ result: PairingResult) throws {
-        try write(result.deviceID, to: .deviceID)
-        try write(result.token, to: .token)
-        try write(result.hmacKeyB64, to: .hmacKey)
+    func save(_ result: PairingResult, hostID: HostRecord.ID) throws {
+        try write(result.deviceID, to: .deviceID, hostID: hostID)
+        try write(result.token, to: .token, hostID: hostID)
+        try write(result.hmacKeyB64, to: .hmacKey, hostID: hostID)
     }
 
-    func loadSigner() -> RequestSigner? {
+    func loadSigner(hostID: HostRecord.ID) -> RequestSigner? {
         guard
-            let deviceID = read(.deviceID),
-            let token = read(.token),
-            let hmacKey = read(.hmacKey)
+            let deviceID = read(.deviceID, hostID: hostID),
+            let token = read(.token, hostID: hostID),
+            let hmacKey = read(.hmacKey, hostID: hostID)
         else { return nil }
         return RequestSigner(deviceID: deviceID, token: token, hmacKeyBase64: hmacKey)
     }
 
-    func clear() throws {
+    func clear(hostID: HostRecord.ID) throws {
         for account in [Account.deviceID, .token, .hmacKey] {
-            let status = SecItemDelete(query(for: account) as CFDictionary)
+            let status = SecItemDelete(query(for: account, hostID: hostID) as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else {
                 throw KeychainError(status: status, operation: "deleting \(account.rawValue)")
             }
@@ -325,16 +339,16 @@ struct DeviceCredentialStore: Sendable {
 
     // MARK: Keychain
 
-    private func query(for account: Account) -> [String: Any] {
+    private func query(for account: Account, hostID: HostRecord.ID) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account.rawValue,
+            kSecAttrAccount as String: "host:\(hostID.uuidString):\(account.rawValue)",
         ]
     }
 
-    private func write(_ value: String, to account: Account) throws {
-        var attributes = query(for: account)
+    private func write(_ value: String, to account: Account, hostID: HostRecord.ID) throws {
+        var attributes = query(for: account, hostID: hostID)
         SecItemDelete(attributes as CFDictionary)
         attributes[kSecValueData as String] = Data(value.utf8)
         attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
@@ -344,8 +358,8 @@ struct DeviceCredentialStore: Sendable {
         }
     }
 
-    private func read(_ account: Account) -> String? {
-        var attributes = query(for: account)
+    private func read(_ account: Account, hostID: HostRecord.ID) -> String? {
+        var attributes = query(for: account, hostID: hostID)
         attributes[kSecReturnData as String] = true
         attributes[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?

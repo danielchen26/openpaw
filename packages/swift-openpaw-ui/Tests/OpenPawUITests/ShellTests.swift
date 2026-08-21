@@ -353,7 +353,7 @@ private enum RecordingBackendError: Error {
     case unexpectedCall
 }
 
-private final class RecordingBackend: OpenPawBackend, @unchecked Sendable {
+private class RecordingBackend: OpenPawBackend, @unchecked Sendable {
     private let lock = NSLock()
     private var calls: [String] = []
 
@@ -454,6 +454,102 @@ private final class RecordingBackend: OpenPawBackend, @unchecked Sendable {
     func audit(limit: Int) async throws -> [AuditEntry] {
         record("audit")
         throw RecordingBackendError.unexpectedCall
+    }
+}
+
+
+private final class LifecycleRecordingBackend: RecordingBackend, StructuredBackendLifecycle, @unchecked Sendable {
+    private let lock2 = NSLock()
+    var ready = false
+    var connectIDs: [HostRecord.ID] = []
+    var disconnectCount = 0
+    var failConnect = false
+    var isReady: Bool { get async { ready } }
+    func connect(hostID: HostRecord.ID) async throws {
+        connectIDs.append(hostID)
+        if failConnect { throw RecordingBackendError.unexpectedCall }
+        ready = true
+    }
+    func disconnect() async {
+        disconnectCount += 1
+        ready = false
+    }
+}
+
+private final class RecordingTerminalBackend: TerminalBackend, @unchecked Sendable {
+    private let continuation: AsyncStream<ConnectionState>.Continuation
+    let stateStream: AsyncStream<ConnectionState>
+    let outputStream = AsyncStream<Data> { $0.finish() }
+    private(set) var connectedHosts: [HostRecord.ID] = []
+    private(set) var disconnectCount = 0
+    init() {
+        var cont: AsyncStream<ConnectionState>.Continuation!
+        stateStream = AsyncStream { cont = $0 }
+        continuation = cont
+    }
+    func connect(host: HostRecord) async throws {
+        connectedHosts.append(host.id)
+        continuation.yield(.connected(.ssh))
+    }
+    func disconnect() async { disconnectCount += 1; continuation.yield(.disconnected(reason: nil)) }
+    func send(text: String) async throws {}
+    func send(chord: KeyChord, applicationCursorKeys: Bool) async throws {}
+    func resize(columns: Int, rows: Int) async throws {}
+    func run(command: String) async throws -> String { "" }
+}
+
+@Suite("Structured backend lifecycle")
+struct StructuredBackendLifecycleTests {
+    @MainActor
+    @Test("Lifecycle backend gates refresh until terminal host connection opens it")
+    func lifecycleReadinessGatesRefresh() async {
+        let host = hostRecord()
+        let backend = LifecycleRecordingBackend()
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend, terminal: terminal)
+        #expect(model.canRefreshRemoteState == false)
+        await model.refresh()
+        #expect(backend.callCount("health") == 0)
+        await model.connectSelectedHost()
+        #expect(model.structuredBackendReady)
+        #expect(backend.connectIDs == [host.id])
+        #expect(backend.callCount("health") == 1)
+    }
+
+    @MainActor
+    @Test("Structured backend failure keeps terminal connected but features unavailable")
+    func terminalOnlyFallbackWhenStructuredConnectFails() async {
+        let host = hostRecord()
+        let backend = LifecycleRecordingBackend()
+        backend.failConnect = true
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend, terminal: terminal)
+        await model.connectSelectedHost()
+        await Task.yield()
+        #expect(model.connection.isConnected)
+        #expect(model.structuredBackendReady == false)
+        #expect(model.canRefreshRemoteState == false)
+        #expect(model.lastError?.title == "Structured host features are unavailable")
+    }
+
+    @MainActor
+    @Test("Switching hosts disconnects stale backend and suppresses Tailscale results")
+    func hostSwitchDisconnectsAndScopesTailscale() async throws {
+        let first = HostRecord(nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Two", hostname: "two", username: "dev", auth: .agentForwarding)
+        let backend = LifecycleRecordingBackend()
+        backend.tailscaleDelayNanoseconds = 50_000_000
+        backend.tailscaleResponse = TailscaleDevicesResponse(version: 1, candidates: [TailscaleDeviceCandidate(id: "late", displayName: "Late", tailscaleIPs: ["100.64.0.1"], online: true)])
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend, terminal: terminal)
+        await model.connectSelectedHost()
+        model.refreshTailscaleDevices()
+        model.selectedHostID = second.id
+        await model.connectSelectedHost()
+        try await Task.sleep(nanoseconds: 90_000_000)
+        #expect(backend.disconnectCount >= 2)
+        #expect(backend.connectIDs.suffix(2) == [first.id, second.id])
+        #expect(model.tailscaleDiscovery.candidates.isEmpty)
     }
 }
 

@@ -34,6 +34,12 @@ public protocol OpenPawBackend: Sendable {
 /// The PTY side. Kept separate from `OpenPawBackend` because the terminal is authoritative for execution and
 /// remains usable even when the structured daemon is absent — a plain SSH host with no `openpaw-host` installed
 /// is a first-class configuration, not a degraded one.
+public protocol StructuredBackendLifecycle: Sendable {
+    var isReady: Bool { get async }
+    func connect(hostID: HostRecord.ID) async throws
+    func disconnect() async
+}
+
 public protocol TerminalBackend: Sendable {
     var stateStream: AsyncStream<ConnectionState> { get }
     var outputStream: AsyncStream<Data> { get }
