@@ -90,6 +90,8 @@ pub enum TailscaleUnavailable {
     MissingCli(String),
     /// The local node is not logged in to Tailscale.
     LoggedOut(String),
+    /// Generic fixed-command/process failure that is not evidence of logged-out state.
+    Unavailable(String),
     /// The fixed command exceeded its timeout.
     Timeout(String),
     /// The fixed command produced more output than the bounded limit.
@@ -130,6 +132,9 @@ impl TailscaleUnavailable {
         Self::LoggedOut(
             "Tailscale is installed but not logged in on the connected host.".to_owned(),
         )
+    }
+    fn unavailable() -> Self {
+        Self::Unavailable("Tailscale discovery is unavailable on the connected host.".to_owned())
     }
     fn timeout() -> Self {
         Self::Timeout("Tailscale discovery timed out on the connected host.".to_owned())
@@ -204,9 +209,9 @@ fn unavailable_response(err: TailscaleUnavailable) -> ApiError {
         | TailscaleUnavailable::LoggedOut(_)
         | TailscaleUnavailable::UnavailableState(_) => StatusCode::SERVICE_UNAVAILABLE,
         TailscaleUnavailable::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
-        TailscaleUnavailable::OutputLimit(_) | TailscaleUnavailable::Busy(_) => {
-            StatusCode::BAD_GATEWAY
-        }
+        TailscaleUnavailable::Unavailable(_)
+        | TailscaleUnavailable::OutputLimit(_)
+        | TailscaleUnavailable::Busy(_) => StatusCode::BAD_GATEWAY,
     };
     ApiError::json(status, serde_json::json!({ "error": err }))
 }
@@ -470,7 +475,7 @@ async fn run_status_command(
         if e.kind() == std::io::ErrorKind::NotFound {
             TailscaleUnavailable::missing_cli()
         } else {
-            TailscaleUnavailable::logged_out()
+            TailscaleUnavailable::unavailable()
         }
     })?;
 
@@ -479,7 +484,7 @@ async fn run_status_command(
     let mut limited = (&mut stdout).take((max_bytes + 1) as u64);
     match timeout_at(deadline, limited.read_to_end(&mut bytes)).await {
         Ok(result) => {
-            result.map_err(|_| TailscaleUnavailable::logged_out())?;
+            result.map_err(|_| TailscaleUnavailable::unavailable())?;
         }
         Err(_) => {
             // `kill_on_drop` is a backstop. Explicit kill/reap prevents an orphan
@@ -495,7 +500,7 @@ async fn run_status_command(
     }
 
     let status = match timeout_at(deadline, child.wait()).await {
-        Ok(result) => result.map_err(|_| TailscaleUnavailable::logged_out())?,
+        Ok(result) => result.map_err(|_| TailscaleUnavailable::unavailable())?,
         Err(_) => {
             cleanup_child(&mut child).await;
             return Err(TailscaleUnavailable::timeout());
@@ -503,7 +508,7 @@ async fn run_status_command(
     };
     if !status.success() {
         cleanup_child(&mut child).await;
-        return Err(TailscaleUnavailable::logged_out());
+        return Err(TailscaleUnavailable::unavailable());
     }
     Ok(bytes)
 }
@@ -693,13 +698,13 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn process_runner_maps_nonzero_to_logged_out_without_stderr_leak() {
+    async fn process_runner_maps_nonzero_to_unavailable_without_stderr_leak() {
         let (_temp, script) = executable_script("nonzero", "echo secret-stderr >&2\nexit 1\n");
         let err = run_status_command(&script, MAX_STATUS_BYTES, STATUS_TIMEOUT)
             .await
             .unwrap_err();
         assert!(
-            matches!(err, TailscaleUnavailable::LoggedOut(message) if !message.contains("secret-stderr"))
+            matches!(err, TailscaleUnavailable::Unavailable(message) if !message.contains("secret-stderr"))
         );
     }
 

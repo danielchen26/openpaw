@@ -1278,6 +1278,25 @@ async fn tailscale_devices_http_route_uses_real_fixed_argv_process_and_sanitizes
 
 #[cfg(unix)]
 #[tokio::test]
+async fn tailscale_devices_http_route_maps_process_failures_to_unavailable() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = temp.path().join("tailscale-fails");
+    std::fs::write(&script, "#!/bin/sh\necho secret-stderr >&2\nexit 2\n").unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).unwrap();
+
+    let runner = Arc::new(ProcessTailscaleStatusRunner::new(&script));
+    let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
+    let response = harness.get("/v1/tailscale/devices").await;
+    assert_eq!(response.status(), 502);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "unavailable");
+    assert!(!body.to_string().contains("secret-stderr"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn tailscale_devices_http_route_kills_process_group_descendants_on_output_limit() {
     let temp = tempfile::tempdir().unwrap();
     let child_pid_file = temp.path().join("child-pid");
@@ -1341,6 +1360,13 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
             "timeout",
         ),
         (
+            TailscaleUnavailable::Unavailable(
+                "Tailscale discovery is unavailable on the connected host.".to_owned(),
+            ),
+            502,
+            "unavailable",
+        ),
+        (
             TailscaleUnavailable::OutputLimit(
                 "Tailscale discovery returned too much data on the connected host.".to_owned(),
             ),
@@ -1359,6 +1385,7 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
             TailscaleUnavailable::MissingCli(message)
             | TailscaleUnavailable::LoggedOut(message)
             | TailscaleUnavailable::Timeout(message)
+            | TailscaleUnavailable::Unavailable(message)
             | TailscaleUnavailable::OutputLimit(message)
             | TailscaleUnavailable::Busy(message)
             | TailscaleUnavailable::UnavailableState(message) => message.clone(),
