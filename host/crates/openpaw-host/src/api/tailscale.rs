@@ -19,6 +19,7 @@ use serde_json::Value;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
+use tokio::time::{Instant, timeout_at};
 
 use super::ApiError;
 
@@ -106,6 +107,13 @@ pub enum TailscaleParseError {
     Unavailable(TailscaleUnavailable),
     /// Status JSON is malformed or has an unsupported shape.
     Malformed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendState {
+    Running,
+    LoggedOut,
+    Missing,
 }
 
 impl TailscaleUnavailable {
@@ -196,11 +204,7 @@ fn unavailable_response(err: TailscaleUnavailable) -> ApiError {
 pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, TailscaleParseError> {
     let value: Value =
         serde_json::from_slice(bytes).map_err(|e| TailscaleParseError::Malformed(e.to_string()))?;
-    if is_logged_out_status(&value) {
-        return Err(TailscaleParseError::Unavailable(
-            TailscaleUnavailable::logged_out(),
-        ));
-    }
+    let backend_state = backend_state(&value)?;
     let peers = if let Some(peer) = value.get("Peer") {
         peer
     } else if value.is_array() {
@@ -223,6 +227,20 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, Tails
         ));
     };
 
+    match backend_state {
+        BackendState::Running | BackendState::Missing => {}
+        BackendState::LoggedOut if values.is_empty() => {
+            return Err(TailscaleParseError::Unavailable(
+                TailscaleUnavailable::logged_out(),
+            ));
+        }
+        BackendState::LoggedOut => {
+            return Err(TailscaleParseError::Malformed(
+                "tailscale BackendState contradicts peer data".to_owned(),
+            ));
+        }
+    }
+
     let mut candidates = Vec::new();
     for peer in values {
         candidates.push(candidate_from_peer(peer)?);
@@ -234,17 +252,25 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, Tails
     })
 }
 
-fn is_logged_out_status(value: &Value) -> bool {
-    let backend_state = value
+fn backend_state(value: &Value) -> Result<BackendState, TailscaleParseError> {
+    let Some(raw) = value
         .get("BackendState")
         .or_else(|| value.get("backend_state"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    matches!(
-        backend_state.as_str(),
-        "needslogin" | "needs_login" | "stopped" | "no_state"
-    )
+    else {
+        return Ok(BackendState::Missing);
+    };
+    let Some(state) = raw.as_str() else {
+        return Err(TailscaleParseError::Malformed(
+            "tailscale BackendState is not a string".to_owned(),
+        ));
+    };
+    match state.to_ascii_lowercase().as_str() {
+        "running" => Ok(BackendState::Running),
+        "needslogin" | "needs_login" | "stopped" | "no_state" => Ok(BackendState::LoggedOut),
+        _ => Err(TailscaleParseError::Malformed(
+            "unsupported tailscale BackendState".to_owned(),
+        )),
+    }
 }
 
 fn candidate_from_peer(peer: &Value) -> Result<TailscaleDeviceCandidate, TailscaleParseError> {
@@ -337,56 +363,84 @@ async fn run_status_command(
     max_bytes: usize,
     timeout: Duration,
 ) -> Result<Vec<u8>, TailscaleUnavailable> {
-    let mut child = Command::new(executable)
+    let deadline = Instant::now() + timeout;
+    let mut command = Command::new(executable);
+    command
         .arg("status")
         .arg("--json")
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                TailscaleUnavailable::missing_cli()
-            } else {
-                TailscaleUnavailable::logged_out()
-            }
-        })?;
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    make_process_group(&mut command);
+    let mut child = command.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            TailscaleUnavailable::missing_cli()
+        } else {
+            TailscaleUnavailable::logged_out()
+        }
+    })?;
 
     let mut stdout = child.stdout.take().expect("stdout piped");
     let mut bytes = Vec::new();
     let mut limited = (&mut stdout).take((max_bytes + 1) as u64);
-    match tokio::time::timeout(timeout, limited.read_to_end(&mut bytes)).await {
+    match timeout_at(deadline, limited.read_to_end(&mut bytes)).await {
         Ok(result) => {
             result.map_err(|_| TailscaleUnavailable::logged_out())?;
         }
         Err(_) => {
             // `kill_on_drop` is a backstop. Explicit kill/reap prevents an orphan
             // or zombie when the timeout wins while the child is still running.
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            cleanup_child(&mut child, deadline).await;
             return Err(TailscaleUnavailable::timeout());
         }
     }
 
     if bytes.len() > max_bytes {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+        cleanup_child(&mut child, deadline).await;
         return Err(TailscaleUnavailable::output_limit());
     }
 
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
+    let status = match timeout_at(deadline, child.wait()).await {
         Ok(result) => result.map_err(|_| TailscaleUnavailable::logged_out())?,
         Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            cleanup_child(&mut child, deadline).await;
             return Err(TailscaleUnavailable::timeout());
         }
     };
     if !status.success() {
+        cleanup_child(&mut child, deadline).await;
         return Err(TailscaleUnavailable::logged_out());
     }
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn make_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+async fn cleanup_child(child: &mut tokio::process::Child, deadline: Instant) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let _ = tokio::process::Command::new("/bin/kill")
+            .arg("-KILL")
+            .arg(format!("-{}", pid))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill().await;
+
+    if Instant::now() < deadline {
+        let _ = timeout_at(deadline, child.wait()).await;
+    } else {
+        let _ = child.try_wait();
+    }
 }
 
 /// Shared default runner.
@@ -453,6 +507,20 @@ mod tests {
             err,
             TailscaleParseError::Unavailable(TailscaleUnavailable::LoggedOut(_))
         ));
+    }
+
+    #[test]
+    fn backend_state_is_fail_closed_for_unknown_non_string_and_contradictory_states() {
+        for json in [
+            br#"{"BackendState":"Mystery","Peer":{}}"#.as_slice(),
+            br#"{"BackendState":true,"Peer":{}}"#.as_slice(),
+            br#"{"BackendState":"NeedsLogin","Peer":{"n1":{"ID":"n1","HostName":"bad","TailscaleIP":"100.64.0.2"}}}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                parse_status_json(json).unwrap_err(),
+                TailscaleParseError::Malformed(_)
+            ));
+        }
     }
 
     #[tokio::test]

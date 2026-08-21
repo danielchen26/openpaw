@@ -8,6 +8,8 @@
 //! any endpoint that runs a command.
 
 use std::future::Future;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -16,7 +18,9 @@ use std::time::Duration;
 use base64::Engine as _;
 use futures::StreamExt;
 use openpaw_host::api::inbox::Decision;
-use openpaw_host::api::tailscale::{TailscaleStatusRunner, TailscaleUnavailable};
+use openpaw_host::api::tailscale::{
+    ProcessTailscaleStatusRunner, TailscaleStatusRunner, TailscaleUnavailable,
+};
 use openpaw_host::audit::AuditEntry;
 use openpaw_host::auth::{self, Profile};
 use openpaw_host::state::{Device, Store};
@@ -369,6 +373,45 @@ async fn a_request_signed_with_the_wrong_key_is_rejected() {
         response.status(),
         401,
         "a signature for another path is refused"
+    );
+}
+
+#[tokio::test]
+async fn bad_signature_does_not_consume_nonce_before_valid_request() {
+    let harness = Harness::boot().await;
+    let timestamp = OffsetDateTime::now_utc().unix_timestamp();
+    let nonce = auth::mint_secret();
+
+    let bad = harness
+        .raw(
+            reqwest::Method::GET,
+            "/v1/sessions",
+            Vec::new(),
+            &harness.operator,
+            &[7u8; 32],
+            timestamp,
+            &nonce,
+            None,
+        )
+        .await;
+    assert_eq!(bad.status(), 401);
+
+    let good = harness
+        .raw(
+            reqwest::Method::GET,
+            "/v1/sessions",
+            Vec::new(),
+            &harness.operator,
+            &harness.operator.key,
+            timestamp,
+            &nonce,
+            None,
+        )
+        .await;
+    assert_eq!(
+        good.status(),
+        200,
+        "nonce must still be available after bad signature"
     );
 }
 
@@ -1190,6 +1233,87 @@ async fn tailscale_devices_authorized_success_ignores_request_command_data() {
     assert!(!text.contains("trusted"));
     assert!(!text.contains("verified"));
     assert!(!text.contains("rm -rf"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tailscale_devices_http_route_uses_real_fixed_argv_process_and_sanitizes_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let argv_file = temp.path().join("argv");
+    let script = temp.path().join("tailscale-fixture");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\n' \"$*\" > {}\nprintf '%s' '{{\"BackendState\":\"Running\",\"Peer\":{{\"nodekey:abc\":{{\"ID\":\"n1\",\"HostName\":\"mac\",\"DNSName\":\"mac.tail.ts.net.\",\"TailscaleIP\":\"100.64.0.2\",\"Online\":true,\"Key\":\"secret\"}}}}}}'\n",
+            argv_file.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).unwrap();
+
+    let runner = Arc::new(ProcessTailscaleStatusRunner::new(&script));
+    let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
+    let response = harness
+        .signed(
+            reqwest::Method::GET,
+            "/v1/tailscale/devices?argv=evil&command=/bin/sh",
+            Some(json!({ "argv": ["evil"], "command": "/bin/sh" })),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        std::fs::read_to_string(&argv_file).unwrap().trim(),
+        "status --json"
+    );
+
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["candidates"][0]["id"], "n1");
+    let text = serde_json::to_string(&body).unwrap();
+    assert!(!text.contains("secret"));
+    assert!(!text.contains("evil"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tailscale_devices_http_route_kills_process_group_descendants_on_output_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let child_pid_file = temp.path().join("child-pid");
+    let script = temp.path().join("tailscale-overflow-fixture");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n(sleep 30 >/dev/null 2>&1) & echo $! > {}\ndd if=/dev/zero bs=1048577 count=1 2>/dev/null\nsleep 30\n",
+            child_pid_file.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&script, permissions).unwrap();
+
+    let runner = Arc::new(ProcessTailscaleStatusRunner::new(&script));
+    let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
+    let response = harness.get("/v1/tailscale/devices").await;
+    assert_eq!(response.status(), 502);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "output_limit");
+
+    let pid: i32 = std::fs::read_to_string(&child_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let still_alive = std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .unwrap()
+        .success();
+    assert!(!still_alive, "process-group cleanup must kill descendants");
 }
 
 #[tokio::test]

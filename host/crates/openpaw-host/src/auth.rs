@@ -11,7 +11,7 @@
 //! request cannot be replayed: the timestamp must be within ±300 s and the nonce
 //! is remembered for 600 s.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,8 @@ pub const REQUIRED_CAPABILITY_HEADER: &str = "x-openpaw-required-capability";
 pub const MAX_SKEW: i64 = 300;
 /// How long a nonce is remembered, per the capability spec.
 pub const NONCE_TTL: Duration = Duration::from_secs(600);
+/// Hard cap for remembered replay nonces. Oldest entries are evicted first.
+pub const MAX_NONCES: usize = 4096;
 /// Pairing codes are short-lived on purpose: the code is read off a terminal and
 /// typed into a phone, which takes seconds, not hours.
 pub const PAIRING_TTL: Duration = Duration::from_secs(300);
@@ -262,7 +264,9 @@ impl AuthedDevice {
 #[derive(Debug)]
 pub struct NonceCache {
     seen: Mutex<HashMap<String, Instant>>,
+    order: Mutex<VecDeque<String>>,
     ttl: Duration,
+    capacity: usize,
 }
 
 impl NonceCache {
@@ -273,9 +277,16 @@ impl NonceCache {
 
     /// Cache with a custom window.
     pub fn with_ttl(ttl: Duration) -> NonceCache {
+        NonceCache::with_ttl_and_capacity(ttl, MAX_NONCES)
+    }
+
+    /// Cache with a custom window and capacity.
+    pub fn with_ttl_and_capacity(ttl: Duration, capacity: usize) -> NonceCache {
         NonceCache {
             seen: Mutex::new(HashMap::new()),
+            order: Mutex::new(VecDeque::new()),
             ttl,
+            capacity: capacity.max(1),
         }
     }
 
@@ -286,18 +297,25 @@ impl NonceCache {
     pub fn check_and_insert(&self, device_id: &str, nonce: &str) -> bool {
         let key = format!("{device_id}:{nonce}");
         let now = Instant::now();
-        let mut guard = self.lock();
-        guard.retain(|_, seen_at| now.duration_since(*seen_at) < self.ttl);
-        if guard.contains_key(&key) {
+        let mut seen = self.lock_seen();
+        let mut order = self.lock_order();
+        prune_nonces(&mut seen, &mut order, now, self.ttl);
+        if seen.contains_key(&key) {
             return false;
         }
-        guard.insert(key, now);
+        seen.insert(key.clone(), now);
+        order.push_back(key);
+        while seen.len() > self.capacity {
+            if let Some(oldest) = order.pop_front() {
+                seen.remove(&oldest);
+            }
+        }
         true
     }
 
     /// Number of remembered nonces. Diagnostics only.
     pub fn len(&self) -> usize {
-        self.lock().len()
+        self.lock_seen().len()
     }
 
     /// True when nothing is remembered.
@@ -305,10 +323,36 @@ impl NonceCache {
         self.len() == 0
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Instant>> {
+    fn lock_seen(&self) -> std::sync::MutexGuard<'_, HashMap<String, Instant>> {
         self.seen
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_order(&self) -> std::sync::MutexGuard<'_, VecDeque<String>> {
+        self.order
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+fn prune_nonces(
+    seen: &mut HashMap<String, Instant>,
+    order: &mut VecDeque<String>,
+    now: Instant,
+    ttl: Duration,
+) {
+    while let Some(key) = order.front() {
+        let expired = seen
+            .get(key)
+            .is_none_or(|seen_at| now.duration_since(*seen_at) >= ttl);
+        if expired {
+            if let Some(key) = order.pop_front() {
+                seen.remove(&key);
+            }
+        } else {
+            break;
+        }
     }
 }
 
@@ -659,6 +703,23 @@ mod tests {
         // Pruning happens on insert, so this insert clears the expired rows.
         assert!(cache.check_and_insert("dev_a", "n2"));
         assert_eq!(cache.len(), 1, "expired nonces were pruned");
+    }
+
+    #[test]
+    fn nonces_are_capacity_bounded_and_evict_oldest() {
+        let cache = NonceCache::with_ttl_and_capacity(Duration::from_secs(60), 2);
+        assert!(cache.check_and_insert("dev", "n1"));
+        assert!(cache.check_and_insert("dev", "n2"));
+        assert!(cache.check_and_insert("dev", "n3"));
+        assert_eq!(cache.len(), 2);
+        assert!(
+            cache.check_and_insert("dev", "n1"),
+            "oldest nonce was evicted"
+        );
+        assert!(
+            !cache.check_and_insert("dev", "n3"),
+            "recent nonce remains protected"
+        );
     }
 
     #[test]
