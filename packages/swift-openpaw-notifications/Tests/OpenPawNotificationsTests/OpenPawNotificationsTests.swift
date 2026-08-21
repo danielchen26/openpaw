@@ -201,6 +201,27 @@ struct OpenPawNotificationsTests {
         #expect(try ActionRouter.route(.decisionReview(inboxID: "safe-inbox", decisionID: "decision")) == .openDetail(inboxID: "safe-inbox", requiresAuthenticatedRefresh: true))
     }
 
+    @Test func standaloneActionIntentDecodeRejectsExtrasAliasesCaseVariantsAndInvalidIDs() throws {
+        let invalidJSON = [
+            "{\"extra\":1,\"inbox_id\":\"inbox\",\"type\":\"open_detail\"}",
+            "{\"command\":\"rm\",\"inbox_id\":\"inbox\",\"type\":\"open_detail\"}",
+            "{\"Action_Token\":\"x\",\"inbox_id\":\"inbox\",\"type\":\"open_detail\"}",
+            "{\"actionToken\":\"x\",\"inbox_id\":\"inbox\",\"type\":\"open_detail\"}",
+            "{\"inbox_id\":\"../../secret\",\"type\":\"open_detail\"}",
+            "{\"inbox_id\":\"\",\"type\":\"open_detail\"}",
+            "{\"decision_id\":\"../../secret\",\"inbox_id\":\"inbox\",\"type\":\"decision_review\"}",
+            "{\"decision_id\":\"decision\",\"inbox_id\":\"\",\"type\":\"decision_review\"}",
+            "{\"inbox_id\":\"inbox\",\"type\":\"open_inbox\"}"
+        ]
+        for json in invalidJSON {
+            #expect(throws: (any Error).self) { try JSONDecoder().decode(NotificationActionIntent.self, from: Data(json.utf8)) }
+        }
+
+        #expect(try JSONDecoder().decode(NotificationActionIntent.self, from: Data("{\"type\":\"open_inbox\"}".utf8)) == .openInbox)
+        #expect(try JSONDecoder().decode(NotificationActionIntent.self, from: Data("{\"inbox_id\":\"inbox\",\"type\":\"open_detail\"}".utf8)) == .openDetail(inboxID: "inbox"))
+        #expect(try JSONDecoder().decode(NotificationActionIntent.self, from: Data("{\"decision_id\":\"decision\",\"inbox_id\":\"inbox\",\"type\":\"decision_review\"}".utf8)) == .decisionReview(inboxID: "inbox", decisionID: "decision"))
+    }
+
     @Test func directUngatedDecodePathIsUnavailable() throws {
         let mirror = String(describing: NotificationPayloadValidator.self)
         #expect(!mirror.isEmpty)

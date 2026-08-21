@@ -110,11 +110,20 @@ extension NotificationActionIntent: Codable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        try NotificationActionSchemaValidator.validate(decoder)
         let kind = try c.decode(Kind.self, forKey: .type)
         switch kind {
         case .openInbox: self = .openInbox
-        case .openDetail: self = .openDetail(inboxID: try c.decode(String.self, forKey: .inboxID))
-        case .decisionReview: self = .decisionReview(inboxID: try c.decode(String.self, forKey: .inboxID), decisionID: try c.decode(String.self, forKey: .decisionID))
+        case .openDetail:
+            let inboxID = try c.decode(String.self, forKey: .inboxID)
+            try NotificationOpaqueIDValidator.validate(inboxID)
+            self = .openDetail(inboxID: inboxID)
+        case .decisionReview:
+            let inboxID = try c.decode(String.self, forKey: .inboxID)
+            let decisionID = try c.decode(String.self, forKey: .decisionID)
+            try NotificationOpaqueIDValidator.validate(inboxID)
+            try NotificationOpaqueIDValidator.validate(decisionID)
+            self = .decisionReview(inboxID: inboxID, decisionID: decisionID)
         }
     }
 

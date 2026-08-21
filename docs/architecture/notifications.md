@@ -29,7 +29,7 @@ Notification action intents are navigation-only by default:
 - `openInbox`
 - `openDetail(inboxID:)`
 
-A decision representation may use `decisionReview(inboxID:decisionID:)`, but this is still not an approval, denial, stop, or authorization. It requires the foreground app to authenticate and refresh the full inbox item before any consequential operation. The package exposes this as `requiresForegroundAuthenticatedRefresh == true` and `carriesAuthorizationMaterial == false`. `ActionRouter.route` is throwing and validates directly constructed action IDs before producing a route, so it must not be used as a security-validator bypass.
+A decision representation may use `decisionReview(inboxID:decisionID:)`, but this is still not an approval, denial, stop, or authorization. It requires the foreground app to authenticate and refresh the full inbox item before any consequential operation. The package exposes this as `requiresForegroundAuthenticatedRefresh == true` and `carriesAuthorizationMaterial == false`. Standalone `NotificationActionIntent` decoding exact-key validates by action kind and validates decoded IDs. `ActionRouter.route` is throwing and validates directly constructed action IDs before producing a route, so neither Codable nor routing must be used as a security-validator bypass.
 
 ## Replay and expiry gate
 
