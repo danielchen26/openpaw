@@ -215,7 +215,7 @@ enum ScreenCatalog {
         Screen(
             name: "TerminalScreenView",
             build: { model, _ in
-                AnyView(
+                return AnyView(
                     TerminalScreenView(
                         model: model,
                         settings: OpenPawSettings.preview(),
@@ -237,7 +237,7 @@ enum ScreenCatalog {
         Screen(
             name: "WorkspaceHomeView-empty",
             build: { _, _ in
-                AnyView(
+                return AnyView(
                     NavigationStack {
                         WorkspaceHomeView(model: OpenPawModel(hostStore: HostStore()), settings: OpenPawSettings.preview())
                     }
@@ -248,7 +248,7 @@ enum ScreenCatalog {
         Screen(
             name: "AddDeviceFlow-welcome",
             build: { _, _ in
-                AnyView(
+                return AnyView(
                     NavigationStack {
                         AddDeviceFlow(
                             model: OpenPawModel(hostStore: HostStore()),
@@ -263,12 +263,20 @@ enum ScreenCatalog {
         Screen(
             name: "AddDeviceFlow-candidate-confirmation",
             build: { _, _ in
-                AnyView(
+                let candidate = AddDeviceCandidate(
+                    id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+                    nickname: "Studio",
+                    hostname: "studio.tail123.ts.net"
+                )
+                var state = AddDeviceFlowState(hosts: [], discovered: [candidate])
+                state.startTailscaleDiscovery()
+                state.selectCandidate(id: candidate.id)
+                return AnyView(
                     NavigationStack {
                         AddDeviceFlow(
                             model: OpenPawModel(hostStore: HostStore()),
                             settings: OpenPawSettings.preview(),
-                            confirmedCandidate: .fixture,
+                            state: state,
                             onDismiss: {}
                         )
                     }
@@ -279,12 +287,40 @@ enum ScreenCatalog {
         Screen(
             name: "AddDeviceFlow-tailscale-no-candidates",
             build: { _, _ in
-                AnyView(
+                var state = AddDeviceFlowState(hosts: [])
+                state.startTailscaleDiscovery()
+                return AnyView(
                     NavigationStack {
                         AddDeviceFlow(
                             model: OpenPawModel(hostStore: HostStore()),
                             settings: OpenPawSettings.preview(),
-                            initialStep: .tailscaleCandidates,
+                            state: state,
+                            onDismiss: {}
+                        )
+                    }
+                )
+            },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "AddDeviceFlow-edit-details",
+            build: { _, _ in
+                let candidate = AddDeviceCandidate(
+                    id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+                    nickname: "Studio",
+                    hostname: "studio.tail123.ts.net"
+                )
+                var state = AddDeviceFlowState(hosts: [], discovered: [candidate])
+                state.startTailscaleDiscovery()
+                state.selectCandidate(id: candidate.id)
+                let draft = state.confirmSelectedCandidate()
+                return AnyView(
+                    NavigationStack {
+                        AddDeviceFlow(
+                            model: OpenPawModel(hostStore: HostStore()),
+                            settings: OpenPawSettings.preview(),
+                            state: state,
+                            draft: draft,
                             onDismiss: {}
                         )
                     }

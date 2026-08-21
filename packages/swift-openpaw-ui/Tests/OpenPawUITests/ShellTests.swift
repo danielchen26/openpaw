@@ -860,6 +860,9 @@ struct SettingsTests {
 
 @Suite("Add device flow")
 struct AddDeviceFlowTests {
+    private static let candidateID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+    private static let candidate = AddDeviceCandidate(id: candidateID, nickname: "Studio", hostname: "studio.tail123.ts.net")
+
     @Test("An empty store starts at the welcome step")
     func emptyStartsWelcome() {
         #expect(AddDeviceFlowState(hosts: []).step == .welcome)
@@ -886,8 +889,8 @@ struct AddDeviceFlowTests {
     func candidateNeedsConfirmationWithoutSaving() {
         let store = HostStore()
         var state = AddDeviceFlowState(hosts: store.hosts)
-        state.discovered = [.fixture]
-        state.selectCandidate(id: AddDeviceCandidate.fixtureID)
+        state.discovered = [Self.candidate]
+        state.selectCandidate(id: Self.candidateID)
         #expect(state.step == .confirmCandidate)
         #expect(store.hosts.isEmpty)
     }
@@ -895,8 +898,8 @@ struct AddDeviceFlowTests {
     @Test("Confirmation advances to editable SSH details with limited prefill")
     func confirmCandidateCreatesReviewPrefill() {
         var state = AddDeviceFlowState(hosts: [])
-        state.discovered = [.fixture]
-        state.selectCandidate(id: AddDeviceCandidate.fixtureID)
+        state.discovered = [Self.candidate]
+        state.selectCandidate(id: Self.candidateID)
         let prefill = state.confirmSelectedCandidate()
         #expect(state.step == .editDetails)
         #expect(prefill?.hostname == "studio.tail123.ts.net")
@@ -924,5 +927,50 @@ struct AddDeviceFlowTests {
         #expect(state.step == .editDetails)
         #expect(draft.hostname == "")
         #expect(draft.nickname == "")
+    }
+
+    @Test("Back navigation reverses candidate and edit detail steps")
+    func backNavigationReversesSteps() {
+        var state = AddDeviceFlowState(hosts: [], discovered: [Self.candidate])
+        state.startTailscaleDiscovery()
+        state.back()
+        #expect(state.step == .welcome)
+
+        state.startTailscaleDiscovery()
+        state.selectCandidate(id: Self.candidateID)
+        state.back()
+        #expect(state.step == .tailscaleCandidates)
+
+        state.selectCandidate(id: Self.candidateID)
+        _ = state.confirmSelectedCandidate()
+        state.back()
+        #expect(state.step == .confirmCandidate)
+
+        state.back()
+        state.back()
+        _ = state.startManualSSH()
+        state.back()
+        #expect(state.step == .welcome)
+
+        state.startTailscaleDiscovery()
+        _ = state.startManualSSH()
+        state.back()
+        #expect(state.step == .tailscaleCandidates)
+    }
+
+    @Test("Host editor cancel route can be represented by flow state")
+    func hostEditorCancelCanRouteBackThroughState() {
+        var state = AddDeviceFlowState(hosts: [], discovered: [Self.candidate])
+        state.startTailscaleDiscovery()
+        state.selectCandidate(id: Self.candidateID)
+        _ = state.confirmSelectedCandidate()
+        let cancel = { state.back() }
+        cancel()
+        #expect(state.step == .confirmCandidate)
+    }
+
+    @Test("Candidate accessibility label includes exact safety semantics")
+    func candidateAccessibilityLabelIncludesSafetySemantics() {
+        #expect(Self.candidate.accessibilityLabel == "Studio, studio.tail123.ts.net, discovery candidate, not trusted or saved")
     }
 }

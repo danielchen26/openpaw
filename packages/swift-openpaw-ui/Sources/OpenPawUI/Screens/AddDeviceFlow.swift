@@ -20,11 +20,10 @@ public struct AddDeviceCandidate: Identifiable, Sendable, Hashable {
     public func prefillDraft() -> HostDraft {
         HostDraft(nickname: nickname, hostname: hostname)
     }
-}
 
-public extension AddDeviceCandidate {
-    static let fixtureID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
-    static let fixture = AddDeviceCandidate(id: fixtureID, nickname: "Studio", hostname: "studio.tail123.ts.net")
+    public var accessibilityLabel: String {
+        "\(nickname), \(hostname), discovery candidate, not trusted or saved"
+    }
 }
 
 public enum AddDeviceFlowStep: String, Sendable, Hashable {
@@ -38,6 +37,7 @@ public struct AddDeviceFlowState: Sendable, Hashable {
     public private(set) var step: AddDeviceFlowStep
     public var discovered: [AddDeviceCandidate]
     public private(set) var selectedCandidate: AddDeviceCandidate?
+    private var editDetailsReturnStep: AddDeviceFlowStep = .welcome
 
     public init(hosts: [HostRecord], discovered: [AddDeviceCandidate] = []) {
         self.step = .welcome
@@ -57,14 +57,30 @@ public struct AddDeviceFlowState: Sendable, Hashable {
 
     public mutating func confirmSelectedCandidate() -> HostDraft? {
         guard let candidate = selectedCandidate else { return nil }
+        editDetailsReturnStep = .confirmCandidate
         step = .editDetails
         return candidate.prefillDraft()
     }
 
     public mutating func startManualSSH() -> HostDraft {
         selectedCandidate = nil
+        editDetailsReturnStep = step
         step = .editDetails
         return HostDraft()
+    }
+
+    public mutating func back() {
+        switch step {
+        case .welcome:
+            break
+        case .tailscaleCandidates:
+            selectedCandidate = nil
+            step = .welcome
+        case .confirmCandidate:
+            step = .tailscaleCandidates
+        case .editDetails:
+            step = editDetailsReturnStep
+        }
     }
 }
 
@@ -92,23 +108,31 @@ public struct AddDeviceFlow: View {
         model: OpenPawModel,
         settings: OpenPawSettings,
         candidates: [AddDeviceCandidate] = [],
-        confirmedCandidate: AddDeviceCandidate? = nil,
-        initialStep: AddDeviceFlowStep = .welcome,
         onDismiss: @escaping () -> Void
     ) {
         self.model = model
         self.settings = settings
         self.candidates = candidates
         self.onDismiss = onDismiss
-        var initial = AddDeviceFlowState(hosts: model.hostStore.hosts, discovered: candidates)
-        if let confirmedCandidate {
-            initial.discovered = [confirmedCandidate]
-            initial.selectCandidate(id: confirmedCandidate.id)
-        } else if initialStep == .tailscaleCandidates {
-            initial.startTailscaleDiscovery()
-        }
-        _state = State(initialValue: initial)
+        _state = State(initialValue: AddDeviceFlowState(hosts: model.hostStore.hosts, discovered: candidates))
     }
+
+    #if DEBUG
+    public init(
+        model: OpenPawModel,
+        settings: OpenPawSettings,
+        state: AddDeviceFlowState,
+        draft: HostDraft? = nil,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.model = model
+        self.settings = settings
+        self.candidates = state.discovered
+        self.onDismiss = onDismiss
+        _state = State(initialValue: state)
+        _draft = State(initialValue: draft)
+    }
+    #endif
 
     public var body: some View {
         Group {
@@ -120,15 +144,24 @@ public struct AddDeviceFlow: View {
             case .confirmCandidate:
                 confirmCandidate
             case .editDetails:
-                HostEditorView(model: model, settings: settings, initialDraft: draft ?? HostDraft(), onDismiss: onDismiss)
+                HostEditorView(
+                    model: model,
+                    settings: settings,
+                    initialDraft: draft ?? HostDraft(),
+                    onDismiss: onDismiss,
+                    onCancel: { state.back() }
+                )
             }
         }
         .background(OpenPawTheme.ink)
         .navigationTitle(AddDeviceFlowCopy.title)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("Close", action: onDismiss) }
+            if state.step == .welcome {
+                ToolbarItem(placement: .cancellationAction) { Button("Close", action: onDismiss) }
+            } else if state.step != .editDetails {
+                ToolbarItem(placement: .cancellationAction) { Button("Back") { state.back() } }
+            }
         }
-        .onAppear { state.discovered = candidates }
     }
 
     private var welcome: some View {
@@ -188,7 +221,7 @@ public struct AddDeviceFlow: View {
                             candidateRow(candidate)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("Review Tailscale candidate \(candidate.nickname)")
+                        .accessibilityLabel(candidate.accessibilityLabel)
                     }
                 }
             }

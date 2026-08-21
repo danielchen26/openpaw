@@ -409,6 +409,8 @@ public struct HostEditorView: View {
     private let settings: OpenPawSettings
     private let existing: HostRecord?
     private let onDismiss: () -> Void
+    private let onCancel: () -> Void
+    private let cancelTitle: String
 
     @State private var draft: HostDraft
     @State private var newTag = ""
@@ -421,12 +423,15 @@ public struct HostEditorView: View {
         settings: OpenPawSettings,
         record: HostRecord? = nil,
         initialDraft: HostDraft? = nil,
-        onDismiss: @escaping () -> Void
+        onDismiss: @escaping () -> Void,
+        onCancel: (() -> Void)? = nil
     ) {
         self.model = model
         self.settings = settings
         self.existing = record
         self.onDismiss = onDismiss
+        self.onCancel = onCancel ?? onDismiss
+        self.cancelTitle = onCancel == nil ? "Cancel" : "Back"
         if let record {
             _draft = State(initialValue: HostDraft(record: record, profile: settings.profile(for: record.id)))
         } else {
@@ -461,7 +466,7 @@ public struct HostEditorView: View {
         .navigationTitle(existing == nil ? "Add host" : draft.resolvedNickname)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel", action: onDismiss)
+                Button(cancelTitle, action: onCancel)
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save", action: save)
