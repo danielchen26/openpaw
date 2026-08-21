@@ -269,6 +269,15 @@ pub struct NonceCache {
     capacity: usize,
 }
 
+/// Why a nonce could not be accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonceError {
+    /// This device already used the nonce inside the replay window.
+    Replay,
+    /// Accepting a new nonce would require evicting an unexpired nonce.
+    CapacityFull,
+}
+
 impl NonceCache {
     /// Cache with the spec's 600 s window.
     pub fn new() -> NonceCache {
@@ -290,27 +299,25 @@ impl NonceCache {
         }
     }
 
-    /// Record `nonce` for `device_id`; `false` means it was already used.
+    /// Record `nonce` for `device_id` without ever evicting unexpired entries.
     ///
     /// Pruning happens here rather than on a timer: the map only grows when
     /// requests arrive, so that is exactly when it needs trimming.
-    pub fn check_and_insert(&self, device_id: &str, nonce: &str) -> bool {
+    pub fn check_and_insert(&self, device_id: &str, nonce: &str) -> Result<(), NonceError> {
         let key = format!("{device_id}:{nonce}");
         let now = Instant::now();
         let mut seen = self.lock_seen();
         let mut order = self.lock_order();
         prune_nonces(&mut seen, &mut order, now, self.ttl);
         if seen.contains_key(&key) {
-            return false;
+            return Err(NonceError::Replay);
+        }
+        if seen.len() >= self.capacity {
+            return Err(NonceError::CapacityFull);
         }
         seen.insert(key.clone(), now);
         order.push_back(key);
-        while seen.len() > self.capacity {
-            if let Some(oldest) = order.pop_front() {
-                seen.remove(&oldest);
-            }
-        }
-        true
+        Ok(())
     }
 
     /// Number of remembered nonces. Diagnostics only.
@@ -498,6 +505,17 @@ fn forbidden(capability: Capability) -> Response {
     response
 }
 
+fn nonce_cache_full() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "error": "nonce_cache_full",
+            "detail": "replay protection capacity is full; retry after the nonce TTL"
+        })),
+    )
+        .into_response()
+}
+
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok().map(str::trim)
 }
@@ -605,8 +623,10 @@ pub async fn authorize(
 
     // Only a request that already proved its signature may consume a nonce,
     // otherwise an attacker could burn nonces by guessing them.
-    if !app.nonces.check_and_insert(&device_id, &nonce) {
-        return unauthorized("nonce already used");
+    match app.nonces.check_and_insert(&device_id, &nonce) {
+        Ok(()) => {}
+        Err(NonceError::Replay) => return unauthorized("nonce already used"),
+        Err(NonceError::CapacityFull) => return nonce_cache_full(),
     }
 
     if !device.has_capability(capability.as_str()) {
@@ -694,31 +714,43 @@ mod tests {
     #[test]
     fn nonces_are_single_use_per_device_and_expire() {
         let cache = NonceCache::with_ttl(Duration::from_millis(20));
-        assert!(cache.check_and_insert("dev_a", "n1"));
-        assert!(!cache.check_and_insert("dev_a", "n1"), "replay rejected");
+        assert!(cache.check_and_insert("dev_a", "n1").is_ok());
+        assert!(
+            matches!(
+                cache.check_and_insert("dev_a", "n1"),
+                Err(NonceError::Replay)
+            ),
+            "replay rejected"
+        );
         // The same nonce from another device is a different key.
-        assert!(cache.check_and_insert("dev_b", "n1"));
+        assert!(cache.check_and_insert("dev_b", "n1").is_ok());
 
         std::thread::sleep(Duration::from_millis(30));
         // Pruning happens on insert, so this insert clears the expired rows.
-        assert!(cache.check_and_insert("dev_a", "n2"));
+        assert!(cache.check_and_insert("dev_a", "n2").is_ok());
         assert_eq!(cache.len(), 1, "expired nonces were pruned");
     }
 
     #[test]
-    fn nonces_are_capacity_bounded_and_evict_oldest() {
+    fn nonces_are_capacity_bounded_without_evicting_live_entries() {
         let cache = NonceCache::with_ttl_and_capacity(Duration::from_secs(60), 2);
-        assert!(cache.check_and_insert("dev", "n1"));
-        assert!(cache.check_and_insert("dev", "n2"));
-        assert!(cache.check_and_insert("dev", "n3"));
+        assert!(cache.check_and_insert("dev", "n1").is_ok());
+        assert!(cache.check_and_insert("dev", "n2").is_ok());
+        assert!(
+            matches!(
+                cache.check_and_insert("dev", "n3"),
+                Err(NonceError::CapacityFull)
+            ),
+            "cache must fail closed instead of evicting a live nonce"
+        );
         assert_eq!(cache.len(), 2);
         assert!(
-            cache.check_and_insert("dev", "n1"),
-            "oldest nonce was evicted"
+            cache.check_and_insert("dev", "n1").is_err(),
+            "oldest live nonce must remain protected for the full TTL"
         );
         assert!(
-            !cache.check_and_insert("dev", "n3"),
-            "recent nonce remains protected"
+            cache.check_and_insert("dev", "n2").is_err(),
+            "second live nonce must remain protected for the full TTL"
         );
     }
 

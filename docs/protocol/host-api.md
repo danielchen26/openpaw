@@ -28,7 +28,9 @@ METHOD \n PATH_WITH_QUERY \n TIMESTAMP \n NONCE \n SHA256_HEX(BODY)
 ```
 
 The host stores only `sha256(token)` and compares in constant time. The HMAC key is per device. Losing a phone
-means revoking one device, not rotating everything.
+means revoking one device, not rotating everything. Authenticated requests consume a nonce only after the HMAC
+signature verifies. If replay-protection capacity is full while remembered nonces are still within the 600-second
+TTL, the host fails closed with `429 {"error":"nonce_cache_full"}` instead of evicting an unexpired nonce.
 
 Each route additionally requires a capability from `protocol/capability-spec/capabilities.json`. The `observer`
 profile holds only read capabilities, so an observer device physically cannot approve, upload or proxy — it gets
@@ -148,7 +150,10 @@ Response data is sanitized candidate metadata only:
 
 The response never includes raw `tailscale status` JSON, users, keys, route advertisements, credentials, or command output. Candidates are metadata only. They are not SSH-ready, trusted, or verified, and clients must not label them that way.
 
-Typed unavailable states include missing Tailscale CLI, logged-out Tailscale, timeout, output limit, and busy when another process-backed discovery is already running. Malformed or unsupported CLI JSON is a hard server error with safe user text.
+Typed unavailable states include missing Tailscale CLI, logged-out Tailscale, timeout, output limit, busy when
+another process-backed discovery is already running, and `unavailable_state` when `BackendState` is absent,
+non-string, unknown, or otherwise not a known running state. Malformed or unsupported CLI JSON after a supported
+running state is a hard server error with safe user text.
 
 ### `POST /v1/uploads` — `uploads.write`
 

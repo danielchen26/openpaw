@@ -1206,7 +1206,7 @@ async fn tailscale_devices_requires_signature_pairing_and_capability() {
 async fn tailscale_devices_authorized_success_ignores_request_command_data() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let runner = Arc::new(FakeTailscaleRunner {
-        result: Ok(br#"[{"id":"n1","Name":"mac","DNSName":"mac.tailnet.ts.net.","TailscaleIP":"100.64.0.2","Online":true,"OS":"macOS"}]"#.to_vec()),
+        result: Ok(br#"{"BackendState":"Running","Peer":[{"id":"n1","Name":"mac","DNSName":"mac.tailnet.ts.net.","TailscaleIP":"100.64.0.2","Online":true,"OS":"macOS"}]}"#.to_vec()),
         calls: Arc::clone(&calls),
     });
     let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
@@ -1360,7 +1360,8 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
             | TailscaleUnavailable::LoggedOut(message)
             | TailscaleUnavailable::Timeout(message)
             | TailscaleUnavailable::OutputLimit(message)
-            | TailscaleUnavailable::Busy(message) => message.clone(),
+            | TailscaleUnavailable::Busy(message)
+            | TailscaleUnavailable::UnavailableState(message) => message.clone(),
         };
         let runner = Arc::new(FakeTailscaleRunner {
             result: Err(unavailable),
@@ -1389,6 +1390,29 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
         body["error"]["message"],
         "Tailscale is installed but not logged in on the connected host."
     );
+
+    for (fixture, label) in [
+        (br#"{"Peer":{"nodekey:abc":{"ID":"n1","HostName":"mac","TailscaleIP":"100.64.0.2"}}}"#.as_slice(), "missing BackendState"),
+        (br#"{"BackendState":true,"Peer":{"nodekey:abc":{"ID":"n1","HostName":"mac","TailscaleIP":"100.64.0.2"}}}"#.as_slice(), "non-string BackendState"),
+        (br#"{"BackendState":"Starting","Peer":{"nodekey:abc":{"ID":"n1","HostName":"mac","TailscaleIP":"100.64.0.2"}}}"#.as_slice(), "unknown BackendState"),
+    ] {
+        let runner = Arc::new(FakeTailscaleRunner {
+            result: Ok(fixture.to_vec()),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
+        let unavailable = harness.get("/v1/tailscale/devices").await;
+        assert_eq!(unavailable.status(), 503, "{label} must fail closed");
+        let body: Value = unavailable.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "unavailable_state", "{label}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("state"),
+            "{label}: {body:?}"
+        );
+    }
 
     let runner = Arc::new(FakeTailscaleRunner {
         result: Ok(b"not json".to_vec()),

@@ -91,6 +91,8 @@ pub enum TailscaleUnavailable {
     OutputLimit(String),
     /// Another process-backed discovery is already running.
     Busy(String),
+    /// The local Tailscale daemon did not report a known running backend state.
+    UnavailableState(String),
 }
 
 /// Structured unavailable response body.
@@ -113,7 +115,6 @@ pub enum TailscaleParseError {
 enum BackendState {
     Running,
     LoggedOut,
-    Missing,
 }
 
 impl TailscaleUnavailable {
@@ -135,6 +136,11 @@ impl TailscaleUnavailable {
     }
     fn busy() -> Self {
         Self::Busy("Tailscale discovery is already running on the connected host.".to_owned())
+    }
+    fn unavailable_state(reason: &str) -> Self {
+        Self::UnavailableState(format!(
+            "Tailscale is not in a supported running state on the connected host: {reason}."
+        ))
     }
 }
 
@@ -189,9 +195,9 @@ pub async fn devices(
 
 fn unavailable_response(err: TailscaleUnavailable) -> ApiError {
     let status = match err {
-        TailscaleUnavailable::MissingCli(_) | TailscaleUnavailable::LoggedOut(_) => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+        TailscaleUnavailable::MissingCli(_)
+        | TailscaleUnavailable::LoggedOut(_)
+        | TailscaleUnavailable::UnavailableState(_) => StatusCode::SERVICE_UNAVAILABLE,
         TailscaleUnavailable::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
         TailscaleUnavailable::OutputLimit(_) | TailscaleUnavailable::Busy(_) => {
             StatusCode::BAD_GATEWAY
@@ -228,7 +234,7 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, Tails
     };
 
     match backend_state {
-        BackendState::Running | BackendState::Missing => {}
+        BackendState::Running => {}
         BackendState::LoggedOut if values.is_empty() => {
             return Err(TailscaleParseError::Unavailable(
                 TailscaleUnavailable::logged_out(),
@@ -257,18 +263,20 @@ fn backend_state(value: &Value) -> Result<BackendState, TailscaleParseError> {
         .get("BackendState")
         .or_else(|| value.get("backend_state"))
     else {
-        return Ok(BackendState::Missing);
+        return Err(TailscaleParseError::Unavailable(
+            TailscaleUnavailable::unavailable_state("missing BackendState"),
+        ));
     };
     let Some(state) = raw.as_str() else {
-        return Err(TailscaleParseError::Malformed(
-            "tailscale BackendState is not a string".to_owned(),
+        return Err(TailscaleParseError::Unavailable(
+            TailscaleUnavailable::unavailable_state("BackendState is not a string"),
         ));
     };
     match state.to_ascii_lowercase().as_str() {
         "running" => Ok(BackendState::Running),
         "needslogin" | "needs_login" | "stopped" | "no_state" => Ok(BackendState::LoggedOut),
-        _ => Err(TailscaleParseError::Malformed(
-            "unsupported tailscale BackendState".to_owned(),
+        _ => Err(TailscaleParseError::Unavailable(
+            TailscaleUnavailable::unavailable_state("unsupported BackendState"),
         )),
     }
 }
@@ -456,7 +464,7 @@ mod tests {
 
     #[test]
     fn parses_real_peer_map_shape_and_sanitizes_fields() {
-        let json = br#"{"Peer":{"nodekey:abc":{"ID":"n1","HostName":"macbook","DNSName":"macbook.tail.ts.net.","TailscaleIPs":["100.64.0.2","fd7a:115c:a1e0::2"],"OS":"macOS","Online":true,"LastSeen":"2026-08-21T07:00:00Z","UserID":1,"Key":"secret"}}}"#;
+        let json = br#"{"BackendState":"Running","Peer":{"nodekey:abc":{"ID":"n1","HostName":"macbook","DNSName":"macbook.tail.ts.net.","TailscaleIPs":["100.64.0.2","fd7a:115c:a1e0::2"],"OS":"macOS","Online":true,"LastSeen":"2026-08-21T07:00:00Z","UserID":1,"Key":"secret"}}}"#;
         let parsed = parse_status_json(json).unwrap();
         assert_eq!(parsed.version, 1);
         assert_eq!(
@@ -478,7 +486,7 @@ mod tests {
 
     #[test]
     fn parses_supported_array_shape_optional_dns_and_offline() {
-        let json = br#"[{"id":"n2","Name":"linux","TailscaleIP":"100.64.0.3","Online":false}]"#;
+        let json = br#"{"BackendState":"Running","Peer":[{"id":"n2","Name":"linux","TailscaleIP":"100.64.0.3","Online":false}]}"#;
         let parsed = parse_status_json(json).unwrap();
         assert_eq!(parsed.candidates[0].dns_name, None);
         assert!(!parsed.candidates[0].online);
@@ -494,7 +502,7 @@ mod tests {
     #[test]
     fn rejects_mixed_valid_and_invalid_peer_entries() {
         let err = parse_status_json(
-            br#"{"Peer":{"good":{"ID":"n1","HostName":"ok","TailscaleIP":"100.64.0.2"},"bad":{"ID":"n2","HostName":"bad"}}}"#,
+            br#"{"BackendState":"Running","Peer":{"good":{"ID":"n1","HostName":"ok","TailscaleIP":"100.64.0.2"},"bad":{"ID":"n2","HostName":"bad"}}}"#,
         )
         .unwrap_err();
         assert!(matches!(err, TailscaleParseError::Malformed(_)));
@@ -510,17 +518,23 @@ mod tests {
     }
 
     #[test]
-    fn backend_state_is_fail_closed_for_unknown_non_string_and_contradictory_states() {
+    fn backend_state_is_fail_closed_for_absent_unknown_non_string_and_contradictory_states() {
         for json in [
+            br#"{"Peer":{}}"#.as_slice(),
             br#"{"BackendState":"Mystery","Peer":{}}"#.as_slice(),
             br#"{"BackendState":true,"Peer":{}}"#.as_slice(),
-            br#"{"BackendState":"NeedsLogin","Peer":{"n1":{"ID":"n1","HostName":"bad","TailscaleIP":"100.64.0.2"}}}"#.as_slice(),
         ] {
             assert!(matches!(
                 parse_status_json(json).unwrap_err(),
-                TailscaleParseError::Malformed(_)
+                TailscaleParseError::Unavailable(TailscaleUnavailable::UnavailableState(_))
             ));
         }
+
+        let err = parse_status_json(
+            br#"{"BackendState":"NeedsLogin","Peer":{"n1":{"ID":"n1","HostName":"bad","TailscaleIP":"100.64.0.2"}}}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, TailscaleParseError::Malformed(_)));
     }
 
     #[tokio::test]
