@@ -55,6 +55,30 @@ app_step() {
 
 step "app · build" app_step
 
+# The app target's tests are hosted *in the app* and need a booted simulator, so they cannot run under the swiftc
+# fallback above. Skipping them silently would be worse than not having them: these are the only tests that cover
+# the terminal backends against a live transport.
+app_test_step() {
+  if ! xcodebuild -project apps/ios/OpenPaw.xcodeproj -list >/dev/null 2>&1; then
+    printf '   xcodebuild cannot load its plug-ins here; skipping the app-hosted tests.\n'
+    return 0
+  fi
+  local destination
+  destination=$(xcrun simctl list devices available -j \
+    | python3 -c 'import json,sys; ds=[d for v in json.load(sys.stdin)["devices"].values() for d in v if d.get("isAvailable")]; print(ds[0]["udid"] if ds else "")')
+  if [ -z "$destination" ]; then
+    printf '   no available iOS Simulator; skipping the app-hosted tests.\n'
+    return 0
+  fi
+  in_dir apps/ios xcodebuild \
+    -project OpenPaw.xcodeproj -scheme OpenPawAppTests \
+    -destination "platform=iOS Simulator,id=$destination" \
+    -skipPackagePluginValidation -skipMacroValidation \
+    -quiet test
+}
+
+step "app · test" app_test_step
+
 step "ui · snapshots" in_dir tools/openpaw-snapshot \
   swift run openpaw-snapshot --output "${TMPDIR:-/tmp}/openpaw-snapshots"
 

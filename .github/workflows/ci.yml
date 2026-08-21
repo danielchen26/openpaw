@@ -76,6 +76,15 @@ jobs:
             -skipPackagePluginValidation \
             CODE_SIGNING_ALLOWED=NO build
         working-directory: apps/ios
+      # Hosted in the app, so this needs a concrete simulator rather than the generic destination the build uses.
+      # These are the only tests that exercise the terminal backends against a live transport.
+      - name: test
+        run: |
+          xcodebuild -project OpenPaw.xcodeproj -scheme OpenPawAppTests \
+            -destination 'platform=iOS Simulator,name=iPhone 16 Pro' \
+            -skipPackagePluginValidation -skipMacroValidation \
+            test
+        working-directory: apps/ios
 
   snapshots:
     name: ui snapshots
