@@ -8,8 +8,11 @@
 *.xcuserstate
 xcuserdata/
 DerivedData/
-*.xcodeproj/project.xcworkspace/
-*.xcodeproj/xcuserdata/
+# A leading path component makes a pattern root-anchored, so these need `**/` to reach the projects that actually
+# exist (`apps/ios/OpenPaw.xcodeproj/...`). Without it Xcode's resolved-package state shows up as untracked noise
+# every time the app is built.
+**/*.xcodeproj/project.xcworkspace/
+**/*.xcodeproj/xcuserdata/
 Package.resolved.lock
 
 # macOS
