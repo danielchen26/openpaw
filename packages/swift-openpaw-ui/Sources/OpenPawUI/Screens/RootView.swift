@@ -644,6 +644,11 @@ public struct RootView: View {
         }
     }
 
+    private func refreshModelAndSessionSpace() async {
+        if model.canRefreshRemoteState { await model.refresh() }
+        await refreshSessionSpace()
+    }
+
     private func invalidateSessionSpace() {
         sessionSpace = SessionSpaceSnapshot(hostID: model.selectedHostID, connectionGeneration: model.connectionGeneration)
     }
