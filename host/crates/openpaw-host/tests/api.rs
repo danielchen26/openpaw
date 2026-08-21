@@ -1391,6 +1391,19 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
         "Tailscale is installed but not logged in on the connected host."
     );
 
+    let runner = Arc::new(FakeTailscaleRunner {
+        result: Ok(
+            br#"{"BackendState":"NeedsLogin","AuthURL":"https://login.tailscale.com/a/abc"}"#
+                .to_vec(),
+        ),
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
+    let logged_out_without_peer = harness.get("/v1/tailscale/devices").await;
+    assert_eq!(logged_out_without_peer.status(), 503);
+    let body: Value = logged_out_without_peer.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "logged_out");
+
     for (fixture, label) in [
         (br#"{"Peer":{"nodekey:abc":{"ID":"n1","HostName":"mac","TailscaleIP":"100.64.0.2"}}}"#.as_slice(), "missing BackendState"),
         (br#"{"BackendState":true,"Peer":{"nodekey:abc":{"ID":"n1","HostName":"mac","TailscaleIP":"100.64.0.2"}}}"#.as_slice(), "non-string BackendState"),

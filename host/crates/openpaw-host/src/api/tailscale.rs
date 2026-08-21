@@ -5,7 +5,7 @@
 //! input, and only sanitized candidate metadata is returned.
 
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
@@ -27,6 +27,9 @@ use super::ApiError;
 pub const MAX_STATUS_BYTES: usize = 1024 * 1024;
 /// Maximum time spent waiting for the local Tailscale CLI.
 pub const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
+/// Bounded time to wait for parent reaping after an explicit kill.
+pub const POST_KILL_REAP_GRACE: Duration = Duration::from_millis(500);
+const MAX_TEXT_FIELD_LEN: usize = 255;
 
 /// Fixed command runner used by the route.
 pub trait TailscaleStatusRunner: Send + Sync + 'static {
@@ -211,6 +214,16 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, Tails
     let value: Value =
         serde_json::from_slice(bytes).map_err(|e| TailscaleParseError::Malformed(e.to_string()))?;
     let backend_state = backend_state(&value)?;
+    if backend_state == BackendState::LoggedOut
+        && value
+            .get("Peer")
+            .or_else(|| value.get("peers"))
+            .is_none_or(peers_empty)
+    {
+        return Err(TailscaleParseError::Unavailable(
+            TailscaleUnavailable::logged_out(),
+        ));
+    }
     let peers = if let Some(peer) = value.get("Peer") {
         peer
     } else if value.is_array() {
@@ -287,15 +300,18 @@ fn candidate_from_peer(peer: &Value) -> Result<TailscaleDeviceCandidate, Tailsca
             "tailscale peer entry is not an object".to_owned(),
         ));
     }
-    let id = string_at(peer, &["ID", "Id", "id", "NodeID", "StableID"])
-        .or_else(|| string_at(peer, &["DNSName", "HostName", "Name"]))
-        .ok_or_else(|| TailscaleParseError::Malformed("tailscale peer is missing id".to_owned()))?;
+    let id = match optional_string_at(peer, &["ID", "Id", "id", "NodeID", "StableID"])? {
+        Some(id) => id,
+        None => optional_string_at(peer, &["DNSName", "HostName", "Name"])?.ok_or_else(|| {
+            TailscaleParseError::Malformed("tailscale peer is missing id".to_owned())
+        })?,
+    };
     let display_name =
-        string_at(peer, &["HostName", "Name", "DNSName"]).unwrap_or_else(|| id.clone());
-    let dns_name = string_at(peer, &["DNSName"]);
-    let os = string_at(peer, &["OS"]);
-    let last_seen = string_at(peer, &["LastSeen"]);
-    let online = peer.get("Online").and_then(Value::as_bool).unwrap_or(false);
+        optional_string_at(peer, &["HostName", "Name", "DNSName"])?.unwrap_or_else(|| id.clone());
+    let dns_name = optional_string_at(peer, &["DNSName"])?;
+    let os = optional_string_at(peer, &["OS"])?;
+    let last_seen = optional_string_at(peer, &["LastSeen"])?;
+    let online = optional_bool_at(peer, "Online")?.unwrap_or(false);
     let tailscale_ips = ip_list(peer)?;
     Ok(TailscaleDeviceCandidate {
         id,
@@ -308,14 +324,48 @@ fn candidate_from_peer(peer: &Value) -> Result<TailscaleDeviceCandidate, Tailsca
     })
 }
 
-fn string_at(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        value
-            .get(*key)?
-            .as_str()
-            .map(|s| s.trim().trim_end_matches('.').to_owned())
-            .filter(|s| !s.is_empty())
-    })
+fn peers_empty(value: &Value) -> bool {
+    value.as_object().is_some_and(serde_json::Map::is_empty)
+        || value.as_array().is_some_and(Vec::is_empty)
+}
+
+fn optional_string_at(value: &Value, keys: &[&str]) -> Result<Option<String>, TailscaleParseError> {
+    for key in keys {
+        let Some(raw) = value.get(*key) else {
+            continue;
+        };
+        let Some(raw) = raw.as_str() else {
+            return Err(TailscaleParseError::Malformed(format!(
+                "tailscale peer field {key} is not a string"
+            )));
+        };
+        let normalized = raw.trim().trim_end_matches('.');
+        if normalized.is_empty() {
+            return Err(TailscaleParseError::Malformed(format!(
+                "tailscale peer field {key} is empty"
+            )));
+        }
+        if normalized.len() > MAX_TEXT_FIELD_LEN || normalized.chars().any(char::is_control) {
+            return Err(TailscaleParseError::Malformed(format!(
+                "tailscale peer field {key} is invalid"
+            )));
+        }
+        return Ok(Some(normalized.to_owned()));
+    }
+    Ok(None)
+}
+
+fn optional_bool_at(value: &Value, key: &str) -> Result<Option<bool>, TailscaleParseError> {
+    value
+        .get(key)
+        .map(|raw| {
+            raw.as_bool().ok_or_else(|| {
+                TailscaleParseError::Malformed(format!(
+                    "tailscale peer field {key} is not a boolean"
+                ))
+            })
+        })
+        .transpose()
 }
 
 fn ip_list(peer: &Value) -> Result<Vec<String>, TailscaleParseError> {
@@ -363,7 +413,29 @@ fn ip_list(peer: &Value) -> Result<Vec<String>, TailscaleParseError> {
 }
 
 fn normalize_ip(value: &str) -> Option<String> {
-    value.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
+    let ip = value.trim().parse::<IpAddr>().ok()?;
+    if is_tailscale_ip(&ip) {
+        Some(ip.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_tailscale_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ipv4_in_100_64_10(*ip),
+        IpAddr::V6(ip) => ipv6_in_tailscale_ula(*ip),
+    }
+}
+
+fn ipv4_in_100_64_10(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
+}
+
+fn ipv6_in_tailscale_ula(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
 }
 
 async fn run_status_command(
@@ -400,25 +472,25 @@ async fn run_status_command(
         Err(_) => {
             // `kill_on_drop` is a backstop. Explicit kill/reap prevents an orphan
             // or zombie when the timeout wins while the child is still running.
-            cleanup_child(&mut child, deadline).await;
+            cleanup_child(&mut child).await;
             return Err(TailscaleUnavailable::timeout());
         }
     }
 
     if bytes.len() > max_bytes {
-        cleanup_child(&mut child, deadline).await;
+        cleanup_child(&mut child).await;
         return Err(TailscaleUnavailable::output_limit());
     }
 
     let status = match timeout_at(deadline, child.wait()).await {
         Ok(result) => result.map_err(|_| TailscaleUnavailable::logged_out())?,
         Err(_) => {
-            cleanup_child(&mut child, deadline).await;
+            cleanup_child(&mut child).await;
             return Err(TailscaleUnavailable::timeout());
         }
     };
     if !status.success() {
-        cleanup_child(&mut child, deadline).await;
+        cleanup_child(&mut child).await;
         return Err(TailscaleUnavailable::logged_out());
     }
     Ok(bytes)
@@ -429,7 +501,7 @@ fn make_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
-async fn cleanup_child(child: &mut tokio::process::Child, deadline: Instant) {
+async fn cleanup_child(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         let _ = tokio::process::Command::new("/bin/kill")
@@ -444,11 +516,8 @@ async fn cleanup_child(child: &mut tokio::process::Child, deadline: Instant) {
     #[cfg(not(unix))]
     let _ = child.kill().await;
 
-    if Instant::now() < deadline {
-        let _ = timeout_at(deadline, child.wait()).await;
-    } else {
-        let _ = child.try_wait();
-    }
+    let reap_deadline = Instant::now() + POST_KILL_REAP_GRACE;
+    let _ = timeout_at(reap_deadline, child.wait()).await;
 }
 
 /// Shared default runner.
@@ -459,6 +528,7 @@ pub fn default_runner() -> Arc<dyn TailscaleStatusRunner> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
 
@@ -515,6 +585,32 @@ mod tests {
             err,
             TailscaleParseError::Unavailable(TailscaleUnavailable::LoggedOut(_))
         ));
+
+        let err = parse_status_json(
+            br#"{"BackendState":"NeedsLogin","AuthURL":"https://login.tailscale.com/a/abc"}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            TailscaleParseError::Unavailable(TailscaleUnavailable::LoggedOut(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_type_invalid_text_and_non_tailscale_candidate_fields() {
+        for json in [
+            br#"{"BackendState":"Running","Peer":{"n":{"ID":7,"HostName":"ok","TailscaleIP":"100.64.0.2"}}}"#.as_slice(),
+            br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"bad\u0007name","TailscaleIP":"100.64.0.2"}}}"#.as_slice(),
+            br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"ok","DNSName":false,"TailscaleIP":"100.64.0.2"}}}"#.as_slice(),
+            br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"ok","Online":"yes","TailscaleIP":"100.64.0.2"}}}"#.as_slice(),
+            br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"ok","TailscaleIP":"192.168.1.2"}}}"#.as_slice(),
+            br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"ok","TailscaleIPs":["100.64.0.2","fd00::1"]}}}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                parse_status_json(json).unwrap_err(),
+                TailscaleParseError::Malformed(_)
+            ));
+        }
     }
 
     #[test]
@@ -537,6 +633,7 @@ mod tests {
         assert!(matches!(err, TailscaleParseError::Malformed(_)));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn process_runner_reports_missing_executable() {
         let temp = tempfile::tempdir().unwrap();
@@ -547,6 +644,7 @@ mod tests {
         assert!(matches!(err, TailscaleUnavailable::MissingCli(_)));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn process_runner_maps_nonzero_to_logged_out_without_stderr_leak() {
         let (_temp, script) = executable_script("nonzero", "echo secret-stderr >&2\nexit 1\n");
@@ -558,6 +656,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn process_runner_discards_stderr_flood() {
         let (_temp, script) = executable_script(
@@ -570,6 +669,7 @@ mod tests {
         assert!(String::from_utf8(out).unwrap().contains("100.64.0.2"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn process_runner_kills_and_reaps_on_stdout_overflow_promptly() {
         let (_temp, script) = executable_script(
@@ -584,6 +684,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn process_runner_rejects_concurrent_process_discovery_as_busy() {
         let (_temp, script) = executable_script(
@@ -604,14 +705,20 @@ mod tests {
         first.await.unwrap().unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn process_runner_kills_and_reaps_on_timeout() {
         let temp = tempfile::tempdir().unwrap();
         let pid_file = temp.path().join("pid");
         let script = temp.path().join("timeout");
+        let child_pid_file = temp.path().join("child_pid");
         std::fs::write(
             &script,
-            format!("#!/bin/sh\necho $$ > {}\nsleep 10\n", pid_file.display()),
+            format!(
+                "#!/bin/sh\necho $$ > {}\nsleep 10 &\necho $! > {}\nwait\n",
+                pid_file.display(),
+                child_pid_file.display()
+            ),
         )
         .unwrap();
         make_executable(&script);
@@ -634,8 +741,18 @@ mod tests {
             .unwrap()
             .success();
         assert!(!still_alive, "timed out child should be killed and reaped");
+        let child_pid: i32 = std::fs::read_to_string(&child_pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !pid_is_alive(child_pid),
+            "process group child should be killed"
+        );
     }
 
+    #[cfg(unix)]
     fn executable_script(name: &str, body: &str) -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join(name);
@@ -644,9 +761,22 @@ mod tests {
         (temp, script)
     }
 
+    #[cfg(unix)]
     fn make_executable(path: &Path) {
         let mut permissions = std::fs::metadata(path).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn pid_is_alive(pid: i32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
     }
 }
