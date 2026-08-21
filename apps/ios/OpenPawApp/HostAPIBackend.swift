@@ -423,6 +423,7 @@ final class LockedBox<Value: Sendable>: @unchecked Sendable {
         return value
     }
 
+    @discardableResult
     func update<Result>(_ body: (inout Value) -> Result) -> Result {
         lock.lock()
         defer { lock.unlock() }
