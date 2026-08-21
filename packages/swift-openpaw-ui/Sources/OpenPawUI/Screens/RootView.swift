@@ -617,6 +617,7 @@ public struct RootView: View {
     private func transcript(_ sessionID: String) -> some View {
         ChatView(
             model: model,
+            settings: settings,
             sessionID: sessionID,
             onOpenFile: openFile(_:),
             onApprove: { router.openApproval(itemID: $0) }

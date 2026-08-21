@@ -94,6 +94,7 @@ public struct ComposerControlPresentation: Sendable, Equatable {
     public let disabledReason: String?
     public let isDestinationSwitchEnabled: Bool
     public let isLocaleSwitchEnabled: Bool
+    public let isDraftEditorEnabled: Bool
     public let microphoneAccessibilityLabel: String
     public let microphoneAccessibilityHint: String
     public let microphoneKeyboardShortcut: String
@@ -120,6 +121,7 @@ public struct ComposerControlPresentation: Sendable, Equatable {
                 : (blockedByUnsupportedAgentAttachments ? "Connect to a host before sending attachments." : nil),
             isDestinationSwitchEnabled: !isDictating,
             isLocaleSwitchEnabled: !isDictating,
+            isDraftEditorEnabled: !isDictating,
             microphoneAccessibilityLabel: isDictating ? "Stop dictation" : "Start dictation",
             microphoneAccessibilityHint: Self.microphoneHint(destination: destination, isDictating: isDictating),
             microphoneKeyboardShortcut: "⌘⇧M"
@@ -311,6 +313,7 @@ public struct ComposerView: View {
                 }
                 .accessibilityLabel("Prompt")
                 .accessibilityValue(activeDraftPresentation.accessibilityValue)
+                .disabled(!controlPresentation.isDraftEditorEnabled)
             if voice.isActive {
                 Text(activeDraftPresentation.partialPreview)
                     .font(OpenPawTheme.Human.caption)

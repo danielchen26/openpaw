@@ -111,6 +111,8 @@ private actor DictationSession {
     private var recognitionTask: SFSpeechRecognitionTask?
     private var isRunning = false
     private var generation = 0
+    private var activeTurn: Int?
+    private var lateFinalTurn: Int?
 
     func start(
         locale: Locale,
@@ -123,6 +125,8 @@ private actor DictationSession {
 
         generation += 1
         let turn = generation
+        activeTurn = nil
+        lateFinalTurn = nil
 
         try await requestPermissions()
 
@@ -189,10 +193,14 @@ private actor DictationSession {
         }
 
         isRunning = true
+        activeTurn = turn
 
         recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self else { return }
-            Task { await self.deliver(result: result, error: error, turn: turn, continuation: continuation) }
+            let update = result.map {
+                DictationUpdate(text: $0.bestTranscription.formattedString, isFinal: $0.isFinal)
+            }
+            Task { await self.deliver(update: update, error: error, turn: turn, continuation: continuation) }
         }
     }
 
@@ -200,6 +208,8 @@ private actor DictationSession {
         generation += 1
         guard isRunning || recognitionTask != nil || request != nil else { return }
         isRunning = false
+        lateFinalTurn = activeTurn
+        activeTurn = nil
 
         // Order matters: pull the tap first so no more buffers arrive, then tell the recogniser the audio ended so it
         // emits its final result, then cancel, then release the session.
@@ -218,20 +228,16 @@ private actor DictationSession {
     }
 
     private func deliver(
-        result: SFSpeechRecognitionResult?,
+        update: DictationUpdate?,
         error: (any Error)?,
         turn: Int,
         continuation: AsyncThrowingStream<DictationUpdate, any Error>.Continuation
     ) {
-        guard turn == generation else { return }
-        if let result {
-            continuation.yield(
-                DictationUpdate(
-                    text: result.bestTranscription.formattedString,
-                    isFinal: result.isFinal
-                )
-            )
-            if result.isFinal {
+        guard turn == activeTurn || update?.isFinal == true && turn == lateFinalTurn else { return }
+        if let update {
+            continuation.yield(update)
+            if update.isFinal {
+                if turn == lateFinalTurn { lateFinalTurn = nil }
                 continuation.finish()
             }
         }

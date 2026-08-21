@@ -249,6 +249,39 @@ struct VoiceCompositionTests {
         #expect(presentation.accessibilityValue == "Draft typed edit. Current recognition live words")
     }
 
+    @Test func chatComposerDraftEditorLocksWhileDictating() {
+        let active = ComposerControlPresentation.make(
+            destination: .agent,
+            hasAttachments: false,
+            hasDraft: true,
+            isSending: false,
+            isDictating: true
+        )
+        #expect(!active.isDraftEditorEnabled)
+
+        let inactive = ComposerControlPresentation.make(
+            destination: .agent,
+            hasAttachments: false,
+            hasDraft: true,
+            isSending: false,
+            isDictating: false
+        )
+        #expect(inactive.isDraftEditorEnabled)
+    }
+
+    @Test func runtimeLifecycleAllowsOwningLateFinalButRejectsOldTerminationAfterRestart() {
+        var lifecycle = DictationRuntimeLifecycle()
+        let old = lifecycle.start()
+        lifecycle.stop()
+
+        #expect(lifecycle.accepts(updateFor: old, isFinal: true))
+
+        let new = lifecycle.start()
+        #expect(!lifecycle.accepts(updateFor: old, isFinal: true))
+        #expect(!lifecycle.shouldStopEngine(forTerminationOf: old))
+        #expect(lifecycle.shouldStopEngine(forTerminationOf: new))
+    }
+
     @Test func microphoneControlIsKeyboardAndVoiceOverActionable() {
         let stopped = ComposerControlPresentation.make(destination: .agent, hasAttachments: false, hasDraft: false, isSending: false)
         #expect(stopped.microphoneKeyboardShortcut == "⌘⇧M")
@@ -367,6 +400,18 @@ struct VoiceCompositionTests {
 
         model.connection = .connected(.ssh)
         #expect(model.canSendAgentAttachments())
+    }
+
+    @MainActor @Test func chatComposerConfigurationUsesInjectedSettings() {
+        let settings = OpenPawSettings.preview()
+        settings.dictationLocaleID = "zh-CN"
+        settings.dictationMode = .terminal
+
+        let configuration = ChatComposerConfiguration.make(model: OpenPawModel(), settings: settings)
+
+        #expect(configuration.settings === settings)
+        #expect(configuration.initialLocaleID == "zh-CN")
+        #expect(configuration.initialDestination == .terminal)
     }
 }
 

@@ -344,6 +344,7 @@ public struct ChatView: View {
     private static let bottomAnchor = "openpaw.chat.bottom"
 
     public let model: OpenPawModel
+    public let settings: OpenPawSettings
     public let sessionID: String
     /// A path the reader asked to see — a file edit row, or a path a tool touched.
     public let onOpenFile: (String) -> Void
@@ -356,11 +357,13 @@ public struct ChatView: View {
 
     public init(
         model: OpenPawModel,
+        settings: OpenPawSettings = OpenPawSettings(),
         sessionID: String,
         onOpenFile: @escaping (String) -> Void,
         onApprove: @escaping (String) -> Void
     ) {
         self.model = model
+        self.settings = settings
         self.sessionID = sessionID
         self.onOpenFile = onOpenFile
         self.onApprove = onApprove
@@ -393,7 +396,11 @@ public struct ChatView: View {
                 transcript(rows: rows, pending: pending)
             }
 
-            ComposerView(engine: model.dictation, supportsAgentAttachments: model.canSendAgentAttachments()) { action, attachments in
+            ComposerView(
+                engine: model.dictation,
+                settings: settings,
+                supportsAgentAttachments: model.canSendAgentAttachments()
+            ) { action, attachments in
                 await model.commitVoice(action, attachments: attachments)
             }
         }
@@ -509,6 +516,17 @@ struct ChatRow: View {
 }
 
 /// Shown only when the reader has scrolled away from the newest row, and it says how much has arrived since.
+public struct ChatComposerConfiguration {
+    public let settings: OpenPawSettings
+    public let initialLocaleID: String
+    public let initialDestination: VoiceDestination
+
+    @MainActor public static func make(model: OpenPawModel, settings: OpenPawSettings) -> Self {
+        let restored = ComposerDictationPreferences.restored(localeID: settings.dictationLocaleID, mode: settings.dictationMode)
+        return Self(settings: settings, initialLocaleID: restored.localeID, initialDestination: restored.destination)
+    }
+}
+
 struct JumpToNewestPill: View {
     let count: Int
     let action: () -> Void

@@ -37,6 +37,39 @@ public enum VoiceLifecycle: Sendable, Hashable {
     case active
 }
 
+public struct DictationRuntimeTurnID: Sendable, Hashable {
+    fileprivate let generation: Int
+}
+
+public struct DictationRuntimeLifecycle: Sendable, Hashable {
+    private var generation = 0
+    private var activeTurn: DictationRuntimeTurnID?
+    private var lateFinalTurn: DictationRuntimeTurnID?
+
+    public init() {}
+
+    public mutating func start() -> DictationRuntimeTurnID {
+        generation += 1
+        let turn = DictationRuntimeTurnID(generation: generation)
+        activeTurn = turn
+        lateFinalTurn = nil
+        return turn
+    }
+
+    public mutating func stop() {
+        lateFinalTurn = activeTurn
+        activeTurn = nil
+    }
+
+    public func accepts(updateFor turn: DictationRuntimeTurnID, isFinal: Bool) -> Bool {
+        turn == activeTurn || (isFinal && turn == lateFinalTurn)
+    }
+
+    public func shouldStopEngine(forTerminationOf turn: DictationRuntimeTurnID) -> Bool {
+        turn == activeTurn || turn == lateFinalTurn
+    }
+}
+
 public enum VoicePrivacyDisclosure {
     public static let appleSpeech = "Speech may use Apple's on-device recognizer. If on-device recognition is unavailable for the selected language or device, Apple may use fallback recognition outside this app."
 }
