@@ -1436,6 +1436,16 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
     assert_eq!(malformed.status(), 500);
     let body: Value = malformed.json().await.unwrap();
     assert_eq!(body["error"], "internal error");
+
+    let runner = Arc::new(FakeTailscaleRunner {
+        result: Ok(br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"bad-last-seen","TailscaleIP":"100.64.0.2","LastSeen":"not-rfc3339"}}}"#.to_vec()),
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
+    let invalid_last_seen = harness.get("/v1/tailscale/devices").await;
+    assert_eq!(invalid_last_seen.status(), 500);
+    let body: Value = invalid_last_seen.json().await.unwrap();
+    assert_eq!(body["error"], "internal error");
 }
 
 /// Register a device with explicit capability names.

@@ -16,6 +16,8 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, http::StatusCode};
 use serde::Serialize;
 use serde_json::Value;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
@@ -310,7 +312,7 @@ fn candidate_from_peer(peer: &Value) -> Result<TailscaleDeviceCandidate, Tailsca
         optional_string_at(peer, &["HostName", "Name", "DNSName"])?.unwrap_or_else(|| id.clone());
     let dns_name = optional_string_at(peer, &["DNSName"])?;
     let os = optional_string_at(peer, &["OS"])?;
-    let last_seen = optional_string_at(peer, &["LastSeen"])?;
+    let last_seen = optional_last_seen(peer)?;
     let online = optional_bool_at(peer, "Online")?.unwrap_or(false);
     let tailscale_ips = ip_list(peer)?;
     Ok(TailscaleDeviceCandidate {
@@ -366,6 +368,16 @@ fn optional_bool_at(value: &Value, key: &str) -> Result<Option<bool>, TailscaleP
             })
         })
         .transpose()
+}
+
+fn optional_last_seen(value: &Value) -> Result<Option<String>, TailscaleParseError> {
+    let Some(last_seen) = optional_string_at(value, &["LastSeen"])? else {
+        return Ok(None);
+    };
+    OffsetDateTime::parse(&last_seen, &Rfc3339).map_err(|_| {
+        TailscaleParseError::Malformed("tailscale peer LastSeen is not RFC3339".to_owned())
+    })?;
+    Ok(Some(last_seen))
 }
 
 fn ip_list(peer: &Value) -> Result<Vec<String>, TailscaleParseError> {
@@ -605,6 +617,41 @@ mod tests {
             br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"ok","Online":"yes","TailscaleIP":"100.64.0.2"}}}"#.as_slice(),
             br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"ok","TailscaleIP":"192.168.1.2"}}}"#.as_slice(),
             br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"ok","TailscaleIPs":["100.64.0.2","fd00::1"]}}}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                parse_status_json(json).unwrap_err(),
+                TailscaleParseError::Malformed(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn validates_last_seen_as_rfc3339_when_present() {
+        let parsed = parse_status_json(
+            br#"{"BackendState":"Running","Peer":[{"id":"n1","Name":"online","TailscaleIP":"100.64.0.2","Online":true,"LastSeen":"2026-08-21T07:00:00Z"},{"id":"n2","Name":"offline","TailscaleIP":"100.64.0.3","Online":false,"LastSeen":"2026-08-21T07:00:00+00:00"}]}"#,
+        )
+        .unwrap();
+        let online = parsed
+            .candidates
+            .iter()
+            .find(|candidate| candidate.display_name == "online")
+            .unwrap();
+        let offline = parsed
+            .candidates
+            .iter()
+            .find(|candidate| candidate.display_name == "offline")
+            .unwrap();
+        assert!(online.online);
+        assert_eq!(online.last_seen.as_deref(), Some("2026-08-21T07:00:00Z"));
+        assert!(!offline.online);
+        assert_eq!(
+            offline.last_seen.as_deref(),
+            Some("2026-08-21T07:00:00+00:00")
+        );
+
+        for json in [
+            br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"ok","TailscaleIP":"100.64.0.2","LastSeen":"not a timestamp"}}}"#.as_slice(),
+            br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"ok","TailscaleIP":"100.64.0.2","LastSeen":"2026-99-99T99:99:99Z"}}}"#.as_slice(),
         ] {
             assert!(matches!(
                 parse_status_json(json).unwrap_err(),

@@ -148,7 +148,7 @@ Response data is sanitized candidate metadata only:
 }
 ```
 
-The response never includes raw `tailscale status` JSON, users, keys, route advertisements, credentials, or command output. Candidates are metadata only. They are not SSH-ready, trusted, or verified, and clients must not label them that way. Candidate strings are bounded and control-character-free, optional fields with wrong types are rejected, and reported addresses must be in Tailscale ranges (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`).
+The response never includes raw `tailscale status` JSON, users, keys, route advertisements, credentials, or command output. Candidates are metadata only. They are not SSH-ready, trusted, or verified, and clients must not label them that way. Candidate strings are bounded and control-character-free, optional fields with wrong types are rejected, `last_seen` must be valid RFC3339 when present, and reported addresses must be in Tailscale ranges (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`).
 
 Typed unavailable states include missing Tailscale CLI, logged-out Tailscale, timeout, output limit, busy when
 another process-backed discovery is already running, and `unavailable_state` when `BackendState` is absent,
