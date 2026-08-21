@@ -5,24 +5,38 @@ import SwiftUI
 
 public struct AddDeviceCandidate: Identifiable, Sendable, Hashable {
     public enum Source: String, Sendable, Hashable { case tailscale }
-    public let id: UUID
+    public let id: String
     public var nickname: String
     public var hostname: String
+    public var dnsName: String?
+    public var tailscaleIPs: [String]
+    public var os: String?
+    public var online: Bool
     public var source: Source
 
-    public init(id: UUID = UUID(), nickname: String, hostname: String, source: Source = .tailscale) {
+    public init(id: String, nickname: String, hostname: String, dnsName: String? = nil, tailscaleIPs: [String] = [], os: String? = nil, online: Bool = false, source: Source = .tailscale) {
         self.id = id
         self.nickname = nickname
         self.hostname = hostname
+        self.dnsName = dnsName
+        self.tailscaleIPs = tailscaleIPs
+        self.os = os
+        self.online = online
         self.source = source
+    }
+
+    public init(id: UUID = UUID(), nickname: String, hostname: String, source: Source = .tailscale) {
+        self.init(id: id.uuidString, nickname: nickname, hostname: hostname, source: source)
     }
 
     public func prefillDraft() -> HostDraft {
         HostDraft(nickname: nickname, hostname: hostname)
     }
 
-    public var accessibilityLabel: String {
-        "\(nickname), \(hostname), discovery candidate, not trusted or saved"
+    public var accessibilityLabel: String { "\(nickname), \(hostname), Tailscale discovery candidate, not trusted or saved" }
+
+    public static func from(_ candidate: TailscaleDeviceCandidate) -> AddDeviceCandidate {
+        AddDeviceCandidate(id: candidate.id, nickname: candidate.displayName, hostname: candidate.dnsName ?? candidate.tailscaleIPs.first ?? candidate.displayName, dnsName: candidate.dnsName, tailscaleIPs: candidate.tailscaleIPs, os: candidate.os, online: candidate.online)
     }
 }
 
@@ -53,6 +67,10 @@ public struct AddDeviceFlowState: Sendable, Hashable {
         guard let candidate = discovered.first(where: { $0.id == id }) else { return }
         selectedCandidate = candidate
         step = .confirmCandidate
+    }
+
+    public mutating func selectCandidate(id: UUID) {
+        selectCandidate(id: id.uuidString)
     }
 
     public mutating func confirmSelectedCandidate() -> HostDraft? {
@@ -88,8 +106,8 @@ public enum AddDeviceFlowCopy {
     public static let title = "Add a device"
     public static let tailscaleAction = "Find with Tailscale"
     public static let sshAction = "Add SSH details"
-    public static let honestDiscovery = "Automatic Tailscale discovery is not connected yet. If a candidate appears here, review it before adding SSH details."
-    public static let noCandidates = "No Tailscale candidates are available from this build. Automatic discovery is not connected. Add SSH details to enter a device manually."
+    public static let honestDiscovery = "Find other tailnet devices from a connected OpenPaw host. Candidates are not trusted, saved, SSH-ready, or connected."
+    public static let noCandidates = "No Tailscale devices were reported by the connected discovery host. Add SSH details to enter a device manually."
     public static let confirmation = "This is only a discovery candidate. OpenPaw will not trust it, save it, or connect until you review and save SSH details yourself."
     public static let onboardingCopy = [title, tailscaleAction, sshAction, honestDiscovery, noCandidates, confirmation]
 }
@@ -177,6 +195,7 @@ public struct AddDeviceFlow: View {
                     HStack(alignment: .top, spacing: OpenPawTheme.Space.medium) {
                         actionButton(AddDeviceFlowCopy.tailscaleAction, glyph: "point.3.connected.trianglepath.dotted") {
                             state.startTailscaleDiscovery()
+                            model.refreshTailscaleDevices()
                         }
                         actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
                             draft = state.startManualSSH()
@@ -185,11 +204,13 @@ public struct AddDeviceFlow: View {
                     VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
                         actionButton(AddDeviceFlowCopy.tailscaleAction, glyph: "point.3.connected.trianglepath.dotted") {
                             state.startTailscaleDiscovery()
+                            model.refreshTailscaleDevices()
                         }
                         actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
                             draft = state.startManualSSH()
                         }
                     }
+                    actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") { draft = state.startManualSSH() }
                 }
             }
             .padding(OpenPawTheme.Space.xl)
@@ -206,15 +227,16 @@ public struct AddDeviceFlow: View {
                 Text(AddDeviceFlowCopy.honestDiscovery)
                     .font(OpenPawTheme.Human.prose)
                     .foregroundStyle(OpenPawTheme.textSecondary)
-                if state.discovered.isEmpty {
-                    Text(AddDeviceFlowCopy.noCandidates)
+                let discovered = liveCandidates
+                if discovered.isEmpty {
+                    discoveryStatusView
                         .font(OpenPawTheme.Human.prose)
                         .foregroundStyle(OpenPawTheme.textSecondary)
                     actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
                         draft = state.startManualSSH()
                     }
                 } else {
-                    ForEach(state.discovered) { candidate in
+                    ForEach(discovered) { candidate in
                         Button { state.selectCandidate(id: candidate.id) } label: {
                             candidateRow(candidate)
                         }
@@ -261,6 +283,30 @@ public struct AddDeviceFlow: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
+    }
+
+    private var liveCandidates: [AddDeviceCandidate] {
+        let mapped = model.tailscaleDiscovery.candidates.map(AddDeviceCandidate.from)
+        return mapped.isEmpty ? state.discovered : mapped
+    }
+
+    @ViewBuilder private var discoveryStatusView: some View {
+        switch model.tailscaleDiscovery {
+        case .idle, .loading:
+            Text(model.tailscaleDiscovery == .loading ? "Looking for Tailscale devices from the connected host…" : AddDeviceFlowCopy.honestDiscovery)
+                .font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary)
+        case .noConnectedHost:
+            Text("No connected discovery host. Connect a saved OpenPaw host first, or add SSH details manually.")
+                .font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary)
+        case .empty:
+            Text(AddDeviceFlowCopy.noCandidates).font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary)
+            Button("Retry") { model.refreshTailscaleDevices() }
+        case .unavailable(_, let message), .failure(let message):
+            Text(message).font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary)
+            Button("Retry") { model.refreshTailscaleDevices() }
+        case .candidates:
+            EmptyView()
+        }
     }
 
     private func candidateRow(_ candidate: AddDeviceCandidate) -> some View {

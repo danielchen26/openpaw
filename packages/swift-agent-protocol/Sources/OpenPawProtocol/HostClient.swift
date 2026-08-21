@@ -10,6 +10,7 @@ public enum HostClientError: Error, Sendable {
     case server(status: Int, body: String)
     case transport(any Error)
     case decoding(any Error)
+    case tailscaleDiscovery(code: TailscaleDiscoveryErrorCode, message: String)
 }
 
 extension HostClientError: CustomStringConvertible {
@@ -29,6 +30,8 @@ extension HostClientError: CustomStringConvertible {
             "transport failure: \(error)"
         case .decoding(let error):
             "malformed response: \(error)"
+        case .tailscaleDiscovery(_, let message):
+            message
         }
     }
 }
@@ -192,6 +195,17 @@ public actor HostClient {
         return try decode(UploadResult.self, from: try await send(request))
     }
 
+    public func tailscaleDevices() async throws -> TailscaleDevicesResponse {
+        let request = try makeRequest(method: "GET", path: "/v1/tailscale/devices")
+        do {
+            return try decode(TailscaleDevicesResponse.self, from: try await send(request))
+        } catch HostClientError.decoding {
+            throw HostClientError.tailscaleDiscovery(code: .malformedResponse, message: "The connected host returned an unsupported Tailscale discovery response.")
+        } catch HostClientError.server {
+            throw HostClientError.tailscaleDiscovery(code: .malformedResponse, message: "The connected host returned an unsupported Tailscale discovery response.")
+        }
+    }
+
     public func audit(limit: Int? = nil) async throws -> [AuditEntry] {
         let query = limit.map { [URLQueryItem(name: "limit", value: String($0))] } ?? []
         let request = try makeRequest(method: "GET", path: "/v1/audit", query: query)
@@ -321,6 +335,9 @@ public actor HostClient {
             let message = (try? JSONValue(data: body))?["error"]?.stringValue ?? text
             return .badRequest(message)
         default:
+            if let envelope = try? OpenPawCoding.decoder.decode(TailscaleDiscoveryErrorEnvelope.self, from: body) {
+                return .tailscaleDiscovery(code: envelope.error.code, message: envelope.error.message)
+            }
             return .server(status: response.statusCode, body: text)
         }
     }

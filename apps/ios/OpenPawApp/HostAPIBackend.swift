@@ -215,6 +215,10 @@ final class HostAPIBackend: OpenPawBackend {
         return url
     }
 
+    func tailscaleDevices() async throws -> TailscaleDevicesResponse {
+        try await state.requireClient().tailscaleDevices()
+    }
+
     func audit(limit: Int) async throws -> [AuditEntry] {
         try await state.requireClient().audit(limit: limit)
     }

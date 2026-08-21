@@ -417,6 +417,11 @@ private final class RecordingBackend: OpenPawBackend, @unchecked Sendable {
         return URL(string: "http://127.0.0.1:\(port)\(path)")!
     }
 
+    func tailscaleDevices() async throws -> TailscaleDevicesResponse {
+        record("tailscaleDevices")
+        return TailscaleDevicesResponse(version: 1, candidates: [])
+    }
+
     func audit(limit: Int) async throws -> [AuditEntry] {
         record("audit")
         throw RecordingBackendError.unexpectedCall

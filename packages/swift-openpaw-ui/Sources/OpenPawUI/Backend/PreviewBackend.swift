@@ -59,6 +59,7 @@ public struct PreviewBackend: OpenPawBackend {
     public let blobByPath: [String: Blob]
     public let searchHits: [ContentMatch]
     public let auditTrail: [AuditEntry]
+    public let tailscaleDeviceResponse: TailscaleDevicesResponse
     public let transcripts: [String: [Event]]
     /// Set for `.disconnected`: every call throws this instead of answering.
     public let failure: HostClientError?
@@ -88,6 +89,7 @@ public struct PreviewBackend: OpenPawBackend {
             searchHits = PreviewFixtures.searchHits
             auditTrail = PreviewFixtures.audit
             failure = nil
+            tailscaleDeviceResponse = PreviewFixtures.tailscaleDevices
 
         case .reviewingDestructiveCommand:
             sessionList = PreviewFixtures.sessions
@@ -109,6 +111,7 @@ public struct PreviewBackend: OpenPawBackend {
             searchHits = PreviewFixtures.searchHits
             auditTrail = PreviewFixtures.audit
             failure = nil
+            tailscaleDeviceResponse = PreviewFixtures.tailscaleDevices
 
         case .empty:
             sessionList = []
@@ -122,6 +125,7 @@ public struct PreviewBackend: OpenPawBackend {
             searchHits = []
             auditTrail = []
             failure = nil
+            tailscaleDeviceResponse = TailscaleDevicesResponse(version: 1, candidates: [])
 
         case .disconnected:
             sessionList = []
@@ -135,6 +139,7 @@ public struct PreviewBackend: OpenPawBackend {
             searchHits = []
             auditTrail = []
             failure = .transport(TunnelClosed())
+            tailscaleDeviceResponse = TailscaleDevicesResponse(version: 1, candidates: [])
         }
     }
 
@@ -329,6 +334,11 @@ public struct PreviewBackend: OpenPawBackend {
         return url
     }
 
+    public func tailscaleDevices() async throws -> TailscaleDevicesResponse {
+        try requireTunnel()
+        return tailscaleDeviceResponse
+    }
+
     public func audit(limit: Int) async throws -> [AuditEntry] {
         try requireTunnel()
         return Array(auditTrail.prefix(max(0, limit)))
@@ -366,6 +376,11 @@ public actor ResolveJournal {
 
 /// The seeded afternoon, built once. Kept out of `PreviewBackend` so the data reads as data.
 enum PreviewFixtures {
+    static let tailscaleDevices = TailscaleDevicesResponse(version: 1, candidates: [
+        TailscaleDeviceCandidate(id: "node-studio", displayName: "Studio", dnsName: "studio.tail123.ts.net", tailscaleIPs: ["100.64.0.10"], os: "macOS", online: true, lastSeen: PreviewBackend.now),
+        TailscaleDeviceCandidate(id: "node-lab", displayName: "Lab mini", dnsName: nil, tailscaleIPs: ["100.64.0.11"], os: "linux", online: false, lastSeen: PreviewBackend.now.addingTimeInterval(-3600))
+    ])
+
 
     static let repoPath = "/Users/dana/src/openpaw"
 

@@ -657,3 +657,30 @@ public enum DiffMode: Sendable, Hashable {
         }
     }
 }
+
+
+public struct TailscaleDevicesResponse: Codable, Sendable, Hashable {
+    public let version: Int
+    public let candidates: [TailscaleDeviceCandidate]
+    public init(version: Int, candidates: [TailscaleDeviceCandidate]) { self.version = version; self.candidates = candidates }
+}
+
+public struct TailscaleDeviceCandidate: Codable, Sendable, Hashable, Identifiable {
+    public let id: String
+    public let displayName: String
+    public let dnsName: String?
+    public let tailscaleIPs: [String]
+    public let os: String?
+    public let online: Bool
+    public let lastSeen: Date?
+    public init(id: String, displayName: String, dnsName: String? = nil, tailscaleIPs: [String], os: String? = nil, online: Bool, lastSeen: Date? = nil) { self.id = id; self.displayName = displayName; self.dnsName = dnsName; self.tailscaleIPs = tailscaleIPs; self.os = os; self.online = online; self.lastSeen = lastSeen }
+    enum CodingKeys: String, CodingKey { case id; case displayName = "display_name"; case dnsName = "dns_name"; case tailscaleIPs = "tailscale_ips"; case os; case online; case lastSeen = "last_seen" }
+}
+
+public enum TailscaleDiscoveryErrorCode: String, Codable, Sendable, Hashable { case missingCLI = "missing_cli"; case loggedOut = "logged_out"; case timeout; case outputLimit = "output_limit"; case malformedResponse = "malformed_response"; case unavailable }
+
+public struct TailscaleDiscoveryErrorEnvelope: Codable, Sendable, Hashable {
+    public struct Payload: Codable, Sendable, Hashable { public let code: TailscaleDiscoveryErrorCode; public let message: String; public init(code: TailscaleDiscoveryErrorCode, message: String) { self.code = code; self.message = message } }
+    public let error: Payload
+    public init(error: Payload) { self.error = error }
+}

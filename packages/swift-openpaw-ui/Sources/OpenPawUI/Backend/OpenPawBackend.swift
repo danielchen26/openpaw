@@ -27,6 +27,7 @@ public protocol OpenPawBackend: Sendable {
     func upload(data: Data, filename: String) async throws -> UploadResult
     /// URL on the local forwarded port that proxies the remote dev server. Never a public address.
     func previewURL(port: Int, path: String) throws -> URL
+    func tailscaleDevices() async throws -> TailscaleDevicesResponse
     func audit(limit: Int) async throws -> [AuditEntry]
 }
 

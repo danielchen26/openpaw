@@ -298,7 +298,7 @@ enum ScreenCatalog {
             name: "AddDeviceFlow-candidate-confirmation",
             build: { _, _ in
                 let candidate = AddDeviceCandidate(
-                    id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+                    id: "node-studio",
                     nickname: "Studio",
                     hostname: "studio.tail123.ts.net"
                 )
@@ -340,7 +340,7 @@ enum ScreenCatalog {
             name: "AddDeviceFlow-edit-details",
             build: { _, _ in
                 let candidate = AddDeviceCandidate(
-                    id: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
+                    id: "node-studio",
                     nickname: "Studio",
                     hostname: "studio.tail123.ts.net"
                 )

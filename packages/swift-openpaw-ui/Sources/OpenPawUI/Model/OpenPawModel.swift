@@ -8,6 +8,18 @@ import OpenPawTerminalCore
 /// It owns no transport and no networking: it is handed an `OpenPawBackend` and a `TerminalBackend`, which is what
 /// lets the whole UI render in a headless snapshot run and in tests. All mutation happens on the main actor, so
 /// SwiftUI never sees a half-applied update.
+public enum TailscaleDiscoveryState: Sendable, Hashable {
+    case idle
+    case noConnectedHost
+    case loading
+    case candidates([TailscaleDeviceCandidate])
+    case empty
+    case unavailable(code: TailscaleDiscoveryErrorCode, message: String)
+    case failure(message: String)
+
+    public var candidates: [TailscaleDeviceCandidate] { if case .candidates(let items) = self { items } else { [] } }
+}
+
 @MainActor
 @Observable
 public final class OpenPawModel {
@@ -51,6 +63,10 @@ public final class OpenPawModel {
     public var health: HealthInfo?
     public var lastError: PresentedError?
     public var isRefreshing = false
+    public private(set) var tailscaleDiscovery: TailscaleDiscoveryState = .idle
+
+    private var tailscaleDiscoveryTask: Task<Void, Never>?
+    private var tailscaleDiscoveryGeneration = 0
 
     private var eventTask: Task<Void, Never>?
     private var stateTask: Task<Void, Never>?
@@ -193,6 +209,45 @@ public final class OpenPawModel {
                 self?.present(error, while: "following the event stream")
             }
         }
+    }
+
+    public func refreshTailscaleDevices() {
+        tailscaleDiscoveryGeneration += 1
+        let generation = tailscaleDiscoveryGeneration
+        tailscaleDiscoveryTask?.cancel()
+        guard selectedHost != nil, connection.isConnected, let backend else {
+            tailscaleDiscovery = .noConnectedHost
+            return
+        }
+        tailscaleDiscovery = .loading
+        tailscaleDiscoveryTask = Task { [weak self, backend] in
+            do {
+                let response = try await backend.tailscaleDevices()
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self, self.tailscaleDiscoveryGeneration == generation else { return }
+                    self.tailscaleDiscovery = response.candidates.isEmpty ? .empty : .candidates(response.candidates)
+                }
+            } catch is CancellationError {
+            } catch HostClientError.tailscaleDiscovery(let code, let message) {
+                await MainActor.run {
+                    guard let self, self.tailscaleDiscoveryGeneration == generation else { return }
+                    self.tailscaleDiscovery = .unavailable(code: code, message: message)
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self, self.tailscaleDiscoveryGeneration == generation else { return }
+                    self.tailscaleDiscovery = .failure(message: String(describing: error))
+                }
+            }
+        }
+    }
+
+    public func cancelTailscaleDiscovery() {
+        tailscaleDiscoveryGeneration += 1
+        tailscaleDiscoveryTask?.cancel()
+        tailscaleDiscoveryTask = nil
+        tailscaleDiscovery = .idle
     }
 
     public func stopFollowing() {
@@ -423,6 +478,8 @@ public final class OpenPawModel {
                     detail: "Reconnect the host to restore the forwarded port.",
                     isRecoverable: true
                 )
+            case .tailscaleDiscovery(_, let message):
+                PresentedError(title: "Tailscale discovery unavailable", detail: message, isRecoverable: true)
             case .decoding:
                 PresentedError(
                     title: "This app is older than the host",
