@@ -43,6 +43,7 @@ public struct SessionListView: View {
     private let model: OpenPawModel
     private let remoteSessions: [RemoteSession]
     private let restoration: SessionRestorationPlan?
+    private let transport: SessionTransportPresentation
     private let onSelect: ((SessionSummary) -> Void)?
     private let onAttach: (RemoteSession) -> Void
     private let onCreate: (String) -> Void
@@ -59,6 +60,7 @@ public struct SessionListView: View {
         model: OpenPawModel,
         remoteSessions: [RemoteSession] = [],
         restoration: SessionRestorationPlan? = nil,
+        transport: SessionTransportPresentation = .init(),
         onSelect: ((SessionSummary) -> Void)? = nil,
         onAttach: @escaping (RemoteSession) -> Void = { _ in },
         onCreate: @escaping (String) -> Void = { _ in },
@@ -69,6 +71,7 @@ public struct SessionListView: View {
         self.model = model
         self.remoteSessions = remoteSessions
         self.restoration = restoration
+        self.transport = transport
         self.onSelect = onSelect
         self.onAttach = onAttach
         self.onCreate = onCreate
@@ -339,12 +342,7 @@ public struct SessionListView: View {
         Panel(label: "On the host") {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
                 if remoteSessions.isEmpty {
-                    Text(
-                        """
-                        No multiplexer sessions found. Create one and anything you start inside it survives a \
-                        dropped connection.
-                        """
-                    )
+                    Text(SessionSpacePresentation(agentSessions: model.sessions, remoteSessions: remoteSessions, restoration: restoration, transport: transport).emptyRemoteMessage)
                     .font(OpenPawTheme.Human.caption)
                     .foregroundStyle(OpenPawTheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -352,6 +350,13 @@ public struct SessionListView: View {
                     ForEach(remoteSessions) { session in
                         remoteRow(session)
                     }
+                }
+
+                if let preferenceLabel = transport.preferenceLabel {
+                    Text(preferenceLabel).microLabel(OpenPawTheme.textTertiary)
+                }
+                if let discoveryLabel = transport.discoveryLabel {
+                    Text(discoveryLabel).microLabel(OpenPawTheme.textTertiary)
                 }
 
                 HStack(spacing: OpenPawTheme.Space.small) {
@@ -382,6 +387,8 @@ public struct SessionListView: View {
                 Text(session.name)
                     .font(OpenPawTheme.Machine.body)
                     .foregroundStyle(OpenPawTheme.textPrimary)
+                Text(session.kind.displayName)
+                    .microLabel(OpenPawTheme.textTertiary)
                 Text(session.isAttached ? "attached" : "detached")
                     .microLabel(session.isAttached ? OpenPawTheme.ok : OpenPawTheme.textTertiary)
                 if !session.isAlive {

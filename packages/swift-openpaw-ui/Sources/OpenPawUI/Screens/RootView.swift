@@ -164,6 +164,8 @@ public struct RootView: View {
     private let router: ShellRouter
     private let settings: OpenPawSettings
     private let scrollback: ScrollbackStore
+    private let sessionSpaceProvider: any SessionSpaceProviding
+    @State private var sessionSpace = SessionSpaceSnapshot()
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     #if os(iOS)
@@ -172,9 +174,14 @@ public struct RootView: View {
 
     /// `terminalSurface` is the live PTY view. The app injects its SwiftTerm-backed surface; a headless snapshot run
     /// injects `ScrollbackTextView`. Construct this once and keep it: the router it holds is the navigation state.
-    public init(model: OpenPawModel, terminalSurface: @escaping () -> AnyView) {
+    public init(
+        model: OpenPawModel,
+        terminalSurface: @escaping () -> AnyView,
+        sessionSpaceProvider: any SessionSpaceProviding = EmptySessionSpaceProvider()
+    ) {
         self.model = model
         self.terminalSurface = terminalSurface
+        self.sessionSpaceProvider = sessionSpaceProvider
         self.router = ShellRouter()
         let settings = OpenPawSettings()
         self.settings = settings
@@ -222,6 +229,7 @@ public struct RootView: View {
             guard model.canRefreshRemoteState else { return }
             await model.refresh()
             model.startFollowing(session: model.selectedSessionID)
+            sessionSpace = await sessionSpaceProvider.snapshot(for: model)
         }
         .task { await pumpScrollback() }
         .sheet(item: sheetBinding) { sheet in
@@ -535,13 +543,25 @@ public struct RootView: View {
     private func chat(width: RootWidth) -> some View {
         switch RootNavigationStyle.style(for: width) {
         case .tabs:
-            SessionListView(model: model, onSelect: selectSession)
+            SessionListView(
+                model: model,
+                remoteSessions: sessionSpace.remoteSessions,
+                restoration: sessionSpace.restoration,
+                transport: sessionSpace.transport,
+                onSelect: selectSession
+            )
                 .navigationDestination(item: chatSessionBinding) { sessionID in
                     transcript(sessionID)
                 }
         case .split:
             HStack(spacing: 0) {
-                SessionListView(model: model, onSelect: selectSession)
+                SessionListView(
+                model: model,
+                remoteSessions: sessionSpace.remoteSessions,
+                restoration: sessionSpace.restoration,
+                transport: sessionSpace.transport,
+                onSelect: selectSession
+            )
                     .frame(width: 340)
                 Rectangle()
                     .fill(OpenPawTheme.line)

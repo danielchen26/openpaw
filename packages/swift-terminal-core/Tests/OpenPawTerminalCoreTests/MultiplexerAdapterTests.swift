@@ -262,6 +262,15 @@ final class MultiplexerAdapterTests: XCTestCase {
         XCTAssertTrue(sessions.isEmpty)
     }
 
+    func testHerdrParsesBareArrayListing() async throws {
+        let json = """
+            [{"id":"hd_01","name":"api","attached":false,"windows":1,"alive":true}]
+            """
+        let sessions = try HerdrAdapter().parseSessions(json)
+        XCTAssertEqual(sessions.map(\.id), ["hd_01"])
+        XCTAssertEqual(sessions[0].kind, .herdr)
+    }
+
     func testHerdrWindowsAndCommandStrings() async throws {
         let json = """
             {"windows":[{"id":"w1","index":0,"name":"api","active":true,"panes":2,
@@ -276,6 +285,8 @@ final class MultiplexerAdapterTests: XCTestCase {
         XCTAssertTrue(windows[0].isActive)
 
         XCTAssertEqual(adapter.attach(session), "herdr attach hd_01")
+        XCTAssertEqual(adapter.create(name: "api", directory: "/srv/a b"), "herdr new --name api --cwd '/srv/a b'")
+        XCTAssertEqual(adapter.create(name: "api", directory: nil), "herdr new --name api")
         XCTAssertEqual(adapter.kill(session), "herdr kill hd_01")
         XCTAssertEqual(adapter.rename(session, to: "api 2"), "herdr rename hd_01 'api 2'")
         XCTAssertEqual(

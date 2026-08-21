@@ -145,6 +145,33 @@ enum ScreenCatalog {
             unavailableReason: ""
         ),
         Screen(
+            name: "SessionListView-session-space",
+            build: { model, _ in
+                AnyView(
+                    SessionListView(
+                        model: model,
+                        remoteSessions: [
+                            RemoteSession(id: "hd_01", name: "api", kind: .herdr, isAttached: false, isAlive: true, windowCount: 2, workingDirectory: "/srv/api"),
+                            RemoteSession(id: "$0", name: "openpaw", kind: .tmux, isAttached: true, isAlive: true, windowCount: 3, workingDirectory: "/Users/dev/openpaw"),
+                        ],
+                        restoration: SessionRestorationPlan(
+                            hostID: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+                            multiplexer: .herdr,
+                            multiplexerTarget: "hd_01",
+                            workingDirectory: "/srv/api",
+                            agentSessionID: PreviewBackend.workingSessionID,
+                            capturedAt: Date(timeIntervalSinceNow: -1800)
+                        ),
+                        transport: SessionTransportPresentation(
+                            preferredMultiplexer: .herdr,
+                            attemptedMultiplexers: [.tmux, .zellij, .screen, .herdr]
+                        )
+                    )
+                )
+            },
+            unavailableReason: ""
+        ),
+        Screen(
             name: "EventLogView",
             build: { model, _ in
                 guard let session = sessionID(model) else { return nil }
