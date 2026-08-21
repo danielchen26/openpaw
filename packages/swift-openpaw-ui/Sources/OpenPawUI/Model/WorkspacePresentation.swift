@@ -75,10 +75,10 @@ public struct WorkspaceDevicePresentation: Sendable, Hashable, Identifiable {
         self.multiplexerLabel = muxLabel
         self.connectionActionTitle = self.availability == .online ? "Resume" : "Connect"
         self.metrics = [
-            WorkspaceMetric(id: "active-sessions", label: "Active sessions", value: "\(scopedActiveSessionCount)"),
+            WorkspaceMetric(id: "active-sessions", label: "Agent sessions", value: "\(scopedActiveSessionCount)"),
             WorkspaceMetric(id: "pending-approvals", label: "Pending approvals", value: "\(scopedPendingApprovalCount)"),
             WorkspaceMetric(id: "transport", label: "Transport", value: transportLabel),
-            WorkspaceMetric(id: "multiplexer", label: "Multiplexer", value: muxLabel),
+            WorkspaceMetric(id: "multiplexer", label: "Mux preference", value: muxLabel),
         ]
     }
 
@@ -132,5 +132,145 @@ public struct WorkspaceDevicePresentation: Sendable, Hashable, Identifiable {
 
     private static func pendingApprovalCount(in inbox: [InboxItem]) -> Int {
         inbox.filter { $0.status == .pending && $0.category == .permission }.count
+    }
+}
+
+public enum WorkspaceResumeIntent: Sendable, Hashable {
+    case agentSession(String)
+    case repository(String)
+    case terminal
+}
+
+public enum WorkspaceHomeSection: Sendable, Hashable {
+    case networkSummary
+    case devices
+    case agentSessions
+    case pendingApprovals
+    case recentWorkspaces
+}
+
+public struct WorkspaceAgentSessionPresentation: Sendable, Hashable, Identifiable {
+    public let id: String
+    public let title: String
+    public let subtitle: String
+    public let state: SessionState
+}
+
+public struct WorkspaceRecentWorkspacePresentation: Sendable, Hashable, Identifiable {
+    public let id: String
+    public let title: String
+    public let subtitle: String
+    public let repoName: String?
+}
+
+public struct WorkspaceHomePresentation: Sendable, Hashable {
+    public let agentSessions: [WorkspaceAgentSessionPresentation]
+    public let pendingApprovals: [InboxItem]
+    public let recentWorkspaces: [WorkspaceRecentWorkspacePresentation]
+
+    public init(sessions: [SessionSummary], pendingInbox: [InboxItem], repos: [RepoSummary]) {
+        self.agentSessions = sessions
+            .filter { $0.state != .exited }
+            .sorted(by: Self.sessionOrder)
+            .map { session in
+                WorkspaceAgentSessionPresentation(
+                    id: session.sessionID,
+                    title: session.title?.trimmedNonEmpty ?? session.agent.displayName,
+                    subtitle: session.cwd?.trimmedNonEmpty ?? "No working directory reported",
+                    state: session.state
+                )
+            }
+        self.pendingApprovals = pendingInbox
+        self.recentWorkspaces = Self.recentWorkspaces(sessions: sessions, repos: repos)
+    }
+
+    public static func deviceCards(
+        hosts: [HostRecord],
+        selectedHostID: HostRecord.ID?,
+        connection: ConnectionState,
+        lastConnectedAt: [HostRecord.ID: Date] = [:],
+        activeSessionCount: Int = 0,
+        pendingApprovalCount: Int = 0
+    ) -> [WorkspaceDevicePresentation] {
+        hosts.sorted { lhs, rhs in
+            let leftConnectedSelected = lhs.id == selectedHostID && connection.isConnected
+            let rightConnectedSelected = rhs.id == selectedHostID && connection.isConnected
+            if leftConnectedSelected != rightConnectedSelected { return leftConnectedSelected }
+            let leftDate = lastConnectedAt[lhs.id]
+            let rightDate = lastConnectedAt[rhs.id]
+            if leftDate != rightDate {
+                switch (leftDate, rightDate) {
+                case let (left?, right?): return left > right
+                case (_?, nil): return true
+                case (nil, _?): return false
+                case (nil, nil): break
+                }
+            }
+            return lhs.nickname.normalizedWorkspaceSortKey < rhs.nickname.normalizedWorkspaceSortKey
+        }.map { host in
+            WorkspaceDevicePresentation(
+                host: host,
+                selectedHostID: selectedHostID,
+                connection: connection,
+                activeSessionCount: activeSessionCount,
+                pendingApprovalCount: pendingApprovalCount
+            )
+        }
+    }
+
+    public static func resumeIntent(
+        selectedSessionID: String?,
+        sessions: [SessionSummary],
+        selectedRepo: String?,
+        repos: [RepoSummary]
+    ) -> WorkspaceResumeIntent {
+        let active = sessions.filter { $0.state != .exited }
+        if let selectedSessionID, active.contains(where: { $0.sessionID == selectedSessionID }) {
+            return .agentSession(selectedSessionID)
+        }
+        if let recent = active.sorted(by: sessionOrder).first { return .agentSession(recent.sessionID) }
+        if let selectedRepo, repos.contains(where: { $0.name == selectedRepo }) { return .repository(selectedRepo) }
+        if let first = repos.first { return .repository(first.name) }
+        return .terminal
+    }
+
+    public static func sections(
+        hosts: [HostRecord], sessions: [SessionSummary], pendingInbox: [InboxItem], repos: [RepoSummary]
+    ) -> [WorkspaceHomeSection] {
+        var result: [WorkspaceHomeSection] = [.networkSummary]
+        if !hosts.isEmpty { result.append(.devices) }
+        if sessions.contains(where: { $0.state != .exited }) { result.append(.agentSessions) }
+        if !pendingInbox.isEmpty { result.append(.pendingApprovals) }
+        if !recentWorkspaces(sessions: sessions, repos: repos).isEmpty { result.append(.recentWorkspaces) }
+        return result
+    }
+
+    private static func recentWorkspaces(sessions: [SessionSummary], repos: [RepoSummary]) -> [WorkspaceRecentWorkspacePresentation] {
+        var seen = Set<String>()
+        var rows: [WorkspaceRecentWorkspacePresentation] = []
+        for repo in repos where seen.insert(repo.path).inserted {
+            rows.append(.init(id: repo.path, title: repo.name, subtitle: repo.path, repoName: repo.name))
+        }
+        for session in sessions.sorted(by: sessionOrder) {
+            guard let cwd = session.cwd?.trimmedNonEmpty, seen.insert(cwd).inserted else { continue }
+            rows.append(.init(id: cwd, title: URL(fileURLWithPath: cwd).lastPathComponent, subtitle: cwd, repoName: nil))
+        }
+        return rows
+    }
+
+    private static func sessionOrder(_ lhs: SessionSummary, _ rhs: SessionSummary) -> Bool {
+        if lhs.lastEventAt != rhs.lastEventAt { return (lhs.lastEventAt ?? .distantPast) > (rhs.lastEventAt ?? .distantPast) }
+        return lhs.sessionID < rhs.sessionID
+    }
+}
+
+private extension String {
+    var trimmedNonEmpty: String? {
+        let value = trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    var normalizedWorkspaceSortKey: String {
+        trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
     }
 }

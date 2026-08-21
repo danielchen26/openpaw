@@ -442,7 +442,14 @@ public struct RootView: View {
     private func content(_ destination: ShellDestination, width: RootWidth) -> some View {
         switch destination {
         case .home:
-            WorkspaceHomeView(model: model, settings: settings)
+            WorkspaceHomeView(
+                model: model,
+                settings: settings,
+                onDeviceAction: openHomeDevice(_:intent:),
+                onOpenAgent: openHomeAgent(_:),
+                onOpenApproval: { router.openApproval(itemID: $0) },
+                onOpenRepository: openHomeRepository(_:)
+            )
         case .terminal:
             TerminalScreenView(
                 model: model,
@@ -460,6 +467,44 @@ public struct RootView: View {
         case .settings:
             SettingsView(model: model, settings: settings)
         }
+    }
+
+    private func openHomeDevice(_ host: HostRecord, intent: WorkspaceResumeIntent) {
+        let canResumeSelectedHost = host.id == model.selectedHostID && model.connection.isConnected
+        model.selectedHostID = host.id
+        if canResumeSelectedHost {
+            routeHomeIntent(intent)
+        } else {
+            Task {
+                await model.connectSelectedHost()
+                if model.connection.isConnected {
+                    settings.recordConnection(to: host.id)
+                    router.destination = .terminal
+                }
+            }
+        }
+    }
+
+    private func routeHomeIntent(_ intent: WorkspaceResumeIntent) {
+        switch intent {
+        case .agentSession(let sessionID):
+            openHomeAgent(sessionID)
+        case .repository(let repo):
+            openHomeRepository(repo)
+        case .terminal:
+            router.destination = .terminal
+        }
+    }
+
+    private func openHomeAgent(_ sessionID: String) {
+        model.selectedSessionID = sessionID
+        router.chatSessionID = sessionID
+        router.destination = .chat
+    }
+
+    private func openHomeRepository(_ repo: String) {
+        model.selectedRepo = repo
+        router.destination = .repo
     }
 
     @ViewBuilder

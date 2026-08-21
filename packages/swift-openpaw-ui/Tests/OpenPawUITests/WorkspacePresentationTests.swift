@@ -167,11 +167,58 @@ struct WorkspacePresentationTests {
         )
 
         #expect(card.metrics == [
-            WorkspaceMetric(id: "active-sessions", label: "Active sessions", value: "3"),
+            WorkspaceMetric(id: "active-sessions", label: "Agent sessions", value: "3"),
             WorkspaceMetric(id: "pending-approvals", label: "Pending approvals", value: "2"),
             WorkspaceMetric(id: "transport", label: "Transport", value: "Mosh"),
-            WorkspaceMetric(id: "multiplexer", label: "Multiplexer", value: "Zellij"),
+            WorkspaceMetric(id: "multiplexer", label: "Mux preference", value: "Zellij"),
         ])
+    }
+
+    @Test("Devices sort connected selected host first, then recency, then normalized nickname")
+    func devicesSortBySelectedConnectionRecencyAndNickname() {
+        let selected = fixture(nickname: "zeta")
+        let recent = fixture(nickname: " beta ")
+        let old = fixture(nickname: "Alpha")
+        let never = fixture(nickname: "gamma")
+
+        let cards = WorkspaceHomePresentation.deviceCards(
+            hosts: [never, old, recent, selected],
+            selectedHostID: selected.id,
+            connection: .connected(.ssh),
+            lastConnectedAt: [recent.id: Date(timeIntervalSince1970: 20), old.id: Date(timeIntervalSince1970: 10)]
+        )
+
+        #expect(cards.map(\.id) == [selected.id, recent.id, old.id, never.id])
+    }
+
+    @Test("Resume intent chooses active selected session, recent non-exited session, repo, then terminal")
+    func resumeIntentResolvesDeterministically() {
+        let selected = session("selected", state: .waiting, lastEventAt: Date(timeIntervalSince1970: 5))
+        let recent = session("recent", state: .working, lastEventAt: Date(timeIntervalSince1970: 10))
+        let exited = session("exited", state: .exited, lastEventAt: Date(timeIntervalSince1970: 100))
+        let repo = RepoSummary(name: "app", path: "/work/app", branch: "main", dirty: false, ahead: 0, behind: 0)
+
+        #expect(WorkspaceHomePresentation.resumeIntent(selectedSessionID: "selected", sessions: [recent, selected], selectedRepo: nil, repos: []) == .agentSession("selected"))
+        #expect(WorkspaceHomePresentation.resumeIntent(selectedSessionID: nil, sessions: [exited, selected, recent], selectedRepo: nil, repos: []) == .agentSession("recent"))
+        #expect(WorkspaceHomePresentation.resumeIntent(selectedSessionID: nil, sessions: [exited], selectedRepo: nil, repos: [repo]) == .repository("app"))
+        #expect(WorkspaceHomePresentation.resumeIntent(selectedSessionID: nil, sessions: [], selectedRepo: nil, repos: []) == .terminal)
+    }
+
+    @Test("Pending approvals render before passive recent workspace activity")
+    func homeSectionsOrderApprovalsBeforeRecentWorkspaces() {
+        let sections = WorkspaceHomePresentation.sections(
+            hosts: [fixture()], sessions: [session("agent", cwd: "/work/app")], pendingInbox: [pendingApproval("approval")], repos: []
+        )
+
+        #expect(sections == [.networkSummary, .devices, .agentSessions, .pendingApprovals, .recentWorkspaces])
+    }
+
+    @Test("Empty sessions and repositories do not invent rows or metrics")
+    func emptyRemoteStateDoesNotInventRows() {
+        let presentation = WorkspaceHomePresentation(sessions: [], pendingInbox: [], repos: [])
+
+        #expect(presentation.agentSessions.isEmpty)
+        #expect(presentation.recentWorkspaces.isEmpty)
     }
 }
 
@@ -195,8 +242,8 @@ private func fixture(
     )
 }
 
-private func session(_ id: String, state: SessionState = .working) -> SessionSummary {
-    SessionSummary(sessionID: id, agent: .claudeCode, state: state)
+private func session(_ id: String, state: SessionState = .working, cwd: String? = nil, lastEventAt: Date? = nil) -> SessionSummary {
+    SessionSummary(sessionID: id, agent: .claudeCode, cwd: cwd, state: state, lastEventAt: lastEventAt)
 }
 
 private func pendingApproval(_ id: String) -> InboxItem {

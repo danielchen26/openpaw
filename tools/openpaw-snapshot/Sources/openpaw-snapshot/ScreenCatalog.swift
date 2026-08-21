@@ -72,6 +72,13 @@ enum ScreenCatalog {
             unavailableReason: ""
         ),
         Screen(
+            name: "WorkspaceHomeView",
+            build: { model, _ in
+                AnyView(WorkspaceHomeView(model: model, settings: OpenPawSettings()))
+            },
+            unavailableReason: ""
+        ),
+        Screen(
             name: "InboxView",
             build: { model, _ in AnyView(InboxView(model: model)) },
             unavailableReason: ""
