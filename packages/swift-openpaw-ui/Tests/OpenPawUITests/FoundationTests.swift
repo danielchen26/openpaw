@@ -608,3 +608,44 @@ final class PreviewBackendTests: XCTestCase {
         XCTAssertEqual(first?.map(\.seq), Array(1...UInt64(first?.count ?? 0)))
     }
 }
+
+/// The lock setting is split across two modules — the switch lives in `OpenPawSettings`, the lock that obeys it lives
+/// in the app's `GateController` — so nothing in the type system stops them from reading different defaults keys.
+/// They did, and the switch silently did nothing. These pin the contract from the package side.
+@MainActor
+final class BiometricGateSettingTests: XCTestCase {
+
+    private func store() -> (OpenPawSettings, UserDefaults) {
+        let suite = "openpaw.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        return (OpenPawSettings(defaults: defaults), defaults)
+    }
+
+    /// The app reads this exact string. A rename here without the matching one in `GateController` is the bug.
+    func testToggleWritesTheKeyTheLockReads() {
+        let (settings, defaults) = store()
+
+        settings.requiresBiometricGate = false
+        XCTAssertEqual(defaults.object(forKey: "openpaw.settings.biometricGate") as? Bool, false)
+
+        settings.requiresBiometricGate = true
+        XCTAssertEqual(defaults.object(forKey: "openpaw.settings.biometricGate") as? Bool, true)
+    }
+
+    /// A fresh install locks, so the switch has to show that. Reading it as a plain `bool` would report false.
+    func testUnsetDefaultsToOnSoTheSwitchMatchesTheLock() {
+        let (settings, _) = store()
+        XCTAssertTrue(settings.requiresBiometricGate)
+    }
+
+    func testStoredValueSurvivesAReload() {
+        let suite = "openpaw.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+
+        OpenPawSettings(defaults: defaults).requiresBiometricGate = false
+        XCTAssertFalse(OpenPawSettings(defaults: defaults).requiresBiometricGate)
+
+        OpenPawSettings(defaults: defaults).requiresBiometricGate = true
+        XCTAssertTrue(OpenPawSettings(defaults: defaults).requiresBiometricGate)
+    }
+}

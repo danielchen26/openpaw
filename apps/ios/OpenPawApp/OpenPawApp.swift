@@ -388,12 +388,17 @@ final class GateController {
     private var lastUnlockedAt: Date?
     private var leftForegroundAt: Date?
 
-    private static let enabledKey = "lock.requiresBiometrics"
+    /// The same defaults key `SettingsStore` writes from the "Require Face ID to open OpenPaw" toggle.
+    ///
+    /// These must not drift apart: a private key here would leave that switch flipping a value nobody reads, and a
+    /// lock that silently ignores the setting is worse than no setting at all.
+    static let enabledKey = "openpaw.settings.biometricGate"
     private static let graceKey = "lock.graceInterval"
 
     init() {
         let defaults = UserDefaults.standard
         policy = GatePolicy(
+            // Absent means on: a fresh install protects pending approvals before the user has seen the setting.
             requiresBiometrics: defaults.object(forKey: Self.enabledKey) as? Bool ?? true,
             graceInterval: defaults.object(forKey: Self.graceKey) as? Double
                 ?? GatePolicy.default.graceInterval,

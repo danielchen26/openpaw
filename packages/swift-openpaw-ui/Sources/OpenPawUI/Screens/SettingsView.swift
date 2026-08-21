@@ -109,7 +109,9 @@ public final class OpenPawSettings {
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        requiresBiometricGate = defaults.bool(forKey: Key.biometricGate)
+        // Absent means on, matching the lock itself: `bool(forKey:)` reports false for a key that was never written,
+        // which would show the switch off while the app was in fact locking on every launch.
+        requiresBiometricGate = defaults.object(forKey: Key.biometricGate) as? Bool ?? true
         dictationLocaleID = defaults.string(forKey: Key.dictationLocale) ?? Locale.current.identifier
         dictationMode =
             defaults.string(forKey: Key.dictationMode).flatMap(DictationMode.init(rawValue:)) ?? .composer
