@@ -8,20 +8,42 @@ import OpenPawProtocol
 /// warm-toned — carries everything that was *said*: the agent's prose, your prompts, empty-state direction. A
 /// reader can tell at a glance whether they are looking at a fact or at a sentence.
 ///
-/// **Risk is the accent.** The chrome is deliberately desaturated so that the risk ramp is the only saturated
-/// colour on screen. When something is dangerous, it is the brightest thing in the frame. Colour is never the
-/// only carrier: every risk surface also states its class in words and marks it with a glyph, because the
-/// decision this app exists for must survive colour-blindness, sunlight and a cracked screen.
+/// **Risk remains the highest-priority accent.** The flagship palette now includes sanctioned connection accents
+/// (`signal`, `pulse`, and `caution`) for workspace reachability, but dangerous actions still outrank status
+/// chrome. When something is destructive or credential-sensitive, the risk ramp must be the clearest thing in
+/// the frame. Colour is never the only carrier: every risk surface also states its class in words and marks it
+/// with a glyph, because the decision this app exists for must survive colour-blindness, sunlight and a cracked
+/// screen.
 public enum OpenPawTheme {
+
+    public struct FlagshipHex: Sendable, Hashable {
+        public let void: UInt32 = 0x080B10
+        public let graphite: UInt32 = 0x111722
+        public let ember: UInt32 = 0x1B1817
+        public let signal: UInt32 = 0x7C9CFF
+        public let pulse: UInt32 = 0x60D5B2
+        public let caution: UInt32 = 0xF4BE5B
+
+        public init() {}
+    }
+
+    public static let flagshipHex = FlagshipHex()
 
     // MARK: - Ground and surfaces
 
+    public static let void = Color(hex: flagshipHex.void)
+    public static let graphite = Color(hex: flagshipHex.graphite)
+    public static let ember = Color(hex: flagshipHex.ember)
+    public static let signal = Color(hex: flagshipHex.signal)
+    public static let pulse = Color(hex: flagshipHex.pulse)
+    public static let caution = Color(hex: flagshipHex.caution)
+
     /// Cool slate ink. Not pure black: an OLED-black ground makes the risk ramp bloom and hides depth.
-    public static let ink = Color(hex: 0x0E1116)
+    public static let ink = void
     /// Raised cool surface — the machine register.
-    public static let panel = Color(hex: 0x161B22)
+    public static let panel = graphite
     /// Raised warm surface — the human register. The temperature shift is the whole point; do not unify them.
-    public static let panelWarm = Color(hex: 0x1C1917)
+    public static let panelWarm = ember
     /// Recessed surface for code and terminal output.
     public static let well = Color(hex: 0x0A0D12)
     /// Hairlines and pane separators.
@@ -32,8 +54,8 @@ public enum OpenPawTheme {
     public static let textSecondary = Color(hex: 0x8B98A5)
     public static let textTertiary = Color(hex: 0x5A6672)
 
-    public static let ok = Color(hex: 0x3FB950)
-    public static let warn = Color(hex: 0xE3B341)
+    public static let ok = pulse
+    public static let warn = caution
     public static let bad = Color(hex: 0xF04A4A)
 
     public static let diffAddedText = Color(hex: 0x56D364)
@@ -141,6 +163,14 @@ public enum OpenPawTheme {
         public static let prose = Font.system(.body, design: .serif)
         public static let proseTight = Font.system(.subheadline, design: .serif)
         public static let caption = Font.system(.footnote, design: .serif)
+    }
+
+    /// Rounded navigation register. Dynamic Type-backed, never fixed point sizes.
+    public enum Navigation {
+        public static let title = Font.system(.title2, design: .rounded, weight: .semibold)
+        public static let headline = Font.system(.headline, design: .rounded, weight: .semibold)
+        public static let label = Font.system(.subheadline, design: .rounded, weight: .medium)
+        public static let caption = Font.system(.caption, design: .rounded, weight: .medium)
     }
 
     // MARK: - Metrics
