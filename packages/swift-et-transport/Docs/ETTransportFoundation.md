@@ -12,10 +12,14 @@ No GPL Mosh code was copied. This package contains a clean Swift implementation 
 
 ## Dependency SBOM and license notes
 
-- `swift-sodium` `0.11.0`, GitHub `jedisct1/swift-sodium`, ISC license. Used for libsodium `crypto_secretbox_easy` compatible XSalsa20-Poly1305 sealed boxes.
+- `swift-sodium` `0.11.0`, GitHub `jedisct1/swift-sodium`, ISC license. Used for libsodium `crypto_secretbox_easy` compatible XSalsa20-Poly1305 sealed boxes. Copyright and permission notice: swift-sodium and libsodium are distributed under the ISC license, permitting use, copy, modification, and distribution with the copyright and permission notice retained.
 - Transitive native libsodium from swift-sodium, ISC license.
 
 The package manifest pins `swift-sodium` exactly to avoid silent crypto implementation drift.
+
+## Correction notes
+
+The foundation intentionally keeps ET packet framing separate from upstream protobuf message framing. Encrypted ET packets use the reconnect stream's 4-byte network-order packet length, while Connect/Sequence/Catchup and lifecycle protobuf messages use upstream `writeProto`/`readProto` 8-byte host-endian length boundaries with bounded streaming decode. Replay stores full encrypted `ETPacket.serialize()` bytes exactly, evicts oldest packets only under connected upstream semantics, and tracks disconnected-byte caps separately until revive.
 
 ## Explicit non-goals and gates
 

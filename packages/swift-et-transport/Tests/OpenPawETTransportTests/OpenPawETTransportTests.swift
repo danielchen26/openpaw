@@ -70,14 +70,15 @@ final class OpenPawETTransportTests: XCTestCase {
         try b.accept(sequence: 2, ciphertext: Data([3,4]))
         XCTAssertEqual(try b.recover(after: 0), [Data([1,2]), Data([3,4])])
         XCTAssertEqual(try b.recover(after: 1), [Data([3,4])])
-        XCTAssertThrowsError(try b.appendExactCiphertext(Data(repeating: 9, count: 20)))
+        try b.markDisconnected()
+        XCTAssertThrowsError(try b.recordSent(Data(repeating: 9, count: 20), connected: false))
         XCTAssertThrowsError(try b.recover(after: 3))
     }
     func testBootstrapCarriesDynamicValuesInStdinNotShellInterpolation() {
         let payload = Data("user=$(rm -rf /)\nkey=abc".utf8)
         let req = ETSSHBootstrapRequest(host: "example.com", port: 2222, stdinPayload: payload)
         XCTAssertEqual(req.executable, "ssh")
-        XCTAssertEqual(req.arguments, ["-T", "-p", "2222", "example.com"])
+        XCTAssertEqual(req.arguments, ["-T", "-p", "2222", "example.com", "--", "etterminal", "--protocol", "6"])
         XCTAssertEqual(req.stdinPayload, payload)
         XCTAssertFalse(req.arguments.joined(separator: " ").contains("rm -rf"))
     }
