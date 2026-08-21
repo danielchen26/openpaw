@@ -11,6 +11,8 @@ public enum NotificationPayloadError: Error, Equatable, Sendable {
     case expired
     case futureSkew
     case stale
+    case invalidIdentifier
+    case invalidGateConfiguration
 }
 
 public struct SafeNotificationTitle: Hashable, Codable, Sendable {
@@ -19,17 +21,33 @@ public struct SafeNotificationTitle: Hashable, Codable, Sendable {
     public let value: String
 
     public init(_ raw: String, maxUTF8Bytes: Int = Self.defaultMaxUTF8Bytes, maxScalars: Int = Self.defaultMaxScalars) throws {
-        var sanitized = raw.replacingOccurrences(of: #"(?i)(action[_-]?token|command|credentials|raw[_-]?detail|secret|token|password|credential)\s*[:=]\s*\S+"#, with: "[redacted]", options: .regularExpression)
-        sanitized = sanitized.replacingOccurrences(of: #"(?i)(action[_-]?token|command|credentials|raw[_-]?detail|secret|token|password|credential)"#, with: "[redacted]", options: .regularExpression)
+        guard maxUTF8Bytes > 0, maxScalars > 0 else { self.value = "OpenPaw notification"; return }
+        var sanitized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Self.looksUnsafe(raw) || Self.looksUnsafe(sanitized) { sanitized = "OpenPaw notification" }
         sanitized = sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
         if sanitized.isEmpty { sanitized = "OpenPaw notification" }
         var result = ""
-        for scalar in sanitized.unicodeScalars {
-            let candidate = result + String(scalar)
-            if candidate.unicodeScalars.count > maxScalars || candidate.utf8.count > maxUTF8Bytes { break }
+        var scalarCount = 0
+        for character in sanitized {
+            let candidate = result + String(character)
+            if scalarCount + String(character).unicodeScalars.count > maxScalars || candidate.utf8.count > maxUTF8Bytes { break }
+            scalarCount += String(character).unicodeScalars.count
             result = candidate
         }
-        self.value = result.isEmpty ? "OpenPaw" : result
+        self.value = result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "OpenPaw notification" : result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func looksUnsafe(_ raw: String) -> Bool {
+        let patterns = [
+            #"(?i)(action[_-]?token|command|credentials|raw[_-]?detail|secret|token|password|credential)"#,
+            #"(?i)(ssh|https?)://\S+"#,
+            #"(?i)(^|\s)(/[\w. -]+){2,}"#,
+            #"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b"#,
+            #"(?i)\b[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+\b"#,
+            #"(?i)\bgit@[^\s:]+:[^\s]+\b"#,
+            #"(?i)\b[\w.-]+/[\w.-]+\.git\b"#
+        ]
+        return patterns.contains { raw.range(of: $0, options: .regularExpression) != nil }
     }
 }
 
@@ -118,6 +136,7 @@ public struct NotificationHint: Hashable, Codable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        guard Set(c.allKeys.map(\.stringValue)) == Self.allowedKeys else { throw NotificationPayloadError.malformed }
         let version = try c.decode(Int.self, forKey: .schemaVersion)
         guard version == Self.schemaVersion else { throw NotificationPayloadError.invalidSchemaVersion }
         let titleString = try c.decode(String.self, forKey: .title)
@@ -128,6 +147,8 @@ public struct NotificationHint: Hashable, Codable, Sendable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(schemaVersion, forKey: .schemaVersion); try c.encode(id, forKey: .id); try c.encode(hostID, forKey: .hostID); try c.encode(deviceID, forKey: .deviceID); try c.encode(sessionID, forKey: .sessionID); try c.encode(inboxID, forKey: .inboxID); try c.encode(category, forKey: .category); try c.encode(risk, forKey: .risk); try c.encode(createdAt, forKey: .createdAt); try c.encode(expiresAt, forKey: .expiresAt); try c.encode(nonce, forKey: .nonce); try c.encode(title.value, forKey: .title); try c.encode(actionIntent, forKey: .actionIntent)
     }
+
+    private static let allowedKeys: Set<String> = ["schema_version", "id", "host_id", "device_id", "session_id", "inbox_id", "category", "risk", "created_at", "expires_at", "nonce", "title", "action_intent"]
 }
 
 public extension JSONEncoder {
@@ -139,39 +160,85 @@ public extension JSONEncoder {
 }
 
 public enum NotificationPayloadValidator {
-    public static let forbiddenFields: Set<String> = ["action_token", "command", "credentials", "raw_detail", "secret"]
+    public static let forbiddenFields: Set<String> = ["action_token", "command", "credentials", "raw_detail", "secret", "actiontoken", "auth", "token", "password", "credential"]
     public static func decode(_ data: Data, now: Int64, gate: inout NotificationReplayExpiryGate) throws -> NotificationHint {
-        let hint = try decode(data, now: now)
+        try gate.validateConfiguration()
+        guard data.count <= gate.maxPayloadBytes else { throw NotificationPayloadError.oversized }
+        try validateSchema(data)
+        let hint = try JSONDecoder().decode(NotificationHint.self, from: data)
         try gate.accept(hint, payloadByteCount: data.count, now: now)
         return hint
     }
+    @available(*, unavailable, message: "Use decode(_:now:gate:) so payload size, replay, expiry, and age checks cannot be bypassed.")
     public static func decode(_ data: Data, now: Int64) throws -> NotificationHint {
+        throw NotificationPayloadError.malformed
+    }
+
+    private static func validateSchema(_ data: Data) throws {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw NotificationPayloadError.malformed }
-        for field in forbiddenFields where object.keys.contains(field) { throw NotificationPayloadError.forbiddenField(field) }
-        return try JSONDecoder().decode(NotificationHint.self, from: data)
+        try validateObject(object, allowed: ["schema_version", "id", "host_id", "device_id", "session_id", "inbox_id", "category", "risk", "created_at", "expires_at", "nonce", "title", "action_intent"])
+        guard let action = object["action_intent"] as? [String: Any], let type = action["type"] as? String else { throw NotificationPayloadError.malformed }
+        switch type {
+        case "open_inbox": try validateObject(action, allowed: ["type"])
+        case "open_detail": try validateObject(action, allowed: ["type", "inbox_id"])
+        case "decision_review": try validateObject(action, allowed: ["type", "inbox_id", "decision_id"])
+        default: throw NotificationPayloadError.malformed
+        }
+    }
+
+    private static func validateObject(_ object: [String: Any], allowed: Set<String>) throws {
+        for (key, value) in object {
+            let normalized = key.lowercased().replacingOccurrences(of: "_", with: "").replacingOccurrences(of: "-", with: "")
+            if forbiddenFields.contains(key) || forbiddenFields.contains(normalized) { throw NotificationPayloadError.forbiddenField(key) }
+            guard allowed.contains(key) else { throw NotificationPayloadError.malformed }
+            if let nested = value as? [String: Any], key != "action_intent" { try validateObject(nested, allowed: []) }
+            if let nestedArray = value as? [Any], nestedArray.contains(where: { $0 is [String: Any] }) { throw NotificationPayloadError.malformed }
+        }
     }
 }
 
 public struct NotificationReplayExpiryGate: Sendable {
+    private typealias ReplayIdentity = [String]
     public let capacity: Int
     public let maxPayloadBytes: Int
     public let maxClockSkewSeconds: Int64
     public let maxAgeSeconds: Int64
-    private var seen: [String: Int64] = [:]
-    private var order: [String] = []
+    private var seen: [ReplayIdentity: Int64] = [:]
+    private var order: [ReplayIdentity] = []
 
     public init(capacity: Int = 256, maxPayloadBytes: Int = 4096, maxClockSkewSeconds: Int64 = 300, maxAgeSeconds: Int64 = 86_400) {
-        self.capacity = max(1, capacity); self.maxPayloadBytes = maxPayloadBytes; self.maxClockSkewSeconds = maxClockSkewSeconds; self.maxAgeSeconds = maxAgeSeconds
+        self.capacity = capacity; self.maxPayloadBytes = maxPayloadBytes; self.maxClockSkewSeconds = maxClockSkewSeconds; self.maxAgeSeconds = maxAgeSeconds
+    }
+    public func validateConfiguration() throws {
+        guard capacity > 0, maxPayloadBytes > 0, maxClockSkewSeconds >= 0, maxAgeSeconds > 0 else { throw NotificationPayloadError.invalidGateConfiguration }
     }
     public mutating func accept(_ hint: NotificationHint, payloadByteCount: Int, now: Int64) throws {
+        try validateConfiguration()
+        try validateIdentifiers(hint)
         guard payloadByteCount <= maxPayloadBytes else { throw NotificationPayloadError.oversized }
-        guard hint.createdAt <= now + maxClockSkewSeconds else { throw NotificationPayloadError.futureSkew }
-        guard now - hint.createdAt <= maxAgeSeconds else { throw NotificationPayloadError.stale }
+        let maxExpiry = hint.createdAt.addingReportingOverflow(maxAgeSeconds)
+        guard !maxExpiry.overflow, hint.expiresAt <= maxExpiry.partialValue else { throw NotificationPayloadError.invalidTimeRange }
+        let futureLimit = now.addingReportingOverflow(maxClockSkewSeconds)
+        guard !futureLimit.overflow, hint.createdAt <= futureLimit.partialValue else { throw NotificationPayloadError.futureSkew }
+        let staleLimit = now.addingReportingOverflow(-maxAgeSeconds)
+        guard staleLimit.overflow || hint.createdAt >= staleLimit.partialValue else { throw NotificationPayloadError.stale }
         guard now < hint.expiresAt else { throw NotificationPayloadError.expired }
-        let key = hint.id + "|" + hint.nonce
+        let key = ReplayIdentity([hint.id, hint.nonce])
         guard seen[key] == nil else { throw NotificationPayloadError.duplicate }
         seen[key] = now; order.append(key)
         while order.count > capacity { seen.removeValue(forKey: order.removeFirst()) }
+    }
+
+    private func validateIdentifiers(_ hint: NotificationHint) throws {
+        for id in [hint.id, hint.hostID, hint.deviceID, hint.sessionID, hint.inboxID, hint.nonce] { try validateOpaqueID(id) }
+        switch hint.actionIntent {
+        case .openInbox: break
+        case .openDetail(let inboxID): try validateOpaqueID(inboxID); guard inboxID == hint.inboxID else { throw NotificationPayloadError.invalidIdentifier }
+        case .decisionReview(let inboxID, let decisionID): try validateOpaqueID(inboxID); try validateOpaqueID(decisionID); guard inboxID == hint.inboxID else { throw NotificationPayloadError.invalidIdentifier }
+        }
+    }
+    private func validateOpaqueID(_ id: String) throws {
+        guard !id.isEmpty, id.utf8.count <= 128, id.range(of: #"^[A-Za-z0-9._:|-]+$"#, options: .regularExpression) != nil else { throw NotificationPayloadError.invalidIdentifier }
     }
 }
 

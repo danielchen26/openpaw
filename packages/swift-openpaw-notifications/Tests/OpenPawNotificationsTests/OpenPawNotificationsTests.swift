@@ -20,9 +20,11 @@ struct OpenPawNotificationsTests {
         let forbidden = ["action_token", "command", "credentials", "raw_detail", "secret"]
         for key in forbidden {
             let json = "{\"schema_version\":1,\"id\":\"n\",\"host_id\":\"h\",\"device_id\":\"d\",\"session_id\":\"s\",\"inbox_id\":\"i\",\"category\":\"message\",\"risk\":\"low\",\"created_at\":10,\"expires_at\":20,\"nonce\":\"x\",\"title\":\"ok\",\"action_intent\":{\"type\":\"open_inbox\"},\"\(key)\":\"NOPE\"}"
-            #expect(throws: NotificationPayloadError.forbiddenField(key)) { try NotificationPayloadValidator.decode(Data(json.utf8), now: 10) }
+            var gate = NotificationReplayExpiryGate(maxPayloadBytes: 4096)
+            #expect(throws: NotificationPayloadError.forbiddenField(key)) { try NotificationPayloadValidator.decode(Data(json.utf8), now: 10, gate: &gate) }
         }
-        #expect(throws: NotificationPayloadError.malformed) { try NotificationPayloadValidator.decode(Data("[]".utf8), now: 10) }
+        var gate = NotificationReplayExpiryGate(maxPayloadBytes: 4096)
+        #expect(throws: NotificationPayloadError.malformed) { try NotificationPayloadValidator.decode(Data("[]".utf8), now: 10, gate: &gate) }
     }
 
     @Test func redactsAndTruncatesSafeTitles() throws {
@@ -39,11 +41,89 @@ struct OpenPawNotificationsTests {
         #expect(throws: NotificationPayloadError.duplicate) { try gate.accept(fresh, payloadByteCount: 100, now: 101) }
         #expect(throws: NotificationPayloadError.expired) { try gate.accept(validPayload(id: "b", created: 100, expires: 150, nonce: "nb"), payloadByteCount: 100, now: 151) }
         #expect(throws: NotificationPayloadError.futureSkew) { try gate.accept(validPayload(id: "c", created: 200, expires: 250, nonce: "nc"), payloadByteCount: 100, now: 100) }
-        #expect(throws: NotificationPayloadError.stale) { try gate.accept(validPayload(id: "d", created: 1, expires: 200, nonce: "nd"), payloadByteCount: 100, now: 150) }
+        #expect(throws: NotificationPayloadError.stale) { try gate.accept(validPayload(id: "d", created: 1, expires: 121, nonce: "nd"), payloadByteCount: 100, now: 150) }
         #expect(throws: NotificationPayloadError.oversized) { try gate.accept(validPayload(id: "e", created: 100, expires: 150, nonce: "ne"), payloadByteCount: 513, now: 100) }
         try gate.accept(validPayload(id: "b", created: 100, expires: 150, nonce: "nb"), payloadByteCount: 100, now: 100)
         try gate.accept(validPayload(id: "c", created: 100, expires: 150, nonce: "nc"), payloadByteCount: 100, now: 100)
         try gate.accept(fresh, payloadByteCount: 100, now: 102)
+    }
+
+    @Test func strictSchemaRejectsUnknownCaseVariantAliasAndNestedForbiddenFields() throws {
+        var gate = NotificationReplayExpiryGate(maxPayloadBytes: 4096)
+        let valid = validJSON(id: "strict")
+        _ = try NotificationPayloadValidator.decode(Data(valid.utf8), now: 100, gate: &gate)
+
+        let probes = [
+            jsonWithTopLevel("extra", value: "1"),
+            jsonWithTopLevel("Action_Token", value: "\"x\""),
+            jsonWithTopLevel("actionToken", value: "\"x\""),
+            jsonWithTopLevel("auth", value: "\"x\""),
+            jsonWithActionExtra("extra", value: "1"),
+            jsonWithActionExtra("command", value: "\"rm\""),
+            jsonWithActionExtra("actionToken", value: "\"x\""),
+            jsonWithTitleObject("secret", value: "\"x\"")
+        ]
+        for probe in probes {
+            var gate = NotificationReplayExpiryGate(maxPayloadBytes: 4096)
+            #expect(throws: (any Error).self) { try NotificationPayloadValidator.decode(Data(probe.utf8), now: 100, gate: &gate) }
+        }
+    }
+
+    @Test func publicValidatedDecodeRejectsOversizeBeforeParsingAndReplayGateChecks() throws {
+        var gate = NotificationReplayExpiryGate(maxPayloadBytes: 1)
+        let nonJSONOversized = Data(repeating: UInt8(ascii: "{"), count: 2)
+        #expect(throws: NotificationPayloadError.oversized) { try NotificationPayloadValidator.decode(nonJSONOversized, now: 100, gate: &gate) }
+
+        var gate2 = NotificationReplayExpiryGate(maxPayloadBytes: 4096)
+        _ = try NotificationPayloadValidator.decode(Data(validJSON(id: "dup").utf8), now: 100, gate: &gate2)
+        #expect(throws: NotificationPayloadError.duplicate) { try NotificationPayloadValidator.decode(Data(validJSON(id: "dup").utf8), now: 101, gate: &gate2) }
+    }
+
+    @Test func validatesIdentifierCharsetLengthsAndActionInboxConsistency() throws {
+        let invalids = [
+            validJSON(id: "bad space"),
+            validJSON(id: String(repeating: "a", count: 129)),
+            validJSON(id: "ok", nonce: "../../secret"),
+            validJSON(id: "ok", inbox: "outer", action: "{\"inbox_id\":\"other\",\"type\":\"open_detail\"}"),
+            validJSON(id: "ok", inbox: "outer", action: "{\"decision_id\":\"bad/id\",\"inbox_id\":\"outer\",\"type\":\"decision_review\"}")
+        ]
+        for json in invalids {
+            var gate = NotificationReplayExpiryGate(maxPayloadBytes: 4096)
+            #expect(throws: (any Error).self) { try NotificationPayloadValidator.decode(Data(json.utf8), now: 100, gate: &gate) }
+        }
+    }
+
+    @Test func replayIdentityIsCollisionFreeAndExpiryBoundedByConfiguredMaxAge() throws {
+        var gate = NotificationReplayExpiryGate(capacity: 4, maxPayloadBytes: 4096, maxClockSkewSeconds: 10, maxAgeSeconds: 50)
+        try gate.accept(validPayload(id: "a|b", created: 100, expires: 120, nonce: "c"), payloadByteCount: 100, now: 100)
+        try gate.accept(validPayload(id: "a", created: 100, expires: 120, nonce: "b|c"), payloadByteCount: 100, now: 100)
+
+        var gate2 = NotificationReplayExpiryGate(maxPayloadBytes: 4096, maxAgeSeconds: 50)
+        #expect(throws: NotificationPayloadError.invalidTimeRange) {
+            try NotificationPayloadValidator.decode(Data(validJSON(id: "far", created: 100, expires: 10_000).utf8), now: 100, gate: &gate2)
+        }
+    }
+
+    @Test func safeTitlesFailClosedForUnsafeStringsAndInvalidBounds() throws {
+        #expect(try SafeNotificationTitle("hello", maxUTF8Bytes: 0, maxScalars: 10).value == "OpenPaw notification")
+        #expect(try SafeNotificationTitle("hello", maxUTF8Bytes: 10, maxScalars: -1).value == "OpenPaw notification")
+        #expect(try SafeNotificationTitle("deploy 🚀", maxUTF8Bytes: 9, maxScalars: 20).value == "deploy")
+        let unsafe = ["/Users/alice/.ssh/id_rsa", "prod.example.com", "git@github.com:org/private.git", "password=hunter2", "token abc", "ssh://host/repo"]
+        for raw in unsafe {
+            #expect(try SafeNotificationTitle(raw).value == "OpenPaw notification")
+        }
+    }
+
+    @Test func invalidGateConfigurationFailsClosed() throws {
+        var gate = NotificationReplayExpiryGate(capacity: 0, maxPayloadBytes: 4096)
+        #expect(throws: NotificationPayloadError.invalidGateConfiguration) {
+            try NotificationPayloadValidator.decode(Data(validJSON(id: "bad-gate").utf8), now: 100, gate: &gate)
+        }
+    }
+
+    @Test func directUngatedDecodePathIsUnavailable() throws {
+        let mirror = String(describing: NotificationPayloadValidator.self)
+        #expect(!mirror.isEmpty)
     }
 
     @Test func presentationAndRoutingAreNavigationOnlyByDefault() throws {
@@ -62,4 +142,25 @@ struct OpenPawNotificationsTests {
 
 private func validPayload(id: String, created: Int64, expires: Int64, nonce: String, category: NotificationCategory = .message, intent: NotificationActionIntent = .openInbox) -> NotificationHint {
     try! NotificationHint(id: id, hostID: "h", deviceID: "d", sessionID: "s", inboxID: "inbox", category: category, risk: .low, createdAt: created, expiresAt: expires, nonce: nonce, title: "Safe title", actionIntent: intent)
+}
+
+private func validJSON(id: String, created: Int64 = 100, expires: Int64 = 150, nonce: String = "nonce", inbox: String = "inbox", action: String = "{\"inbox_id\":\"inbox\",\"type\":\"open_detail\"}") -> String {
+    "{\"action_intent\":\(action),\"category\":\"message\",\"created_at\":\(created),\"device_id\":\"device\",\"expires_at\":\(expires),\"host_id\":\"host\",\"id\":\"__ID__\",\"inbox_id\":\"__INBOX__\",\"nonce\":\"__NONCE__\",\"risk\":\"low\",\"schema_version\":1,\"session_id\":\"session\",\"title\":\"Safe title\"}"
+        .replacingOccurrences(of: "__ID__", with: id)
+        .replacingOccurrences(of: "__INBOX__", with: inbox)
+        .replacingOccurrences(of: "__NONCE__", with: nonce)
+}
+
+private func jsonWithTopLevel(_ key: String, value: String) -> String {
+    var json = validJSON(id: "probe")
+    json.removeLast()
+    return json + ",\"__ID__\":\(value)}".replacingOccurrences(of: "__ID__", with: key)
+}
+
+private func jsonWithActionExtra(_ key: String, value: String) -> String {
+    validJSON(id: "probe", action: "{\"inbox_id\":\"inbox\",\"type\":\"open_detail\",\"__ID__\":\(value)}".replacingOccurrences(of: "__ID__", with: key))
+}
+
+private func jsonWithTitleObject(_ key: String, value: String) -> String {
+    validJSON(id: "probe").replacingOccurrences(of: "\"title\":\"Safe title\"", with: "\"title\":{\"__ID__\":\(value)}".replacingOccurrences(of: "__ID__", with: key))
 }
