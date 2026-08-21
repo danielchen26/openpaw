@@ -38,6 +38,16 @@
                ReferencedContainer = "container:OpenPaw.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "1A2B3C0000000000000000B4"
+               BuildableName = "OpenPawUITests.xctest"
+               BlueprintName = "OpenPawUITests"
+               ReferencedContainer = "container:OpenPaw.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction
