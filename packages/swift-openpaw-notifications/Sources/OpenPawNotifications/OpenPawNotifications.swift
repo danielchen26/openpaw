@@ -20,14 +20,16 @@ public enum NotificationPayloadError: Error, Equatable, Sendable {
 public struct SafeNotificationTitle: Hashable, Codable, Sendable {
     public static let defaultMaxUTF8Bytes = 96
     public static let defaultMaxScalars = 64
+    private static let fallback = "OpenPaw notification"
     public let value: String
 
     public init(_ raw: String, maxUTF8Bytes: Int = Self.defaultMaxUTF8Bytes, maxScalars: Int = Self.defaultMaxScalars) throws {
         guard maxUTF8Bytes > 0, maxScalars > 0 else { throw NotificationPayloadError.invalidTitleConfiguration }
         var sanitized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if Self.looksUnsafe(raw) || Self.looksUnsafe(sanitized) { sanitized = "OpenPaw notification" }
+        let usingFallback = Self.looksUnsafe(raw) || Self.looksUnsafe(sanitized) || sanitized.isEmpty
+        if usingFallback { sanitized = Self.fallback }
+        guard !usingFallback || Self.fits(Self.fallback, maxUTF8Bytes: maxUTF8Bytes, maxScalars: maxScalars) else { throw NotificationPayloadError.invalidTitleConfiguration }
         sanitized = sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
-        if sanitized.isEmpty { sanitized = "OpenPaw notification" }
         var result = ""
         var scalarCount = 0
         for character in sanitized {
@@ -36,7 +38,17 @@ public struct SafeNotificationTitle: Hashable, Codable, Sendable {
             scalarCount += String(character).unicodeScalars.count
             result = candidate
         }
-        self.value = result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "OpenPaw notification" : result.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            guard Self.fits(Self.fallback, maxUTF8Bytes: maxUTF8Bytes, maxScalars: maxScalars) else { throw NotificationPayloadError.invalidTitleConfiguration }
+            self.value = Self.fallback
+            return
+        }
+        self.value = trimmed
+    }
+
+    private static func fits(_ value: String, maxUTF8Bytes: Int, maxScalars: Int) -> Bool {
+        value.utf8.count <= maxUTF8Bytes && value.unicodeScalars.count <= maxScalars
     }
 
     private enum CodingKeys: String, CodingKey { case value }
@@ -145,6 +157,7 @@ public struct NotificationHint: Hashable, Codable, Sendable {
     public init(id: String, hostID: String, deviceID: String, sessionID: String, inboxID: String, category: NotificationCategory, risk: NotificationRisk, createdAt: Int64, expiresAt: Int64, nonce: String, title: String, actionIntent: NotificationActionIntent) throws {
         guard ![id, hostID, deviceID, sessionID, inboxID, nonce].contains(where: { $0.isEmpty }) else { throw NotificationPayloadError.emptyIdentifier }
         guard expiresAt > createdAt else { throw NotificationPayloadError.invalidTimeRange }
+        try NotificationOpaqueIDValidator.validateEnvelope(id: id, hostID: hostID, deviceID: deviceID, sessionID: sessionID, inboxID: inboxID, nonce: nonce, actionIntent: actionIntent)
         self.schemaVersion = Self.schemaVersion
         self.id = id; self.hostID = hostID; self.deviceID = deviceID; self.sessionID = sessionID; self.inboxID = inboxID
         self.category = category; self.risk = risk; self.createdAt = createdAt; self.expiresAt = expiresAt; self.nonce = nonce
@@ -167,6 +180,27 @@ public struct NotificationHint: Hashable, Codable, Sendable {
     }
 
     private static let allowedKeys: Set<String> = ["schema_version", "id", "host_id", "device_id", "session_id", "inbox_id", "category", "risk", "created_at", "expires_at", "nonce", "title", "action_intent"]
+}
+
+private enum NotificationOpaqueIDValidator {
+    static func validateEnvelope(id: String, hostID: String, deviceID: String, sessionID: String, inboxID: String, nonce: String, actionIntent: NotificationActionIntent) throws {
+        for value in [id, hostID, deviceID, sessionID, inboxID, nonce] { try validate(value) }
+        switch actionIntent {
+        case .openInbox:
+            break
+        case .openDetail(let actionInboxID):
+            try validate(actionInboxID)
+            guard actionInboxID == inboxID else { throw NotificationPayloadError.invalidIdentifier }
+        case .decisionReview(let actionInboxID, let decisionID):
+            try validate(actionInboxID)
+            try validate(decisionID)
+            guard actionInboxID == inboxID else { throw NotificationPayloadError.invalidIdentifier }
+        }
+    }
+
+    static func validate(_ id: String) throws {
+        guard !id.isEmpty, id.utf8.count <= 128, id.range(of: #"^[A-Za-z0-9._:|-]+$"#, options: .regularExpression) != nil else { throw NotificationPayloadError.invalidIdentifier }
+    }
 }
 
 public extension JSONEncoder {
@@ -210,7 +244,14 @@ public enum NotificationPayloadValidator {
             if forbiddenFields.contains(key) || forbiddenFields.contains(normalized) { throw NotificationPayloadError.forbiddenField(key) }
             guard allowed.contains(key) else { throw NotificationPayloadError.malformed }
             if let nested = value as? [String: Any], key != "action_intent" { try validateObject(nested, allowed: []) }
-            if let nestedArray = value as? [Any], nestedArray.contains(where: { $0 is [String: Any] }) { throw NotificationPayloadError.malformed }
+            if let nestedArray = value as? [Any] { try validateArray(nestedArray) }
+        }
+    }
+
+    private static func validateArray(_ array: [Any]) throws {
+        for value in array {
+            if let nested = value as? [String: Any] { try validateObject(nested, allowed: []) }
+            else if let nestedArray = value as? [Any] { try validateArray(nestedArray) }
         }
     }
 }
@@ -257,15 +298,7 @@ public struct NotificationReplayExpiryGate: Sendable {
     }
 
     private func validateIdentifiers(_ hint: NotificationHint) throws {
-        for id in [hint.id, hint.hostID, hint.deviceID, hint.sessionID, hint.inboxID, hint.nonce] { try validateOpaqueID(id) }
-        switch hint.actionIntent {
-        case .openInbox: break
-        case .openDetail(let inboxID): try validateOpaqueID(inboxID); guard inboxID == hint.inboxID else { throw NotificationPayloadError.invalidIdentifier }
-        case .decisionReview(let inboxID, let decisionID): try validateOpaqueID(inboxID); try validateOpaqueID(decisionID); guard inboxID == hint.inboxID else { throw NotificationPayloadError.invalidIdentifier }
-        }
-    }
-    private func validateOpaqueID(_ id: String) throws {
-        guard !id.isEmpty, id.utf8.count <= 128, id.range(of: #"^[A-Za-z0-9._:|-]+$"#, options: .regularExpression) != nil else { throw NotificationPayloadError.invalidIdentifier }
+        try NotificationOpaqueIDValidator.validateEnvelope(id: hint.id, hostID: hint.hostID, deviceID: hint.deviceID, sessionID: hint.sessionID, inboxID: hint.inboxID, nonce: hint.nonce, actionIntent: hint.actionIntent)
     }
 }
 

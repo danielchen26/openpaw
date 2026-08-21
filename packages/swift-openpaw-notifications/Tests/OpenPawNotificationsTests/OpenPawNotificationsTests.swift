@@ -28,8 +28,7 @@ struct OpenPawNotificationsTests {
     }
 
     @Test func redactsAndTruncatesSafeTitles() throws {
-        let title = try SafeNotificationTitle("tok_secret=abc 🚀🚀🚀🚀🚀🚀🚀🚀", maxUTF8Bytes: 24, maxScalars: 8)
-        #expect(!title.value.localizedCaseInsensitiveContains("secret"))
+        let title = try SafeNotificationTitle("Deploy 🚀🚀🚀🚀🚀🚀🚀🚀", maxUTF8Bytes: 24, maxScalars: 8)
         #expect(title.value.utf8.count <= 24)
         #expect(title.value.unicodeScalars.count <= 8)
     }
@@ -121,10 +120,20 @@ struct OpenPawNotificationsTests {
         #expect(throws: NotificationPayloadError.invalidTitleConfiguration) { try SafeNotificationTitle("hello", maxUTF8Bytes: 10, maxScalars: -1) }
     }
 
+    @Test func safeTitleFallbackNeverExceedsPositiveCallerBounds() throws {
+        #expect(throws: NotificationPayloadError.invalidTitleConfiguration) { try SafeNotificationTitle("🚀", maxUTF8Bytes: 1, maxScalars: 64) }
+        #expect(throws: NotificationPayloadError.invalidTitleConfiguration) { try SafeNotificationTitle("/Users/alice/.ssh/id_rsa", maxUTF8Bytes: 10, maxScalars: 64) }
+        #expect(throws: NotificationPayloadError.invalidTitleConfiguration) { try SafeNotificationTitle("token abc", maxUTF8Bytes: 96, maxScalars: 1) }
+        let title = try SafeNotificationTitle("👨‍👩‍👧‍👦 family", maxUTF8Bytes: 25, maxScalars: 10)
+        #expect(title.value == "👨‍👩‍👧‍👦")
+        #expect(title.value.utf8.count <= 25)
+        #expect(title.value.unicodeScalars.count <= 10)
+    }
+
     @Test func threadIdentifiersAreCollisionFreeForOpaqueIDsWithDelimiters() throws {
-        let first = validPayload(id: "first", created: 10, expires: 20, nonce: "n1", intent: .openDetail(inboxID: "c"))
+        let first = try NotificationHint(id: "first", hostID: "a|session:b", deviceID: "d", sessionID: "c", inboxID: "c", category: .message, risk: .low, createdAt: 10, expiresAt: 20, nonce: "n1", title: "Safe title", actionIntent: .openDetail(inboxID: "c"))
         let second = try NotificationHint(id: "second", hostID: "a", deviceID: "d", sessionID: "b|session:c", inboxID: "c", category: .message, risk: .low, createdAt: 10, expiresAt: 20, nonce: "n2", title: "Safe title", actionIntent: .openDetail(inboxID: "c"))
-        let firstPresentation = LocalNotificationPresentationMapper.map(try NotificationHint(id: "first", hostID: "a|session:b", deviceID: "d", sessionID: "c", inboxID: "c", category: .message, risk: .low, createdAt: 10, expiresAt: 20, nonce: "n1", title: "Safe title", actionIntent: .openDetail(inboxID: "c")))
+        let firstPresentation = LocalNotificationPresentationMapper.map(first)
         let secondPresentation = LocalNotificationPresentationMapper.map(second)
         #expect(first != second)
         #expect(firstPresentation.threadIdentifier != secondPresentation.threadIdentifier)
@@ -147,6 +156,27 @@ struct OpenPawNotificationsTests {
         #expect(throws: NotificationPayloadError.invalidGateConfiguration) {
             try NotificationPayloadValidator.decode(Data(validJSON(id: "bad-gate").utf8), now: 100, gate: &gate)
         }
+    }
+
+    @Test func schemaRejectsForbiddenFieldsInsideNestedArraysBeforeCodable() throws {
+        let nested = validJSON(id: "nested").replacingOccurrences(of: "\"title\":\"Safe title\"", with: "\"title\":[[{\"secret\":\"x\"}]]")
+        var gate = NotificationReplayExpiryGate(maxPayloadBytes: 4096)
+        #expect(throws: (any Error).self) {
+            try NotificationPayloadValidator.decode(Data(nested.utf8), now: 100, gate: &gate)
+        }
+    }
+
+    @Test func directConstructionAndDecodeValidateOpaqueIDsAndActionConsistency() throws {
+        #expect(throws: NotificationPayloadError.invalidIdentifier) {
+            try NotificationHint(id: "bad space", hostID: "h", deviceID: "d", sessionID: "s", inboxID: "inbox", category: .message, risk: .low, createdAt: 10, expiresAt: 20, nonce: "n", title: "Safe title", actionIntent: .openDetail(inboxID: "inbox"))
+        }
+        #expect(throws: NotificationPayloadError.invalidIdentifier) {
+            try NotificationHint(id: "ok", hostID: "h", deviceID: "d", sessionID: "s", inboxID: "outer", category: .message, risk: .low, createdAt: 10, expiresAt: 20, nonce: "n", title: "Safe title", actionIntent: .openDetail(inboxID: "other"))
+        }
+        let badIDJSON = validJSON(id: "bad space")
+        #expect(throws: NotificationPayloadError.invalidIdentifier) { try JSONDecoder().decode(NotificationHint.self, from: Data(badIDJSON.utf8)) }
+        let badActionJSON = validJSON(id: "ok", inbox: "outer", action: "{\"inbox_id\":\"other\",\"type\":\"open_detail\"}")
+        #expect(throws: NotificationPayloadError.invalidIdentifier) { try JSONDecoder().decode(NotificationHint.self, from: Data(badActionJSON.utf8)) }
     }
 
     @Test func directUngatedDecodePathIsUnavailable() throws {
