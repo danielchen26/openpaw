@@ -51,16 +51,21 @@ final class SpeechDictation: DictationEngine {
     func transcribe(locale: Locale, mode: DictationMode) -> AsyncThrowingStream<DictationUpdate, any Error> {
         AsyncThrowingStream { continuation in
             let session = session
-            let task = Task {
+            let task = Task<Int?, Never> {
                 do {
-                    try await session.start(locale: locale, mode: mode, continuation: continuation)
+                    let turn = await session.beginTurn()
+                    return try await session.start(turn: turn, locale: locale, mode: mode, continuation: continuation)
                 } catch {
                     continuation.finish(throwing: error)
+                    return nil
                 }
             }
             continuation.onTermination = { _ in
                 task.cancel()
-                Task { await session.stop() }
+                Task {
+                    guard let turn = await task.value else { return }
+                    await session.stop(turn: turn)
+                }
             }
         }
     }
@@ -114,19 +119,23 @@ private actor DictationSession {
     private var activeTurn: Int?
     private var lateFinalTurn: Int?
 
-    func start(
-        locale: Locale,
-        mode: DictationMode,
-        continuation: AsyncThrowingStream<DictationUpdate, any Error>.Continuation
-    ) async throws {
-        // A second press while the first is still running restarts cleanly rather than stacking two taps on the
-        // input node, which throws inside CoreAudio and leaves the session activated.
-        if isRunning { await stop() }
-
+    func beginTurn() -> Int {
         generation += 1
         let turn = generation
         activeTurn = nil
         lateFinalTurn = nil
+        return turn
+    }
+
+    func start(
+        turn: Int,
+        locale: Locale,
+        mode: DictationMode,
+        continuation: AsyncThrowingStream<DictationUpdate, any Error>.Continuation
+    ) async throws -> Int {
+        // A second press while the first is still running restarts cleanly rather than stacking two taps on the
+        // input node, which throws inside CoreAudio and leaves the session activated.
+        if isRunning, let activeTurn { await stop(turn: activeTurn) }
 
         try await requestPermissions()
 
@@ -202,13 +211,19 @@ private actor DictationSession {
             }
             Task { await self.deliver(update: update, error: error, turn: turn, continuation: continuation) }
         }
+        return turn
     }
 
     func stop() async {
-        generation += 1
+        guard let activeTurn else { return }
+        await stop(turn: activeTurn)
+    }
+
+    func stop(turn: Int) async {
+        guard turn == activeTurn else { return }
         guard isRunning || recognitionTask != nil || request != nil else { return }
         isRunning = false
-        lateFinalTurn = activeTurn
+        lateFinalTurn = turn
         activeTurn = nil
 
         // Order matters: pull the tap first so no more buffers arrive, then tell the recogniser the audio ended so it

@@ -282,6 +282,19 @@ struct VoiceCompositionTests {
         #expect(lifecycle.shouldStopEngine(forTerminationOf: new))
     }
 
+    @Test func runtimeLifecycleIgnoresStaleStopAfterRapidRestart() {
+        var lifecycle = DictationRuntimeLifecycle()
+        let old = lifecycle.start()
+        let new = lifecycle.start()
+
+        let stoppedOld = lifecycle.stop(turn: old)
+        #expect(!stoppedOld)
+        #expect(lifecycle.accepts(updateFor: new, isFinal: false))
+        let stoppedNew = lifecycle.stop(turn: new)
+        #expect(stoppedNew)
+        #expect(lifecycle.accepts(updateFor: new, isFinal: true))
+    }
+
     @Test func microphoneControlIsKeyboardAndVoiceOverActionable() {
         let stopped = ComposerControlPresentation.make(destination: .agent, hasAttachments: false, hasDraft: false, isSending: false)
         #expect(stopped.microphoneKeyboardShortcut == "⌘⇧M")

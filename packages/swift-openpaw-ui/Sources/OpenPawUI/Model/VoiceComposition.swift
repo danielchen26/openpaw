@@ -57,8 +57,15 @@ public struct DictationRuntimeLifecycle: Sendable, Hashable {
     }
 
     public mutating func stop() {
-        lateFinalTurn = activeTurn
+        _ = activeTurn.map { stop(turn: $0) }
+    }
+
+    @discardableResult
+    public mutating func stop(turn: DictationRuntimeTurnID) -> Bool {
+        guard turn == activeTurn else { return false }
+        lateFinalTurn = turn
         activeTurn = nil
+        return true
     }
 
     public func accepts(updateFor turn: DictationRuntimeTurnID, isFinal: Bool) -> Bool {
