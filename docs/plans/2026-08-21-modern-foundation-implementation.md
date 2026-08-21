@@ -338,6 +338,8 @@ git commit -m "fix: satisfy host clippy gate"
 
 ## Task 7: Full Milestone 1 acceptance
 
+**Status:** Completed on 2026-08-21 with one simulator-discovered layout fix.
+
 **Files:**
 - Update: `docs/handoff.md`
 - Update: `docs/architecture/roadmap.md`
@@ -370,6 +372,17 @@ Install and launch `dev.openpaw.app`. Verify:
 - Dynamic Type accessibility size
 - Reduce Motion
 - Relaunch and state restoration
+
+Observed evidence:
+
+- `scripts/check.sh`: all steps passed, including 188 snapshots and all 39 host E2E checks.
+- iPhone 16 Pro / iOS 18.2: real build, install and launch passed.
+- Clean defaults: lock screen passed. Simulator-unlocked first-run Home: passed without an error alert.
+- Standard Dynamic Type and Accessibility XXXL: passed after bounding the compact bar and making it icon-only at
+  accessibility sizes.
+- Reduce Motion launch: passed.
+- Live touch automation, credentialed Tailscale SSH, physical-device biometrics and audio: recorded as external
+  blockers in `docs/handoff.md`, not represented as passed.
 
 **Step 3: Update documentation with observed evidence**
 

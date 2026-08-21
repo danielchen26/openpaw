@@ -40,8 +40,10 @@ import SwiftUI
 //
 //     -UIPreferredContentSizeCategoryName UICTContentSizeCategoryAccessibilityXXXL
 //
-// and diff the result against the default run: rows must grow, nothing may clip, and no text may truncate. Until that
-// runs on a device or simulator, Dynamic Type in this app is correct by construction and unverified in fact.
+// and diff the result against the default run: rows must grow, nothing may clip, and no text may truncate. This was
+// run on an iPhone 16 Pro / iOS 18.2 simulator on 2026-08-21 at the standard and Accessibility XXXL categories. It
+// found and drove the fix for the compact tab bar. These macOS PNGs still cannot replace that simulator check, so
+// repeat it whenever compact navigation or typography changes.
 
 /// One rendered device class. Point size plus scale, because a screen that is correct at 1x and broken at 3x is
 /// broken — the machine register is monospaced type on hairlines, and hairlines are where scale bugs show up.

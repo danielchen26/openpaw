@@ -17,9 +17,20 @@ every one of these features is a liability if the layer under it is guesswork.
 - **App** — multi-host, multi-session terminal on SwiftTerm with hardware keyboard, CJK input, gestures and a
   shortcut toolbar; tmux discovery and attach; Inbox with risk-gated approvals; Chat View; diff viewer; file
   browser; dev-server preview; Apple Speech dictation in terminal and composer modes; image attachment with
-  annotation; Face ID gate; config export/import.
+  annotation; Face ID gate; config export/import; workspace-first Home; truthful device signal cards; guided,
+  reversible Tailscale-candidate and manual SSH onboarding; adaptive compact navigation.
 
-## Next — mobile reliability
+## In progress — unified mobile workflows
+
+- **Unified voice composer.** One editable state machine for Apple Speech in Agent and Terminal destinations. A
+  dictated terminal phrase must remain a draft until the user explicitly chooses Execute; stopping dictation must
+  not race or discard a late final transcript. Whisper model management is a separate follow-up.
+- **Session space.** Present OpenPaw agent sessions and discovered Herdr/tmux/Zellij/screen sessions together without
+  erasing provenance. Wire restoration plans and the existing multiplexer actions into the shipped root flow.
+- **Real Tailscale discovery.** The current onboarding labels candidates honestly and never calls them trusted. The
+  next step is a discovery backend plus explicit save/trust and SSH credential handoff.
+
+## Next — resilient mobile transport
 
 - **Mosh transport.** The hard part is not compiling the C++ core, it is the UDP lifecycle across iOS background
   suspension, resynchronising terminal state after a kill, and third-party license compliance in an App Store
@@ -27,7 +38,7 @@ every one of these features is a liability if the layer under it is guesswork.
   to prefer and explain it.
 - **Eternal Terminal transport.** For networks where UDP is simply not allowed. TCP reconnect plus session resume.
 
-## Then — richer voice
+## Then — richer voice engines
 
 Apple's on-device `SFSpeechRecognizer` ships today, with Chinese/English mixed input treated as a first-class
 requirement rather than a later fix. Next: WhisperKit and `whisper.cpp` model management (download, delete, storage

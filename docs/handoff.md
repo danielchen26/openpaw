@@ -35,53 +35,45 @@ It runs, failing fastest first: `cargo fmt --check`, `cargo clippy -D warnings`,
 check that the protocol goldens are unchanged, `swift test` in all four packages, the iOS app build, the headless
 UI snapshot render, and `scripts/smoke.py` end to end against the freshly built daemon.
 
-Expected on a healthy machine: **268 Rust tests, 375 Swift tests, 140 non-blank snapshots, 39 smoke checks, all
-steps passed.**
+Latest verified on 2026-08-21: **all canonical steps passed**, including **188 non-blank snapshots** and **39 host
+end-to-end checks**. The script prints the current test counts; do not freeze them here as the suites are growing.
 
-## What has never been verified anywhere, and how to close it
+## Simulator acceptance completed on 2026-08-21
 
-Everything below needs a working Xcode and a simulator or device. It is the entire outstanding verification debt.
+The Milestone 1 app was built, installed and launched on an **iPhone 16 Pro simulator running iOS 18.2**.
 
-1. **A real `xcodebuild` build.**
+- A clean defaults domain opens the biometric lock screen. Clearing the lock preference for the simulator opens the
+  local first-run Home without contacting a host or presenting an error.
+- The first-run Home renders its signal hero, local-control explanation and visible **Add a Tailscale or SSH device**
+  action. The populated Home is covered with real presentation models in the snapshot catalogue.
+- The first simulator pass exposed a real defect the test suite had missed: a flexible spacer let the custom tab bar
+  consume the lower half of the phone. The bar is now bounded to 64pt, or 72pt and icon-only at accessibility text
+  sizes. Focused root navigation tests and the full 157-test UI suite pass after the fix.
+- Standard text and `accessibility-extra-extra-extra-large` were both launched in the simulator. At the largest size
+  content reflows vertically and the six navigation targets remain visible without truncated visual labels; their
+  full spoken accessibility labels remain attached to the buttons. The scroll gesture itself remains part of the
+  interactive automation debt below.
+- Reduce Motion was enabled in the simulator preferences and the app relaunched successfully with its static motion
+  policy.
+- The snapshot executable builds in release configuration and produced 188 written, 22 intentionally skipped,
+  0 failed and 0 blank renders.
+- A structured visual comparison against the Moshi Home reference scored the populated OpenPaw Home 92/100 and
+  passed category and usability review. This is design evidence, not transport or device evidence.
 
-   ```sh
-   cd apps/ios
-   xcodebuild -project OpenPaw.xcodeproj -scheme OpenPaw \
-     -destination 'generic/platform=iOS Simulator' \
-     -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO build
-   ```
+## Remaining acceptance debt
 
-   This writes `OpenPaw.xcodeproj/project.xcworkspace/xcshareddata/Package.resolved`, which pins SwiftTerm to a
-   commit rather than to `.upToNextMinor(from: "1.20.0")`. **Commit that file** — it is the last unpinned
-   dependency in the repo.
-
-2. **The app actually running.** Boot a simulator, install, and walk the five destinations. The parts that were
-   only type-checked and unit-tested, never executed:
-   - the SwiftTerm surface: bytes flowing from the transport, `resize` on rotation, hardware-keyboard chords,
-     bracketed paste, OSC 8 link taps, pinch zoom;
-   - CJK input: the marked-text rule has a unit-tested state machine, but a real Pinyin IME committing multi-stage
-     candidates is the only way to confirm nothing reaches the PTY before composition commits;
-   - dictation: `SFSpeechRecognizer` permission prompts, on-device recognition, and switching between `zh-CN` and
-     `en-US` mid-session;
-   - the image path end to end: paste, annotate, blur, compress, upload, and the remote path handed to the agent.
-
-3. **Dynamic Type.** This cannot be verified on macOS at all — AppKit has no content size category, so a macOS
-   snapshot renders identically whether the type scale is anchored or frozen. The theme's twelve tokens are
-   anchored to `Font.TextStyle`, which is correct by construction and unconfirmed in fact. The real check:
-
-   ```sh
-   xcrun simctl launch booted dev.openpaw.app \
-     -UIPreferredContentSizeCategoryName UICTContentSizeCategoryAccessibilityXXXL
-   ```
-
-   Diff against a default-size run. Rows must grow, nothing may clip, no text may truncate.
-
-4. **On a device, not a simulator.** Keychain items are `WhenUnlockedThisDeviceOnly` with biometric access control
-   on export, so Face ID / Touch ID behaviour, the background re-gate, and the microphone all need real hardware.
-
-5. **A real end-to-end session.** Point the app at a machine running `openpaw-host`, over a real SSH port forward:
-   pair, attach a tmux session, let Claude Code request a destructive command, and approve it from the phone. The
-   daemon side of that path is covered by `scripts/smoke.py`; the phone side is not.
+1. **Interactive simulator walk.** macOS Accessibility permission was not granted to the automation process, so the
+   live Add Device sheet and tab-by-tab touch walk could not be driven programmatically. The same states are covered
+   by model tests and snapshots, but a real touch path still needs one run after granting that local permission.
+2. **A credentialed Tailscale/SSH session.** A running local Tailscale environment and SSH port were observed, but no
+   private key was copied and no `authorized_keys` entry was changed. The phone-side tunnel therefore remains blocked
+   until a test credential is deliberately imported.
+3. **On-device security and audio.** Face ID / Touch ID, Keychain access control, background re-gating, microphone
+   permission and Apple Speech recognition require physical hardware.
+4. **Terminal input and media.** Real PTY bytes, rotation resize, hardware keyboard chords, bracketed paste, OSC 8,
+   OSC 52 pasteboard handoff, pinch zoom, Pinyin composition and image upload still need a credentialed live session.
+5. **Resilient transport and ecosystem claims.** Mosh and Eternal Terminal are policy seams, not native transports.
+   Push, Live Activities, Dynamic Island and Watch approvals remain future work.
 
 ## Where things are
 
@@ -91,15 +83,16 @@ Everything below needs a working Xcode and a simulator or device. It is the enti
 | `packages/swift-agent-protocol` | 108 tests; decodes the same golden files the Rust side generates, so protocol drift is a test failure |
 | `packages/swift-terminal-core` | 91 tests over real `tmux`/`zellij`/`screen` output samples, keymaps, OSC 52/8, scrollback |
 | `packages/swift-ssh-transport` | 57 tests against an in-process NIOSSH server: auth, PTY, resize, host-key verdicts, port forwarding |
-| `packages/swift-openpaw-ui` | 119 tests, and every screen rendered headlessly by `tools/openpaw-snapshot` |
-| `apps/ios/` | type-checked for `arm64-apple-ios17.0-simulator` under Swift 6, 32 unit tests on the pure logic, pbxproj validated structurally |
+| `packages/swift-openpaw-ui` | 157 tests in the latest full run, plus 188 non-blank renders across the snapshot catalogue |
+| `apps/ios/` | real `xcodebuild`, install and launch verified on iPhone 16 Pro / iOS 18.2, plus the package and structural checks |
 
 ## A warning worth keeping
 
-Four defects in this repo were invisible to both the type-checker and the test suites, and were found only by
+Five defects in this repo were invisible to both the type-checker and the test suites, and were found only by
 rendering screens and looking at the pixels: `ImageRenderer` silently dropping every `ScrollView` child, a
 platform-branched size class making every "iPhone" render actually the iPad layout, a two-axis `ScrollView`
-centring and squeezing its content, and a frozen type scale. See the note at the top of
+centring and squeezing its content, a frozen type scale, and an unbounded custom tab bar consuming half a phone.
+See the note at the top of
 `tools/openpaw-snapshot/Sources/openpaw-snapshot/SnapshotRenderer.swift`.
 
 Run the snapshot tool and open the images. A green test suite is not evidence that a screen is right.
