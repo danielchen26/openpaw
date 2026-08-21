@@ -45,17 +45,19 @@ session and the working directory are all owned by the host.
 
 ## Durable sessions
 
-Mosh solves *network* mobility: your UDP session survives a Wi-Fi-to-cellular handoff. It does not solve *process*
-lifetime — when the remote shell exits, it is gone. tmux (or Zellij, screen, Herdr) solves process lifetime. Use
-both:
+Mosh would solve *network* mobility: a UDP session can survive a Wi-Fi-to-cellular handoff. It does not solve
+*process* lifetime — when the remote shell exits, it is gone. tmux (or Zellij, screen, Herdr) solves process
+lifetime. The production transport today is SSH, paired with a host-side multiplexer for durable processes:
 
 ```
-app  --SSH/Mosh/ET-->  host  --attach-->  tmux  --runs-->  agent
+app  --SSH today; Mosh/ET future-->  host  --attach-->  tmux  --runs-->  agent
 ```
 
-`TransportSelector` implements the `auto` policy: try Mosh, then Eternal Terminal, then SSH, biased by whatever
-last worked for that host, and always able to explain in one sentence why it fell back. Only the SSH transport is
-implemented today; the seam (`RemoteTransport`) exists so the other two are additions, not rewrites.
+`TransportSelector` does not ship automatic Mosh or Eternal Terminal selection. The default planning path uses
+`ExperimentalTransportFeatures.disabled`, so ET is excluded and SSH remains the only production transport. Native
+Mosh is not implemented and is gated on licensing plus iOS UDP/background feasibility. An isolated Eternal Terminal
+foundation exists, but it is disabled by default and is not app-integrated or validated against real `etserver` or
+physical devices. The seam (`RemoteTransport`) exists so future transports can be additions rather than rewrites.
 
 ## Event flow for an approval
 

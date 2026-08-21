@@ -32,11 +32,22 @@ every one of these features is a liability if the layer under it is guesswork.
 
 ## Next — resilient mobile transport
 
-- **Mosh transport.** The hard part is not compiling the C++ core, it is the UDP lifecycle across iOS background
-  suspension, resynchronising terminal state after a kill, and third-party license compliance in an App Store
-  build. It lands behind `RemoteTransport` with its own `TransportKind`, and `TransportSelector` already knows how
-  to prefer and explain it.
-- **Eternal Terminal transport.** For networks where UDP is simply not allowed. TCP reconnect plus session resume.
+- **Mosh transport feasibility.** Native Mosh is not implemented. The hard part is not compiling the C++ core, it is
+  the UDP lifecycle across iOS background suspension, resynchronising terminal state after a kill, and third-party
+  license compliance in an App Store build. It can only land behind `RemoteTransport` after those gates are resolved.
+- **Eternal Terminal transport integration.** For networks where UDP is simply not allowed. An isolated foundation
+  exists, but it is disabled by default, excluded from default `TransportSelector` planning by
+  `ExperimentalTransportFeatures.disabled`, and still needs app integration plus real `etserver` and physical-device
+  validation before any support claim.
+
+### Acceptance debt before any resilient-transport support claim
+
+- Prove native Mosh licensing and iOS background/UDP feasibility, then validate Wi-Fi-to-cellular handoff and terminal
+  resynchronisation on physical devices.
+- Connect the Eternal Terminal foundation to the app, run against real `etserver`, and validate reconnect/session
+  resume on physical devices.
+- Keep `TransportSelector` default planning on SSH-only behavior until those checks pass and the experimental feature
+  gate is deliberately enabled.
 
 ## Then — richer voice engines
 

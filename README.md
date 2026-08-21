@@ -148,9 +148,11 @@ Adapters are versioned and pinned by golden fixtures, because these formats move
 Implemented today: the protocol, the host daemon, the Swift packages, and the app's terminal, session, inbox,
 chat, diff, file-browser and preview surfaces.
 
-Next, in order: Mosh and Eternal Terminal transports behind the existing `RemoteTransport` seam · on-device
-Whisper/Parakeet dictation models next to the shipped Apple Speech engine · Live Activities, Dynamic Island,
-Apple Watch approvals and an end-to-end encrypted push relay · an Android client on the same protocol. Details in
+Next, in order: evaluate native Mosh feasibility and licensing before any implementation; integrate Eternal Terminal
+only after its disabled-by-default foundation is connected to the app and validated against real `etserver` and
+physical devices; add on-device Whisper/Parakeet dictation models next to the shipped Apple Speech engine; add Live
+Activities, Dynamic Island, Apple Watch approvals and an end-to-end encrypted push relay; and build an Android client
+on the same protocol. Details in
 [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md).
 
 ## Contributing

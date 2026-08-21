@@ -72,8 +72,11 @@ The Milestone 1 app was built, installed and launched on an **iPhone 16 Pro simu
    permission and Apple Speech recognition require physical hardware.
 4. **Terminal input and media.** Real PTY bytes, rotation resize, hardware keyboard chords, bracketed paste, OSC 8,
    OSC 52 pasteboard handoff, pinch zoom, Pinyin composition and image upload still need a credentialed live session.
-5. **Resilient transport and ecosystem claims.** Mosh and Eternal Terminal are policy seams, not native transports.
-   Push, Live Activities, Dynamic Island and Watch approvals remain future work.
+5. **Resilient transport and ecosystem claims.** Production terminal transport is SSH. Native Mosh is not implemented
+   and still has licensing and iOS feasibility gates. The Eternal Terminal foundation is isolated, disabled by
+   default, excluded from default `TransportSelector` planning through `ExperimentalTransportFeatures.disabled`, and
+   not app-integrated or validated against real `etserver` or physical devices. Push, Live Activities, Dynamic Island
+   and Watch approvals remain future work.
 
 ## Where things are
 
