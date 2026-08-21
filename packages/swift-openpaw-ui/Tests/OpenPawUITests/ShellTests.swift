@@ -307,6 +307,14 @@ struct RootNavigationTests {
         #expect(RootNavigationStyle.style(for: RootWidth.resolve(width: 1_024)) == .split)
     }
 
+    @Test("The compact tab bar stays bounded and becomes icon-only at accessibility sizes")
+    func compactTabBarAdaptsToAccessibilityType() {
+        #expect(RootNavigationLayout.compactTabBarHeight(isAccessibilitySize: false) == 64)
+        #expect(RootNavigationLayout.compactTabBarHeight(isAccessibilitySize: true) == 72)
+        #expect(RootNavigationLayout.showsVisualTabTitles(isAccessibilitySize: false))
+        #expect(RootNavigationLayout.showsVisualTabTitles(isAccessibilitySize: true) == false)
+    }
+
     @MainActor
     @Test("A deep link selects the inbox and remembers the item")
     func deepLinkOpensTheInbox() {

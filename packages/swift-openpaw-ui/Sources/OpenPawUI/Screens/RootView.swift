@@ -42,6 +42,20 @@ public enum RootNavigationStyle: String, Sendable, Hashable, CaseIterable {
     }
 }
 
+/// Fixed compact-navigation geometry.
+///
+/// The custom tab items contain flexible SwiftUI content. Giving their container an explicit height prevents that
+/// flexibility from claiming the unused half of a phone screen while still leaving room for the icon and label.
+public enum RootNavigationLayout {
+    public static func compactTabBarHeight(isAccessibilitySize: Bool) -> CGFloat {
+        isAccessibilitySize ? 72 : 64
+    }
+
+    public static func showsVisualTabTitles(isAccessibilitySize: Bool) -> Bool {
+        !isAccessibilitySize
+    }
+}
+
 // MARK: - Destinations
 
 public enum ShellDestination: String, Sendable, Hashable, CaseIterable, Identifiable {
@@ -150,6 +164,7 @@ public struct RootView: View {
     private let router: ShellRouter
     private let settings: OpenPawSettings
     private let scrollback: ScrollbackStore
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     #if os(iOS)
         @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -253,6 +268,12 @@ public struct RootView: View {
                 tabItem(destination)
             }
         }
+        .frame(
+            height: RootNavigationLayout.compactTabBarHeight(
+                isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
+            ),
+            alignment: .center
+        )
         .background(OpenPawTheme.panel)
         .overlay(alignment: .top) {
             Rectangle().fill(OpenPawTheme.line).frame(height: OpenPawTheme.hairline)
@@ -270,7 +291,7 @@ public struct RootView: View {
                     .fill(isSelected ? OpenPawTheme.textPrimary : Color.clear)
                     .frame(height: 2)
                 Image(systemName: destination.glyph)
-                    .font(OpenPawTheme.Machine.body)
+                    .font(.system(size: 20, weight: .medium, design: .monospaced))
                     .overlay(alignment: .topTrailing) {
                         if destination == .inbox, pendingCount > 0 {
                             Text("\(pendingCount)")
@@ -283,11 +304,14 @@ public struct RootView: View {
                                 .alignmentGuide(.trailing) { $0[.leading] }
                         }
                     }
-                Text(destination.title)
-                    .font(OpenPawTheme.Machine.label)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                Spacer(minLength: 0)
+                if RootNavigationLayout.showsVisualTabTitles(
+                    isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
+                ) {
+                    Text(destination.title)
+                        .font(OpenPawTheme.Machine.label)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
             }
             .padding(.bottom, OpenPawTheme.Space.small)
             .frame(maxWidth: .infinity, minHeight: 52)
