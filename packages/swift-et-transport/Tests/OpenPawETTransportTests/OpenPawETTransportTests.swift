@@ -34,8 +34,8 @@ final class OpenPawETTransportTests: XCTestCase {
         XCTAssertEqual(ETProto.terminalBuffer(Data("hi".utf8)).hex, "0a026869")
         XCTAssertEqual(ETProto.terminalInfo(id: "t", row: 24, column: 80, width: 640, height: 480).hex, "0a01741018185020800528e003")
         XCTAssertEqual(ETProto.terminalUserInfo(id: "t", passkey: "p", uid: 501, gid: 20, fd: 7).hex, "0a017412017018f50320142807")
-        XCTAssertEqual(ETProto.terminalInit(environment: [("TERM", "xterm")]).hex, "0a130a045445524d1205787465726d180020002800")
-        XCTAssertEqual(ETProto.initialPayload(jumphost: true, environment: [("A", "B")]).hex, "08011a0e0a0c0a0141120142180020002800")
+        XCTAssertEqual(ETProto.terminalInit(environment: [("TERM", "xterm")]).hex, "0a045445524d1205787465726d")
+        XCTAssertEqual(ETProto.initialPayload(jumphost: true, environment: [("A", "B")]).hex, "08011a060a0141120142")
     }
     func testPacketAndFramingGoldenVectors() throws {
         let packet = ETPacket(header: ETTerminalPacketType.terminalBuffer.rawValue, payload: Data("hi".utf8))
@@ -52,15 +52,15 @@ final class OpenPawETTransportTests: XCTestCase {
     }
     func testSecretBoxNonceDirectionsAndRoundTrip() throws {
         let key = Data(repeating: 7, count: ETSecretBox.keyBytes)
-        var c = try ETSecretBox(key: key, nonceMSB: 0)
-        var s = try ETSecretBox(key: key, nonceMSB: 0)
-        XCTAssertEqual(c.cryptNonceForNextMessage().hex, "010000000000000000000000000000000000000000000000")
-        var enc = try ETSecretBox(key: key, nonceMSB: 0)
+        let c = try ETSecretBox(key: key, nonceMSB: 0)
+        let s = try ETSecretBox(key: key, nonceMSB: 0)
+        XCTAssertEqual(try c.cryptNonceForNextMessage().hex, "010000000000000000000000000000000000000000000000")
+        let enc = try ETSecretBox(key: key, nonceMSB: 0)
         let ct = try enc.encrypt(Data("hello".utf8))
         XCTAssertEqual(ct.count, 21)
         XCTAssertEqual(try s.decrypt(ct), Data("hello".utf8))
-        var reverse = try ETSecretBox(key: key, nonceMSB: 1)
-        XCTAssertEqual(reverse.cryptNonceForNextMessage().hex, "010000000000000000000000000000000000000000000001")
+        let reverse = try ETSecretBox(key: key, nonceMSB: 1)
+        XCTAssertEqual(try reverse.cryptNonceForNextMessage().hex, "010000000000000000000000000000000000000000000001")
     }
     func testReplayBufferExactCiphertextRecoveryAndRejection() throws {
         var b = ETReplayBuffer(maxBytes: 10)

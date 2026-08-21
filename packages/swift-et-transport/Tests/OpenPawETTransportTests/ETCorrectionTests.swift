@@ -36,12 +36,11 @@ final class ETCorrectionTests: XCTestCase {
 
     func testNonceFullCarryDirectionAndOverflow() throws {
         let key = Data(repeating: 1, count: ETSecretBox.keyBytes)
-        var box = try ETSecretBox(key: key, direction: .clientToServer, initialNonce: Data([0xff] + Array(repeating: 0, count: 23)))
+        let box = try ETSecretBox(key: key, direction: .clientToServer, initialNonce: Data([0xff] + Array(repeating: 0, count: 23)))
         XCTAssertEqual(try box.nextNonceForTesting().hex, "000100000000000000000000000000000000000000000000")
-        var server = try ETSecretBox(key: key, direction: .serverToClient)
+        let server = try ETSecretBox(key: key, direction: .serverToClient)
         XCTAssertEqual(try server.nextNonceForTesting().last, ETNonceDirection.serverToClient.msb)
-        var overflow = try ETSecretBox(key: key, direction: .clientToServer, initialNonce: Data(repeating: 0xff, count: 24))
-        XCTAssertThrowsError(try overflow.nextNonceForTesting())
+        XCTAssertThrowsError(try ETSecretBox(key: key, direction: .clientToServer, initialNonce: Data(repeating: 0xff, count: 24)))
     }
 
     func testReplayConnectedEvictionDisconnectedCapAndRevive() throws {
