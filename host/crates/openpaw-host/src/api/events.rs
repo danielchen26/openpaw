@@ -93,9 +93,9 @@ pub async fn stream(
             .as_ref()
             .is_none_or(|want| &event.session_id == want)
             && after_seq.is_none_or(|after| event.seq > after)
-            && !delivered
+            && delivered
                 .get(&event.session_id)
-                .is_some_and(|&high| event.seq <= high);
+                .is_none_or(|&high| event.seq > high);
         futures::future::ready(keep)
     });
 
