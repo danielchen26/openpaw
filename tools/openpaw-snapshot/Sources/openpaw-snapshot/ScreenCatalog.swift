@@ -277,6 +277,22 @@ enum ScreenCatalog {
             unavailableReason: ""
         ),
         Screen(
+            name: "AddDeviceFlow-tailscale-no-candidates",
+            build: { _, _ in
+                AnyView(
+                    NavigationStack {
+                        AddDeviceFlow(
+                            model: OpenPawModel(hostStore: HostStore()),
+                            settings: OpenPawSettings.preview(),
+                            initialStep: .tailscaleCandidates,
+                            onDismiss: {}
+                        )
+                    }
+                )
+            },
+            unavailableReason: ""
+        ),
+        Screen(
             name: "HostEditorView",
             build: { model, _ in
                 AnyView(

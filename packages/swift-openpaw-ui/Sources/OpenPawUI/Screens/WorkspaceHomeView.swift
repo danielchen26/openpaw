@@ -41,16 +41,16 @@ public struct WorkspaceHomeView: View {
     private var emptyFirstRun: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.xl) {
-                HStack(alignment: .center, spacing: OpenPawTheme.Space.large) {
-                    SignalOrb(.discovering, size: 88)
-                        .accessibilityLabel("Waiting for a device you control")
-                    VStack(alignment: .leading, spacing: OpenPawTheme.Space.small) {
-                        Text("home / first run")
-                            .font(OpenPawTheme.Machine.label)
-                            .foregroundStyle(OpenPawTheme.signal)
-                        Text(WorkspaceHomeCopy.headline)
-                            .font(OpenPawTheme.Human.display)
-                            .foregroundStyle(OpenPawTheme.textPrimary)
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .center, spacing: OpenPawTheme.Space.large) {
+                        SignalOrb(.discovering, size: 88)
+                            .accessibilityLabel("Waiting for a device you control")
+                        homeHeroText
+                    }
+                    VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                        SignalOrb(.discovering, size: 72)
+                            .accessibilityLabel("Waiting for a device you control")
+                        homeHeroText
                     }
                 }
 
@@ -65,25 +65,39 @@ public struct WorkspaceHomeView: View {
                     }
                 }
 
-                HStack(spacing: OpenPawTheme.Space.medium) {
-                    Button { isAdding = true } label: {
-                        Label(WorkspaceHomeCopy.emptyPrimaryAction, systemImage: "plus.circle.fill")
-                            .font(OpenPawTheme.Machine.headline)
-                            .foregroundStyle(OpenPawTheme.textPrimary)
-                            .padding(.horizontal, OpenPawTheme.Space.large)
-                            .frame(minHeight: 44)
-                            .background(OpenPawTheme.graphite)
-                            .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card).stroke(OpenPawTheme.lineStrong))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(WorkspaceHomeCopy.emptyPrimaryAction)
-                }
+                addDeviceButton
             }
             .padding(OpenPawTheme.Space.xl)
             .frame(maxWidth: 760, alignment: .leading)
         }
         .background(OpenPawTheme.void)
         .navigationTitle("Home")
+    }
+
+    private var homeHeroText: some View {
+        VStack(alignment: .leading, spacing: OpenPawTheme.Space.small) {
+            Text("home / first run")
+                .font(OpenPawTheme.Machine.label)
+                .foregroundStyle(OpenPawTheme.signal)
+            Text(WorkspaceHomeCopy.headline)
+                .font(OpenPawTheme.Human.display)
+                .foregroundStyle(OpenPawTheme.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var addDeviceButton: some View {
+        Button { isAdding = true } label: {
+            Label(WorkspaceHomeCopy.emptyPrimaryAction, systemImage: "plus.circle.fill")
+                .font(OpenPawTheme.Machine.headline)
+                .foregroundStyle(OpenPawTheme.textPrimary)
+                .padding(.horizontal, OpenPawTheme.Space.large)
+                .frame(minHeight: 44)
+                .background(OpenPawTheme.graphite)
+                .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card).stroke(OpenPawTheme.lineStrong))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(WorkspaceHomeCopy.emptyPrimaryAction)
     }
 }

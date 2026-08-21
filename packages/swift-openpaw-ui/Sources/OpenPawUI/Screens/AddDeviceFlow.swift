@@ -27,12 +27,9 @@ public extension AddDeviceCandidate {
     static let fixture = AddDeviceCandidate(id: fixtureID, nickname: "Studio", hostname: "studio.tail123.ts.net")
 }
 
-public extension UUID {
-    static let fixtureID = AddDeviceCandidate.fixtureID
-}
-
 public enum AddDeviceFlowStep: String, Sendable, Hashable {
     case welcome
+    case tailscaleCandidates
     case confirmCandidate
     case editDetails
 }
@@ -43,8 +40,13 @@ public struct AddDeviceFlowState: Sendable, Hashable {
     public private(set) var selectedCandidate: AddDeviceCandidate?
 
     public init(hosts: [HostRecord], discovered: [AddDeviceCandidate] = []) {
-        self.step = hosts.isEmpty ? .welcome : .editDetails
+        self.step = .welcome
         self.discovered = discovered
+    }
+
+    public mutating func startTailscaleDiscovery() {
+        selectedCandidate = nil
+        step = .tailscaleCandidates
     }
 
     public mutating func selectCandidate(id: AddDeviceCandidate.ID) {
@@ -71,8 +73,9 @@ public enum AddDeviceFlowCopy {
     public static let tailscaleAction = "Find with Tailscale"
     public static let sshAction = "Add SSH details"
     public static let honestDiscovery = "Automatic Tailscale discovery is not connected yet. If a candidate appears here, review it before adding SSH details."
+    public static let noCandidates = "No Tailscale candidates are available from this build. Automatic discovery is not connected. Add SSH details to enter a device manually."
     public static let confirmation = "This is only a discovery candidate. OpenPaw will not trust it, save it, or connect until you review and save SSH details yourself."
-    public static let onboardingCopy = [title, tailscaleAction, sshAction, honestDiscovery, confirmation]
+    public static let onboardingCopy = [title, tailscaleAction, sshAction, honestDiscovery, noCandidates, confirmation]
 }
 
 @MainActor
@@ -90,6 +93,7 @@ public struct AddDeviceFlow: View {
         settings: OpenPawSettings,
         candidates: [AddDeviceCandidate] = [],
         confirmedCandidate: AddDeviceCandidate? = nil,
+        initialStep: AddDeviceFlowStep = .welcome,
         onDismiss: @escaping () -> Void
     ) {
         self.model = model
@@ -100,6 +104,8 @@ public struct AddDeviceFlow: View {
         if let confirmedCandidate {
             initial.discovered = [confirmedCandidate]
             initial.selectCandidate(id: confirmedCandidate.id)
+        } else if initialStep == .tailscaleCandidates {
+            initial.startTailscaleDiscovery()
         }
         _state = State(initialValue: initial)
     }
@@ -109,6 +115,8 @@ public struct AddDeviceFlow: View {
             switch state.step {
             case .welcome:
                 welcome
+            case .tailscaleCandidates:
+                tailscaleCandidates
             case .confirmCandidate:
                 confirmCandidate
             case .editDetails:
@@ -134,18 +142,46 @@ public struct AddDeviceFlow: View {
                 Text(AddDeviceFlowCopy.honestDiscovery)
                     .font(OpenPawTheme.Human.prose)
                     .foregroundStyle(OpenPawTheme.textSecondary)
-                HStack(alignment: .top, spacing: OpenPawTheme.Space.medium) {
-                    actionButton(AddDeviceFlowCopy.tailscaleAction, glyph: "point.3.connected.trianglepath.dotted") {
-                        if let first = state.discovered.first { state.selectCandidate(id: first.id) }
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: OpenPawTheme.Space.medium) {
+                        actionButton(AddDeviceFlowCopy.tailscaleAction, glyph: "point.3.connected.trianglepath.dotted") {
+                            state.startTailscaleDiscovery()
+                        }
+                        actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
+                            draft = state.startManualSSH()
+                        }
                     }
+                    VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                        actionButton(AddDeviceFlowCopy.tailscaleAction, glyph: "point.3.connected.trianglepath.dotted") {
+                            state.startTailscaleDiscovery()
+                        }
+                        actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
+                            draft = state.startManualSSH()
+                        }
+                    }
+                }
+            }
+            .padding(OpenPawTheme.Space.xl)
+            .frame(maxWidth: 680, alignment: .leading)
+        }
+    }
+
+    private var tailscaleCandidates: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.large) {
+                Text(AddDeviceFlowCopy.tailscaleAction)
+                    .font(OpenPawTheme.Human.title)
+                    .foregroundStyle(OpenPawTheme.textPrimary)
+                Text(AddDeviceFlowCopy.honestDiscovery)
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                if state.discovered.isEmpty {
+                    Text(AddDeviceFlowCopy.noCandidates)
+                        .font(OpenPawTheme.Human.prose)
+                        .foregroundStyle(OpenPawTheme.textSecondary)
                     actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
                         draft = state.startManualSSH()
                     }
-                }
-                if state.discovered.isEmpty {
-                    Text("No Tailscale candidates are available from this build. You can still enter SSH details manually.")
-                        .font(OpenPawTheme.Human.caption)
-                        .foregroundStyle(OpenPawTheme.textTertiary)
                 } else {
                     ForEach(state.discovered) { candidate in
                         Button { state.selectCandidate(id: candidate.id) } label: {

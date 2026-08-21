@@ -865,13 +865,29 @@ struct AddDeviceFlowTests {
         #expect(AddDeviceFlowState(hosts: []).step == .welcome)
     }
 
+    @Test("A populated store still starts at the neutral welcome step")
+    func populatedStoreStartsWelcome() {
+        let host = HostRecord(nickname: "Studio", hostname: "studio.local", username: "dev", auth: .agentForwarding)
+        #expect(AddDeviceFlowState(hosts: [host]).step == .welcome)
+    }
+
+    @Test("Finding Tailscale with no candidates opens the honest candidates step")
+    func noCandidateTailscaleTransition() {
+        var state = AddDeviceFlowState(hosts: [], discovered: [])
+        state.startTailscaleDiscovery()
+        #expect(state.step == .tailscaleCandidates)
+        #expect(state.discovered.isEmpty)
+        #expect(state.selectedCandidate == nil)
+        #expect(AddDeviceFlowCopy.noCandidates == "No Tailscale candidates are available from this build. Automatic discovery is not connected. Add SSH details to enter a device manually.")
+    }
+
     @Test("Selecting a discovered candidate requires confirmation and does not save")
     @MainActor
     func candidateNeedsConfirmationWithoutSaving() {
         let store = HostStore()
         var state = AddDeviceFlowState(hosts: store.hosts)
         state.discovered = [.fixture]
-        state.selectCandidate(id: .fixtureID)
+        state.selectCandidate(id: AddDeviceCandidate.fixtureID)
         #expect(state.step == .confirmCandidate)
         #expect(store.hosts.isEmpty)
     }
@@ -880,7 +896,7 @@ struct AddDeviceFlowTests {
     func confirmCandidateCreatesReviewPrefill() {
         var state = AddDeviceFlowState(hosts: [])
         state.discovered = [.fixture]
-        state.selectCandidate(id: .fixtureID)
+        state.selectCandidate(id: AddDeviceCandidate.fixtureID)
         let prefill = state.confirmSelectedCandidate()
         #expect(state.step == .editDetails)
         #expect(prefill?.hostname == "studio.tail123.ts.net")
