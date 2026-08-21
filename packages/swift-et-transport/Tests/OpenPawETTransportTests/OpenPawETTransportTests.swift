@@ -68,9 +68,9 @@ final class OpenPawETTransportTests: XCTestCase {
         XCTAssertThrowsError(try b.accept(sequence: 1, ciphertext: Data([1,2])))
         XCTAssertThrowsError(try b.accept(sequence: 3, ciphertext: Data([3])))
         try b.accept(sequence: 2, ciphertext: Data([3,4]))
+        try b.markDisconnected()
         XCTAssertEqual(try b.recover(after: 0), [Data([1,2]), Data([3,4])])
         XCTAssertEqual(try b.recover(after: 1), [Data([3,4])])
-        try b.markDisconnected()
         XCTAssertThrowsError(try b.recordSent(Data(repeating: 9, count: 20), connected: false))
         XCTAssertThrowsError(try b.recover(after: 3))
     }

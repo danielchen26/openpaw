@@ -98,6 +98,16 @@ final class ETStrictCorrectionTests: XCTestCase {
         XCTAssertThrowsError(try ETSSHBootstrapRequest(host: "host", terminalId: "id", passkey: "secret", term: "bad/term"))
     }
 
+    func testReplayRecoverWhileConnectedThrowsLifecycleError() throws {
+        var replay = ETReplayBuffer()
+        try replay.recordSent(Data([1, 2, 3]), connected: true)
+        XCTAssertThrowsError(try replay.recover(after: 0)) { error in
+            XCTAssertEqual(error as? ETTransportError, .invalidLifecycleTransition("connected"))
+        }
+        try replay.markDisconnected()
+        XCTAssertEqual(try replay.recover(after: 0), [Data([1, 2, 3])])
+    }
+
     func testReplayReviveWhileAlreadyConnectedIsRejected() throws {
         var replay = ETReplayBuffer()
         XCTAssertThrowsError(try replay.revive())
