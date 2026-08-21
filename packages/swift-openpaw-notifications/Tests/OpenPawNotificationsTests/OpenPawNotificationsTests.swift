@@ -179,6 +179,28 @@ struct OpenPawNotificationsTests {
         #expect(throws: NotificationPayloadError.invalidIdentifier) { try JSONDecoder().decode(NotificationHint.self, from: Data(badActionJSON.utf8)) }
     }
 
+    @Test func directDecodeRejectsActionIntentUnknownForbiddenAndAliasKeysByKind() throws {
+        let directDecodeProbes = [
+            validJSON(id: "direct-extra", action: "{\"extra\":1,\"inbox_id\":\"inbox\",\"type\":\"open_detail\"}"),
+            validJSON(id: "direct-command", action: "{\"command\":\"rm\",\"inbox_id\":\"inbox\",\"type\":\"open_detail\"}"),
+            validJSON(id: "direct-case", action: "{\"Action_Token\":\"x\",\"inbox_id\":\"inbox\",\"type\":\"open_detail\"}"),
+            validJSON(id: "direct-alias", action: "{\"actionToken\":\"x\",\"inbox_id\":\"inbox\",\"type\":\"open_detail\"}"),
+            validJSON(id: "direct-open-inbox", action: "{\"inbox_id\":\"inbox\",\"type\":\"open_inbox\"}"),
+            validJSON(id: "direct-decision", action: "{\"decision_id\":\"decision\",\"extra\":1,\"inbox_id\":\"inbox\",\"type\":\"decision_review\"}")
+        ]
+        for json in directDecodeProbes {
+            #expect(throws: (any Error).self) { try JSONDecoder().decode(NotificationHint.self, from: Data(json.utf8)) }
+        }
+    }
+
+    @Test func actionRouterDoesNotRouteInvalidDirectlyConstructedIDs() throws {
+        #expect(throws: NotificationPayloadError.invalidIdentifier) { try ActionRouter.route(.openDetail(inboxID: "../../secret")) }
+        #expect(throws: NotificationPayloadError.invalidIdentifier) { try ActionRouter.route(.decisionReview(inboxID: "inbox", decisionID: "../../secret")) }
+        #expect(throws: NotificationPayloadError.invalidIdentifier) { try ActionRouter.route(.decisionReview(inboxID: String(repeating: "a", count: 129), decisionID: "decision")) }
+        #expect(try ActionRouter.route(.openDetail(inboxID: "safe-inbox")) == .openDetail(inboxID: "safe-inbox", requiresAuthenticatedRefresh: false))
+        #expect(try ActionRouter.route(.decisionReview(inboxID: "safe-inbox", decisionID: "decision")) == .openDetail(inboxID: "safe-inbox", requiresAuthenticatedRefresh: true))
+    }
+
     @Test func directUngatedDecodePathIsUnavailable() throws {
         let mirror = String(describing: NotificationPayloadValidator.self)
         #expect(!mirror.isEmpty)
@@ -193,7 +215,7 @@ struct OpenPawNotificationsTests {
         #expect(presentation.body == "Open OpenPaw to review")
         #expect(presentation.categoryIdentifier == "openpaw.decision_required")
         #expect(presentation.threadIdentifier == "1:h|1:s|5:inbox")
-        #expect(ActionRouter.route(hint.actionIntent) == .openDetail(inboxID: "inbox", requiresAuthenticatedRefresh: true))
+        #expect(try ActionRouter.route(hint.actionIntent) == .openDetail(inboxID: "inbox", requiresAuthenticatedRefresh: true))
         #expect(ActionRouter.directAuthorizationIntent(for: hint.actionIntent) == nil)
     }
 }

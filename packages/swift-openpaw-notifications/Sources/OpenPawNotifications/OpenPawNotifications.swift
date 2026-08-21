@@ -170,6 +170,7 @@ public struct NotificationHint: Hashable, Codable, Sendable {
         guard Set(c.allKeys.map(\.stringValue)) == Self.allowedKeys else { throw NotificationPayloadError.malformed }
         let version = try c.decode(Int.self, forKey: .schemaVersion)
         guard version == Self.schemaVersion else { throw NotificationPayloadError.invalidSchemaVersion }
+        try NotificationActionSchemaValidator.validate(try c.superDecoder(forKey: .actionIntent))
         let titleString = try c.decode(String.self, forKey: .title)
         try self.init(id: c.decode(String.self, forKey: .id), hostID: c.decode(String.self, forKey: .hostID), deviceID: c.decode(String.self, forKey: .deviceID), sessionID: c.decode(String.self, forKey: .sessionID), inboxID: c.decode(String.self, forKey: .inboxID), category: c.decode(NotificationCategory.self, forKey: .category), risk: c.decode(NotificationRisk.self, forKey: .risk), createdAt: c.decode(Int64.self, forKey: .createdAt), expiresAt: c.decode(Int64.self, forKey: .expiresAt), nonce: c.decode(String.self, forKey: .nonce), title: titleString, actionIntent: c.decode(NotificationActionIntent.self, forKey: .actionIntent))
     }
@@ -200,6 +201,33 @@ private enum NotificationOpaqueIDValidator {
 
     static func validate(_ id: String) throws {
         guard !id.isEmpty, id.utf8.count <= 128, id.range(of: #"^[A-Za-z0-9._:|-]+$"#, options: .regularExpression) != nil else { throw NotificationPayloadError.invalidIdentifier }
+    }
+}
+
+private struct AnyCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+    init?(stringValue: String) { self.stringValue = stringValue; self.intValue = nil }
+    init?(intValue: Int) { self.stringValue = String(intValue); self.intValue = intValue }
+}
+
+private enum NotificationActionSchemaValidator {
+    static func validate(_ decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        let keys = Set(c.allKeys.map(\.stringValue))
+        for key in keys {
+            let normalized = key.lowercased().replacingOccurrences(of: "_", with: "").replacingOccurrences(of: "-", with: "")
+            if NotificationPayloadValidator.forbiddenFields.contains(key) || NotificationPayloadValidator.forbiddenFields.contains(normalized) { throw NotificationPayloadError.forbiddenField(key) }
+        }
+        guard let typeKey = AnyCodingKey(stringValue: "type"), let type = try? c.decode(String.self, forKey: typeKey) else { throw NotificationPayloadError.malformed }
+        let allowed: Set<String>
+        switch type {
+        case "open_inbox": allowed = ["type"]
+        case "open_detail": allowed = ["type", "inbox_id"]
+        case "decision_review": allowed = ["type", "inbox_id", "decision_id"]
+        default: throw NotificationPayloadError.malformed
+        }
+        guard keys == allowed else { throw NotificationPayloadError.malformed }
     }
 }
 
@@ -326,11 +354,16 @@ public enum RoutedNotificationAction: Hashable, Sendable {
 }
 
 public enum ActionRouter {
-    public static func route(_ intent: NotificationActionIntent) -> RoutedNotificationAction {
+    public static func route(_ intent: NotificationActionIntent) throws -> RoutedNotificationAction {
         switch intent {
         case .openInbox: return .openInbox
-        case .openDetail(let inboxID): return .openDetail(inboxID: inboxID, requiresAuthenticatedRefresh: false)
-        case .decisionReview(let inboxID, _): return .openDetail(inboxID: inboxID, requiresAuthenticatedRefresh: true)
+        case .openDetail(let inboxID):
+            try NotificationOpaqueIDValidator.validate(inboxID)
+            return .openDetail(inboxID: inboxID, requiresAuthenticatedRefresh: false)
+        case .decisionReview(let inboxID, let decisionID):
+            try NotificationOpaqueIDValidator.validate(inboxID)
+            try NotificationOpaqueIDValidator.validate(decisionID)
+            return .openDetail(inboxID: inboxID, requiresAuthenticatedRefresh: true)
         }
     }
     public static func directAuthorizationIntent(for intent: NotificationActionIntent) -> Never? { nil }
