@@ -420,6 +420,7 @@ public struct HostEditorView: View {
         model: OpenPawModel,
         settings: OpenPawSettings,
         record: HostRecord? = nil,
+        initialDraft: HostDraft? = nil,
         onDismiss: @escaping () -> Void
     ) {
         self.model = model
@@ -429,7 +430,7 @@ public struct HostEditorView: View {
         if let record {
             _draft = State(initialValue: HostDraft(record: record, profile: settings.profile(for: record.id)))
         } else {
-            _draft = State(initialValue: HostDraft())
+            _draft = State(initialValue: initialDraft ?? HostDraft())
         }
     }
 

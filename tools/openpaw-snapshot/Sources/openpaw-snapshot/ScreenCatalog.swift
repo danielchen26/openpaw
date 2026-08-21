@@ -235,6 +235,48 @@ enum ScreenCatalog {
             unavailableReason: ""
         ),
         Screen(
+            name: "WorkspaceHomeView-empty",
+            build: { _, _ in
+                AnyView(
+                    NavigationStack {
+                        WorkspaceHomeView(model: OpenPawModel(hostStore: HostStore()), settings: OpenPawSettings.preview())
+                    }
+                )
+            },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "AddDeviceFlow-welcome",
+            build: { _, _ in
+                AnyView(
+                    NavigationStack {
+                        AddDeviceFlow(
+                            model: OpenPawModel(hostStore: HostStore()),
+                            settings: OpenPawSettings.preview(),
+                            onDismiss: {}
+                        )
+                    }
+                )
+            },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "AddDeviceFlow-candidate-confirmation",
+            build: { _, _ in
+                AnyView(
+                    NavigationStack {
+                        AddDeviceFlow(
+                            model: OpenPawModel(hostStore: HostStore()),
+                            settings: OpenPawSettings.preview(),
+                            confirmedCandidate: .fixture,
+                            onDismiss: {}
+                        )
+                    }
+                )
+            },
+            unavailableReason: ""
+        ),
+        Screen(
             name: "HostEditorView",
             build: { model, _ in
                 AnyView(

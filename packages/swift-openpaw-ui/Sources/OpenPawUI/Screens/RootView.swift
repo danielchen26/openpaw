@@ -442,7 +442,7 @@ public struct RootView: View {
     private func content(_ destination: ShellDestination, width: RootWidth) -> some View {
         switch destination {
         case .home:
-            HostListView(model: model, settings: settings)
+            WorkspaceHomeView(model: model, settings: settings)
         case .terminal:
             TerminalScreenView(
                 model: model,

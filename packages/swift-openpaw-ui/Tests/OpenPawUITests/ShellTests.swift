@@ -855,3 +855,58 @@ struct SettingsTests {
         #expect(settings.terminalFontSize == OpenPawSettings.fontSizeRange.upperBound)
     }
 }
+
+// MARK: - Add device flow
+
+@Suite("Add device flow")
+struct AddDeviceFlowTests {
+    @Test("An empty store starts at the welcome step")
+    func emptyStartsWelcome() {
+        #expect(AddDeviceFlowState(hosts: []).step == .welcome)
+    }
+
+    @Test("Selecting a discovered candidate requires confirmation and does not save")
+    @MainActor
+    func candidateNeedsConfirmationWithoutSaving() {
+        let store = HostStore()
+        var state = AddDeviceFlowState(hosts: store.hosts)
+        state.discovered = [.fixture]
+        state.selectCandidate(id: .fixtureID)
+        #expect(state.step == .confirmCandidate)
+        #expect(store.hosts.isEmpty)
+    }
+
+    @Test("Confirmation advances to editable SSH details with limited prefill")
+    func confirmCandidateCreatesReviewPrefill() {
+        var state = AddDeviceFlowState(hosts: [])
+        state.discovered = [.fixture]
+        state.selectCandidate(id: .fixtureID)
+        let prefill = state.confirmSelectedCandidate()
+        #expect(state.step == .editDetails)
+        #expect(prefill?.hostname == "studio.tail123.ts.net")
+        #expect(prefill?.nickname == "Studio")
+        #expect(prefill?.username == "")
+        #expect(prefill?.tags.isEmpty == true)
+    }
+
+    @Test("Exact empty Home action copy is stable")
+    func emptyHomeActionCopy() {
+        #expect(WorkspaceHomeCopy.emptyPrimaryAction == "Add a Tailscale or SSH device")
+    }
+
+    @Test("No empty or onboarding copy says tunnel down")
+    func noTunnelDownCopy() {
+        for line in WorkspaceHomeCopy.emptyAndOnboardingCopy + AddDeviceFlowCopy.onboardingCopy {
+            #expect(!line.localizedCaseInsensitiveContains("tunnel down"))
+        }
+    }
+
+    @Test("Manual SSH opens editable details without prefill")
+    func manualSSHOpensBlankDetails() {
+        var state = AddDeviceFlowState(hosts: [])
+        let draft = state.startManualSSH()
+        #expect(state.step == .editDetails)
+        #expect(draft.hostname == "")
+        #expect(draft.nickname == "")
+    }
+}
