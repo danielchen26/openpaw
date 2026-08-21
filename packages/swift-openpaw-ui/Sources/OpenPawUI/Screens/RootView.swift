@@ -237,6 +237,25 @@ public struct RootView: View {
             model.startFollowing(session: model.selectedSessionID)
             await refreshSessionSpace()
         }
+        .onChange(of: model.selectedHostID) { _, _ in
+            invalidateSessionSpace()
+            Task {
+                if model.canRefreshRemoteState { await model.refresh() }
+                await refreshSessionSpace()
+            }
+        }
+        .onChange(of: model.connectionGeneration) { _, _ in
+            invalidateSessionSpace()
+            Task { await refreshSessionSpace() }
+        }
+#if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            Task {
+                if model.canRefreshRemoteState { await model.refresh() }
+                await refreshSessionSpace()
+            }
+        }
+#endif
         .task { await pumpScrollback() }
         .sheet(item: sheetBinding) { sheet in
             switch sheet {
@@ -606,9 +625,13 @@ public struct RootView: View {
 
     private func refreshSessionSpace() async {
         let requestedHostID = model.selectedHostID
+        let requestedGeneration = model.connectionGeneration
         guard model.connection.isConnected else { sessionSpace = SessionSpaceSnapshot(); return }
         let snapshot = await sessionSpaceProvider.snapshot(for: model)
-        guard requestedHostID == model.selectedHostID, snapshot.hostID == model.selectedHostID else { return }
+        guard requestedHostID == model.selectedHostID,
+              requestedGeneration == model.connectionGeneration,
+              snapshot.hostID == model.selectedHostID,
+              snapshot.connectionGeneration == model.connectionGeneration else { return }
         sessionSpace = snapshot
         if !snapshot.issues.isEmpty {
             model.lastError = PresentedError(
@@ -618,14 +641,19 @@ public struct RootView: View {
         }
     }
 
+    private func invalidateSessionSpace() {
+        sessionSpace = SessionSpaceSnapshot(hostID: model.selectedHostID, connectionGeneration: model.connectionGeneration)
+    }
+
     private func runSessionCommand(_ command: String, refreshAfterCommand: Bool) {
         Task {
             do {
-                guard sessionSpace.hostID == model.selectedHostID, model.connection.isConnected else {
+                guard sessionSpace.hostID == model.selectedHostID,
+                      sessionSpace.connectionGeneration == model.connectionGeneration,
+                      model.connection.isConnected else {
                     throw SessionSpaceActionError.unavailable
                 }
                 try await sessionCommandExecutor.executeSessionCommand(command)
-                router.destination = .terminal
                 if refreshAfterCommand { await refreshSessionSpace() }
             } catch {
                 model.lastError = PresentedError(title: "Session command failed", detail: safeSessionActionMessage(error), isRecoverable: true)
@@ -634,19 +662,21 @@ public struct RootView: View {
     }
 
     private func attachSession(_ session: RemoteSession) {
-        guard session.isAlive else { return }
+        guard session.isAlive else { presentUnavailableSessionAction(); return }
         recordAttachRestorationPlan(session)
         runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).attach(session), refreshAfterCommand: false)
+        router.destination = .terminal
     }
 
     private func createSession(_ name: String) {
         let adapter = MultiplexerAdapters.adapter(for: sessionSpace.transport.preferredMultiplexer ?? .tmux)
         recordCreateRestorationPlan(kind: adapter.kind, name: name)
         runSessionCommand(adapter.create(name: name, directory: nil), refreshAfterCommand: false)
+        router.destination = .terminal
     }
 
     private func renameSession(_ session: RemoteSession, to name: String) {
-        guard session.isAlive else { return }
+        guard session.isAlive else { presentUnavailableSessionAction(); return }
         runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).rename(session, to: name), refreshAfterCommand: true)
     }
 
@@ -656,9 +686,12 @@ public struct RootView: View {
     }
 
     private func restoreSession(_ plan: SessionRestorationPlan) {
-        guard plan.hostID == model.selectedHostID, sessionSpace.hostID == model.selectedHostID else { return }
-        guard let command = plan.restorationCommand() else { return }
+        guard plan.hostID == model.selectedHostID,
+              sessionSpace.hostID == model.selectedHostID,
+              sessionSpace.connectionGeneration == model.connectionGeneration else { presentUnavailableSessionAction(); return }
+        guard let command = plan.restorationCommand() else { presentUnavailableSessionAction(); return }
         runSessionCommand(command, refreshAfterCommand: false)
+        router.destination = .terminal
     }
 
     private func recordAttachRestorationPlan(_ session: RemoteSession) {
@@ -684,6 +717,10 @@ public struct RootView: View {
     }
 
     private enum SessionSpaceActionError: Error { case unavailable }
+
+    private func presentUnavailableSessionAction() {
+        model.lastError = PresentedError(title: "Session action unavailable", detail: "Refresh sessions and try again.", isRecoverable: true)
+    }
 
     private func safeSessionActionMessage(_ error: any Error) -> String {
         if let failure = error as? CommandFailure {

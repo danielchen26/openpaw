@@ -33,8 +33,14 @@ public final class OpenPawModel {
     // MARK: - Hosts and connection
 
     public var hostStore: HostStore
-    public var selectedHostID: HostRecord.ID?
-    public var connection: ConnectionState = .idle
+    public var selectedHostID: HostRecord.ID? {
+        didSet { if oldValue != selectedHostID { connectionGeneration += 1 } }
+    }
+    public var connection: ConnectionState = .idle {
+        didSet { connectionGeneration += 1 }
+    }
+    /// Monotonic token for binding derived host/session rows to the exact connection that produced them.
+    public private(set) var connectionGeneration = 0
     /// Set when a host key is unknown or changed. A changed key is a hard block by contract, so the UI must not
     /// offer a "continue anyway" path for `.changed`.
     public var hostKeyPrompt: HostKeyPrompt?

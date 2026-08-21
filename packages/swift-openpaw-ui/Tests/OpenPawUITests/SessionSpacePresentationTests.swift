@@ -32,6 +32,45 @@ final class SessionSpacePresentationTests: XCTestCase {
         XCTAssertEqual(space.items[1].secondaryActions, ["Kill"])
     }
 
+    func testSnapshotsAreBoundToHostAndConnectionGeneration() {
+        let hostID = UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 2)
+
+        XCTAssertTrue(SessionSpaceActionPolicy.canUseSnapshot(snapshot, hostID: hostID, generation: 2, isConnected: true))
+        XCTAssertFalse(SessionSpaceActionPolicy.canUseSnapshot(snapshot, hostID: hostID, generation: 3, isConnected: true))
+        XCTAssertFalse(SessionSpaceActionPolicy.canUseSnapshot(snapshot, hostID: UUID(), generation: 2, isConnected: true))
+        XCTAssertFalse(SessionSpaceActionPolicy.canUseSnapshot(snapshot, hostID: hostID, generation: 2, isConnected: false))
+    }
+
+    func testActionPolicyMatchesVisibleDeadRowActionsAndNavigation() {
+        let hostID = UUID(uuidString: "77777777-7777-7777-7777-777777777777")!
+        let dead = RemoteSession(id: "dead", name: "dead", kind: .tmux, isAttached: false, isAlive: false, windowCount: 0)
+        let live = RemoteSession(id: "live", name: "live", kind: .tmux, isAttached: false, isAlive: true, windowCount: 1)
+        let space = SessionSpacePresentation(agentSessions: [], remoteSessions: [dead, live], restoration: nil)
+        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 9, remoteSessions: [dead, live])
+
+        XCTAssertEqual(space.items[0].primaryAction, "Attach unavailable")
+        XCTAssertEqual(space.items[0].secondaryActions, ["Kill"])
+        XCTAssertFalse(SessionSpaceActionPolicy.allows("Attach", item: space.items[0], snapshot: snapshot, hostID: hostID, generation: 9, isConnected: true))
+        XCTAssertTrue(SessionSpaceActionPolicy.allows("Kill", item: space.items[0], snapshot: snapshot, hostID: hostID, generation: 9, isConnected: true))
+        XCTAssertTrue(SessionSpaceActionPolicy.allows("Rename", item: space.items[1], snapshot: snapshot, hostID: hostID, generation: 9, isConnected: true))
+        XCTAssertEqual(SessionSpaceActionPolicy.navigation(for: "Rename"), .staysInList)
+        XCTAssertEqual(SessionSpaceActionPolicy.navigation(for: "Kill"), .staysInList)
+        XCTAssertEqual(SessionSpaceActionPolicy.navigation(for: "Attach"), .opensTerminal)
+    }
+
+    func testRestorationActionsStayHostMatched() {
+        let hostID = UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
+        let otherHostID = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
+        let plan = SessionRestorationPlan(hostID: hostID, multiplexer: .tmux, multiplexerTarget: "$1", workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
+        let item = SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: plan).restorationItem!
+        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 4, restoration: plan)
+
+        XCTAssertTrue(SessionSpaceActionPolicy.allows("Reattach", item: item, snapshot: snapshot, hostID: hostID, generation: 4, isConnected: true))
+        XCTAssertFalse(SessionSpaceActionPolicy.allows("Reattach", item: item, snapshot: snapshot, hostID: otherHostID, generation: 4, isConnected: true))
+        XCTAssertEqual(SessionSpaceActionPolicy.navigation(for: item.primaryAction), .opensTerminal)
+    }
+
     func testRestorationPolicyDistinguishesReattachFromBareShellFallback() {
         let hostID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
         let reattach = SessionRestorationPlan(hostID: hostID, multiplexer: .herdr, multiplexerTarget: "hd_01", workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))

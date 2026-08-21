@@ -6,13 +6,15 @@ import OpenPawTerminalCore
 /// transport is healthy or unhealthy.
 public struct SessionSpaceSnapshot: Sendable, Hashable {
     public var hostID: HostID?
+    public var connectionGeneration: Int
     public var remoteSessions: [RemoteSession]
     public var restoration: SessionRestorationPlan?
     public var transport: SessionTransportPresentation
     public var issues: [String]
 
-    public init(hostID: HostID? = nil, remoteSessions: [RemoteSession] = [], restoration: SessionRestorationPlan? = nil, transport: SessionTransportPresentation = .init(), issues: [String] = []) {
+    public init(hostID: HostID? = nil, connectionGeneration: Int = 0, remoteSessions: [RemoteSession] = [], restoration: SessionRestorationPlan? = nil, transport: SessionTransportPresentation = .init(), issues: [String] = []) {
         self.hostID = hostID
+        self.connectionGeneration = connectionGeneration
         self.remoteSessions = remoteSessions
         self.restoration = restoration
         self.transport = transport
@@ -140,6 +142,35 @@ public struct SessionSpacePresentation: Sendable, Hashable {
     }
 }
 
+public enum SessionSpaceNavigationPolicy: Sendable, Hashable {
+    case staysInList
+    case opensTerminal
+}
+
+public struct SessionSpaceActionPolicy: Sendable, Hashable {
+    public static func canUseSnapshot(_ snapshot: SessionSpaceSnapshot, hostID: HostID?, generation: Int, isConnected: Bool) -> Bool {
+        isConnected && snapshot.hostID == hostID && snapshot.connectionGeneration == generation
+    }
+
+    public static func navigation(for action: String) -> SessionSpaceNavigationPolicy {
+        switch action {
+        case "Attach", "Create replacement session", "Open shell", "Reattach": .opensTerminal
+        default: .staysInList
+        }
+    }
+
+    public static func allows(_ action: String, item: SessionSpaceItem, snapshot: SessionSpaceSnapshot, hostID: HostID?, generation: Int, isConnected: Bool) -> Bool {
+        guard canUseSnapshot(snapshot, hostID: hostID, generation: generation, isConnected: isConnected) else { return false }
+        return switch (action, item.provenance) {
+        case ("Attach", .multiplexerSession): item.primaryAction == "Attach"
+        case ("Rename", .multiplexerSession): item.secondaryActions.contains("Rename")
+        case ("Kill", .multiplexerSession): item.secondaryActions.contains("Kill")
+        case ("Reattach", .restoration), ("Create replacement session", .replacementMultiplexer), ("Open shell", .bareShellFallback): true
+        default: false
+        }
+    }
+}
+
 @MainActor
 public protocol SessionSpaceProviding: AnyObject {
     func snapshot(for model: OpenPawModel) async -> SessionSpaceSnapshot
@@ -183,6 +214,7 @@ public final class LiveMultiplexerSessionSpaceProvider: SessionSpaceProviding {
         let restoration = await restorationStore?.loadPlan(for: hostID)
         return SessionSpaceSnapshot(
             hostID: hostID,
+            connectionGeneration: model.connectionGeneration,
             remoteSessions: sessions,
             restoration: restoration,
             transport: SessionTransportPresentation(preferredMultiplexer: model.selectedHost?.multiplexerPreference ?? preferred, attemptedMultiplexers: adapters.map(\.kind)),
