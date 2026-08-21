@@ -320,13 +320,18 @@ fn candidate_from_peer(peer: &Value) -> Result<TailscaleDeviceCandidate, Tailsca
             TailscaleParseError::Malformed("tailscale peer is missing id".to_owned())
         })?,
     };
-    let display_name =
-        optional_string_at(peer, &["HostName", "Name", "DNSName"])?.unwrap_or_else(|| id.clone());
     let dns_name = optional_string_at(peer, &["DNSName"])?;
+    let host_name = optional_string_at(peer, &["HostName", "Name"])?;
     let os = optional_string_at(peer, &["OS"])?;
     let last_seen = optional_last_seen(peer)?;
     let online = optional_bool_at(peer, "Online")?.unwrap_or(false);
     let tailscale_ips = ip_list(peer)?;
+    let display_name = display_name(
+        host_name,
+        dns_name.as_deref(),
+        tailscale_ips.first().map(String::as_str),
+        &id,
+    );
     Ok(TailscaleDeviceCandidate {
         id,
         display_name,
@@ -336,6 +341,37 @@ fn candidate_from_peer(peer: &Value) -> Result<TailscaleDeviceCandidate, Tailsca
         online,
         last_seen,
     })
+}
+
+/// Picks the name shown in the device picker.
+///
+/// The reported hostname is preferred, except when it identifies nothing: phones and tablets commonly report
+/// `localhost`, so a tailnet of two iOS devices offers the user two identical rows on the one screen where they are
+/// deciding which machine to trust. The tailnet name is unique by construction, so it wins in that case.
+fn display_name(
+    host_name: Option<String>,
+    dns_name: Option<&str>,
+    first_ip: Option<&str>,
+    id: &str,
+) -> String {
+    if let Some(name) = host_name.filter(|name| !is_generic_hostname(name)) {
+        return name;
+    }
+    // Ordered by how much the label means to the person choosing a machine: its tailnet name, then its tailnet
+    // address, and only then the opaque node id that identifies without describing.
+    dns_name
+        .and_then(|dns| dns.split('.').next())
+        .filter(|label| !label.is_empty())
+        .or(first_ip)
+        .unwrap_or(id)
+        .to_owned()
+}
+
+/// Hostnames that every device of a kind shares, and so name no device in particular.
+fn is_generic_hostname(name: &str) -> bool {
+    const GENERIC: [&str; 2] = ["localhost", "localhost.localdomain"];
+    let folded = name.trim().to_ascii_lowercase();
+    GENERIC.contains(&folded.as_str())
 }
 
 fn peers_empty(value: &Value) -> bool {
@@ -386,9 +422,14 @@ fn optional_last_seen(value: &Value) -> Result<Option<String>, TailscaleParseErr
     let Some(last_seen) = optional_string_at(value, &["LastSeen"])? else {
         return Ok(None);
     };
-    OffsetDateTime::parse(&last_seen, &Rfc3339).map_err(|_| {
+    let parsed = OffsetDateTime::parse(&last_seen, &Rfc3339).map_err(|_| {
         TailscaleParseError::Malformed("tailscale peer LastSeen is not RFC3339".to_owned())
     })?;
+    // A peer that has never been away carries the zero time. It is valid RFC3339, so it would otherwise flow through
+    // as a real timestamp and render as "last seen in year 1" for a device that is online right now.
+    if parsed.year() <= 1 {
+        return Ok(None);
+    }
     Ok(Some(last_seen))
 }
 
@@ -621,6 +662,71 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
     use std::time::Instant;
+
+    /// Two iOS devices on a real tailnet both report `HostName: "localhost"`. Picking the hostname first makes them
+    /// indistinguishable in the picker, which is a device-identity bug on the one screen where the user is deciding
+    /// which machine to trust. Taken from an actual `tailscale status --json`.
+    #[test]
+    fn distinguishes_peers_that_share_a_generic_hostname() {
+        let json = br#"{"BackendState":"Running","Peer":{
+            "nodekey:a":{"ID":"nA","HostName":"localhost","DNSName":"ipad165.tail303ce8.ts.net.","TailscaleIPs":["100.72.11.89"],"OS":"iOS","Online":true},
+            "nodekey:b":{"ID":"nB","HostName":"localhost","DNSName":"iphone172.tail303ce8.ts.net.","TailscaleIPs":["100.68.106.52"],"OS":"iOS","Online":false}
+        }}"#;
+        let parsed = parse_status_json(json).unwrap();
+        let names: Vec<&str> = parsed
+            .candidates
+            .iter()
+            .map(|c| c.display_name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"ipad165") && names.contains(&"iphone172"),
+            "expected the tailnet names to disambiguate, got {names:?}"
+        );
+    }
+
+    /// A peer that has never been away carries `LastSeen: "0001-01-01T00:00:00Z"`. It parses as RFC3339, so it flows
+    /// through as a real timestamp and renders as "last seen in year 1" for a device that is online right now.
+    #[test]
+    fn treats_the_zero_timestamp_as_never_seen() {
+        let json = br#"{"BackendState":"Running","Peer":{"nodekey:a":{"ID":"nA","HostName":"ipad","DNSName":"ipad.tail.ts.net.","TailscaleIPs":["100.72.11.89"],"OS":"iOS","Online":true,"LastSeen":"0001-01-01T00:00:00Z"}}}"#;
+        let parsed = parse_status_json(json).unwrap();
+        assert_eq!(parsed.candidates[0].last_seen, None);
+    }
+
+    /// A real hostname is the user's own name for the machine and must survive, even when a tailnet label exists.
+    #[test]
+    fn keeps_a_real_hostname_over_the_tailnet_label() {
+        let json = br#"{"BackendState":"Running","Peer":{"nodekey:a":{"ID":"nA","HostName":"work","DNSName":"work.tail303ce8.ts.net.","TailscaleIPs":["100.74.164.67"],"OS":"macOS","Online":true}}}"#;
+        let parsed = parse_status_json(json).unwrap();
+        assert_eq!(parsed.candidates[0].display_name, "work");
+    }
+
+    /// With no tailnet name the address still identifies the machine, and means far more to the person choosing it
+    /// than an opaque node id does.
+    #[test]
+    fn falls_back_to_the_address_then_the_id() {
+        let with_ip = br#"{"BackendState":"Running","Peer":{"nodekey:a":{"ID":"nA","HostName":"localhost","TailscaleIPs":["100.64.0.5"],"Online":true}}}"#;
+        assert_eq!(
+            parse_status_json(with_ip).unwrap().candidates[0].display_name,
+            "100.64.0.5"
+        );
+
+        let ip_only = br#"{"BackendState":"Running","Peer":{"nodekey:a":{"ID":"nA","HostName":"localhost","TailscaleIP":"","Online":true}}}"#;
+        // An unusable address list is rejected outright rather than named, so the id path is exercised through a
+        // peer that has no hostname at all.
+        assert!(parse_status_json(ip_only).is_err());
+    }
+
+    /// A genuine past timestamp still has to survive, or every offline device would claim it was never seen.
+    #[test]
+    fn keeps_a_genuine_last_seen_timestamp() {
+        let json = br#"{"BackendState":"Running","Peer":{"nodekey:a":{"ID":"nA","HostName":"air","TailscaleIPs":["100.70.52.28"],"Online":false,"LastSeen":"2026-08-19T20:28:37.1Z"}}}"#;
+        let parsed = parse_status_json(json).unwrap();
+        assert_eq!(
+            parsed.candidates[0].last_seen.as_deref(),
+            Some("2026-08-19T20:28:37.1Z")
+        );
+    }
 
     #[test]
     fn parses_real_peer_map_shape_and_sanitizes_fields() {
