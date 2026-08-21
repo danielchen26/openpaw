@@ -45,6 +45,34 @@ struct WorkspacePresentationTests {
         #expect(card.connectionActionTitle == "Resume")
     }
 
+    @Test("The connection action names its device for VoiceOver while the visible title stays short")
+    func connectionActionIsDistinguishableBetweenDevices() {
+        let laptop = WorkspaceDevicePresentation(host: fixture(nickname: "laptop"))
+        let desktop = WorkspaceDevicePresentation(host: fixture(nickname: "desktop"))
+
+        // The button reads "Connect" on every card, so without the device in the spoken label a VoiceOver user
+        // choosing between machines hears the same thing for all of them and cannot tell which one they are about
+        // to hand credentials to.
+        #expect(laptop.connectionActionAccessibilityLabel != desktop.connectionActionAccessibilityLabel)
+        #expect(laptop.connectionActionAccessibilityLabel == "Connect to laptop")
+
+        // The visible button is still short: the card already shows the name directly above it.
+        #expect(laptop.connectionActionTitle == "Connect")
+    }
+
+    @Test("Resuming names its device too")
+    func resumeActionNamesItsDevice() {
+        let host = fixture(nickname: "studio")
+        let card = WorkspaceDevicePresentation(
+            host: host,
+            selectedHostID: host.id,
+            connection: .connected(.ssh)
+        )
+
+        #expect(card.connectionActionTitle == "Resume")
+        #expect(card.connectionActionAccessibilityLabel == "Resume studio")
+    }
+
     @Test("Previously reached disconnected host is offline instead of failed")
     func previouslyReachedDisconnectedHostIsOffline() {
         let host = fixture(lastSuccessfulTransport: .ssh)

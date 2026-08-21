@@ -45,6 +45,12 @@ public struct WorkspaceDevicePresentation: Sendable, Hashable, Identifiable {
     public let preferredTransportLabel: String
     public let multiplexerLabel: String
     public let connectionActionTitle: String
+    /// What the connection button is called out loud.
+    ///
+    /// Separate from `connectionActionTitle` because the visible button sits directly under the device name and
+    /// repeating it would be noise, while a screen reader reaches the button with no such context and would
+    /// otherwise hear "Connect" identically on every card.
+    public let connectionActionAccessibilityLabel: String
     public let metrics: [WorkspaceMetric]
 
     public init(
@@ -73,7 +79,10 @@ public struct WorkspaceDevicePresentation: Sendable, Hashable, Identifiable {
         self.pendingApprovalCount = scopedPendingApprovalCount
         self.preferredTransportLabel = transportLabel
         self.multiplexerLabel = muxLabel
-        self.connectionActionTitle = self.availability == .online ? "Resume" : "Connect"
+        let title = self.availability == .online ? "Resume" : "Connect"
+        self.connectionActionTitle = title
+        self.connectionActionAccessibilityLabel =
+            self.availability == .online ? "\(title) \(self.title)" : "\(title) to \(self.title)"
         self.metrics = [
             WorkspaceMetric(id: "active-sessions", label: "Agent sessions", value: "\(scopedActiveSessionCount)"),
             WorkspaceMetric(id: "pending-approvals", label: "Pending approvals", value: "\(scopedPendingApprovalCount)"),

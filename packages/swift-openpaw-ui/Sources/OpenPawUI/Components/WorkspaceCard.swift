@@ -62,6 +62,7 @@ public struct WorkspaceCard: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(OpenPawTheme.signal)
+            .accessibilityLabel(presentation.connectionActionAccessibilityLabel)
         }
         .padding(OpenPawTheme.Space.large)
         .background(OpenPawTheme.graphite)
