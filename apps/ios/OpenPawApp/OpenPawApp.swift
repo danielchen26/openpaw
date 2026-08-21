@@ -244,6 +244,7 @@ final class AppWiring {
 
     func start() async {
         guard gate.decision == .unlocked else { return }
+        guard model.canRefreshRemoteState else { return }
         await model.refresh()
         model.startFollowing(session: model.selectedSessionID)
     }
@@ -259,6 +260,7 @@ final class AppWiring {
         gate.handleForeground()
         guard gate.decision == .unlocked else { return }
         await terminal.reconnectIfNeeded()
+        guard model.canRefreshRemoteState else { return }
         await model.refresh()
     }
 

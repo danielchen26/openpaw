@@ -231,11 +231,54 @@ struct RootNavigationTests {
         #expect(RootNavigationStyle.style(for: .regular) == .split)
     }
 
-    @Test("The five destinations are stable and complete")
+    @Test("The six destinations are stable and complete, with Home first")
     func destinationsAreComplete() {
-        #expect(ShellDestination.allCases.count == 5)
-        #expect(ShellDestination.allCases.map(\.rawValue) == ["terminal", "chat", "inbox", "repo", "settings"])
+        #expect(ShellDestination.allCases.count == 6)
+        #expect(ShellDestination.allCases.map(\.rawValue) == ["home", "terminal", "chat", "inbox", "repo", "settings"])
+        let home = ShellDestination.allCases[0]
+        #expect(home.title == "Home")
+        #expect(home.glyph == "house")
+        #expect(home.pushesDetail)
         #expect(RepoPane.allCases.map(\.rawValue) == ["diff", "files", "preview", "status"])
+    }
+
+    @MainActor
+    @Test("The shell starts on Home instead of opening a remote terminal")
+    func routerDefaultsToHome() {
+        let router = ShellRouter()
+        #expect(router.destination.rawValue == "home")
+    }
+
+    @MainActor
+    @Test("Remote refresh needs a selected host and a backend")
+    func remoteRefreshRequiresHostAndBackend() {
+        let host = hostRecord()
+        let backend = RecordingBackend()
+
+        let empty = OpenPawModel(hostStore: HostStore(), backend: backend)
+        #expect(empty.canRefreshRemoteState == false)
+
+        let missingBackend = OpenPawModel(hostStore: HostStore(hosts: [host]))
+        #expect(missingBackend.canRefreshRemoteState == false)
+
+        let ready = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        #expect(ready.canRefreshRemoteState)
+
+        ready.selectedHostID = UUID()
+        #expect(ready.canRefreshRemoteState == false)
+    }
+
+    @MainActor
+    @Test("An empty first-run host store never calls the host API")
+    func emptyHostStoreRefreshIsLocalOnly() async {
+        let backend = RecordingBackend()
+        let model = OpenPawModel(hostStore: HostStore(), backend: backend)
+
+        await model.refresh()
+        model.startFollowing(session: model.selectedSessionID)
+
+        #expect(backend.callNames.isEmpty)
+        #expect(model.lastError == nil)
     }
 
     @Test("Layout follows the measured width, because a size class alone lies on macOS")
@@ -272,6 +315,103 @@ struct RootNavigationTests {
         router.openApproval(itemID: "inb_abc")
         #expect(router.destination == .inbox)
         #expect(router.approvalItemID == "inb_abc")
+    }
+}
+
+private func hostRecord() -> HostRecord {
+    HostRecord(nickname: "workshop", hostname: "10.0.0.4", username: "chet", auth: .agentForwarding)
+}
+
+private enum RecordingBackendError: Error {
+    case unexpectedCall
+}
+
+private final class RecordingBackend: OpenPawBackend, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls: [String] = []
+
+    var callNames: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
+    }
+
+    private func record(_ name: String) {
+        lock.lock()
+        calls.append(name)
+        lock.unlock()
+    }
+
+    func health() async throws -> HealthInfo {
+        record("health")
+        return HealthInfo(
+            version: "test", protocolVersion: "1.0", agents: [.claudeCode], capabilities: [], previewPorts: [],
+            adapterVersions: [:])
+    }
+
+    func sessions() async throws -> [SessionSummary] {
+        record("sessions")
+        return []
+    }
+
+    func inbox(status: InboxStatus?) async throws -> [InboxItem] {
+        record("inbox")
+        return []
+    }
+
+    func resolve(item: InboxItem, action: ActionID, answer: String?, detailAcknowledged: Bool) async throws -> ResolveResult {
+        record("resolve")
+        throw RecordingBackendError.unexpectedCall
+    }
+
+    func events(session: String?, afterSeq: UInt64?) -> AsyncThrowingStream<Event, any Error> {
+        record("events")
+        return AsyncThrowingStream { continuation in continuation.finish() }
+    }
+
+    func repos() async throws -> [RepoSummary] {
+        record("repos")
+        return []
+    }
+
+    func repoStatus(_ repo: String) async throws -> RepoStatus {
+        record("repoStatus")
+        throw RecordingBackendError.unexpectedCall
+    }
+
+    func diff(repo: String, mode: DiffMode, path: String?) async throws -> Diff {
+        record("diff")
+        throw RecordingBackendError.unexpectedCall
+    }
+
+    func tree(repo: String, ref: String, path: String) async throws -> [TreeEntry] {
+        record("tree")
+        throw RecordingBackendError.unexpectedCall
+    }
+
+    func blob(repo: String, ref: String, path: String) async throws -> Blob {
+        record("blob")
+        throw RecordingBackendError.unexpectedCall
+    }
+
+    func search(repo: String, query: String, path: String?) async throws -> [ContentMatch] {
+        record("search")
+        throw RecordingBackendError.unexpectedCall
+    }
+
+    func upload(data: Data, filename: String) async throws -> UploadResult {
+        record("upload")
+        throw RecordingBackendError.unexpectedCall
+    }
+
+    func previewURL(port: Int, path: String) throws -> URL {
+        record("previewURL")
+        return URL(string: "http://127.0.0.1:\(port)\(path)")!
+    }
+
+    func audit(limit: Int) async throws -> [AuditEntry] {
+        record("audit")
+        throw RecordingBackendError.unexpectedCall
     }
 }
 

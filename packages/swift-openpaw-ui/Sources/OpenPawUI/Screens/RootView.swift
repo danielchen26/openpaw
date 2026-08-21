@@ -45,6 +45,7 @@ public enum RootNavigationStyle: String, Sendable, Hashable, CaseIterable {
 // MARK: - Destinations
 
 public enum ShellDestination: String, Sendable, Hashable, CaseIterable, Identifiable {
+    case home
     case terminal
     case chat
     case inbox
@@ -55,6 +56,7 @@ public enum ShellDestination: String, Sendable, Hashable, CaseIterable, Identifi
 
     public var title: String {
         switch self {
+        case .home: "Home"
         case .terminal: "Terminal"
         case .chat: "Chat"
         case .inbox: "Inbox"
@@ -65,6 +67,7 @@ public enum ShellDestination: String, Sendable, Hashable, CaseIterable, Identifi
 
     public var glyph: String {
         switch self {
+        case .home: "house"
         case .terminal: "terminal"
         case .chat: "text.bubble"
         case .inbox: "tray.full"
@@ -79,7 +82,7 @@ public enum ShellDestination: String, Sendable, Hashable, CaseIterable, Identifi
     public var pushesDetail: Bool {
         switch self {
         case .terminal: false
-        case .chat, .inbox, .repo, .settings: true
+        case .home, .chat, .inbox, .repo, .settings: true
         }
     }
 }
@@ -114,7 +117,7 @@ public enum RepoPane: String, Sendable, Hashable, CaseIterable, Identifiable {
 @MainActor
 @Observable
 public final class ShellRouter {
-    public var destination: ShellDestination = .terminal
+    public var destination: ShellDestination = .home
     public var repoPane: RepoPane = .diff
     /// Path the repo panes should scroll to, set when a transcript or a status row hands one over.
     public var repoFocusPath: String?
@@ -201,6 +204,7 @@ public struct RootView: View {
             if model.selectedHostID == nil {
                 model.selectedHostID = model.hostStore.hosts.first?.id
             }
+            guard model.canRefreshRemoteState else { return }
             await model.refresh()
             model.startFollowing(session: model.selectedSessionID)
         }
@@ -437,6 +441,8 @@ public struct RootView: View {
     @ViewBuilder
     private func content(_ destination: ShellDestination, width: RootWidth) -> some View {
         switch destination {
+        case .home:
+            EmptyView()
         case .terminal:
             TerminalScreenView(
                 model: model,

@@ -81,6 +81,10 @@ public final class OpenPawModel {
         return hostStore.hosts.first { $0.id == selectedHostID }
     }
 
+    public var canRefreshRemoteState: Bool {
+        backend != nil && selectedHost != nil
+    }
+
     public var pendingInbox: [InboxItem] {
         inbox.filter { $0.status == .pending }.sorted(by: Self.inboxOrder)
     }
@@ -152,7 +156,7 @@ public final class OpenPawModel {
     // MARK: - Loading
 
     public func refresh() async {
-        guard let backend else { return }
+        guard canRefreshRemoteState, let backend else { return }
         isRefreshing = true
         defer { isRefreshing = false }
         do {
@@ -174,7 +178,7 @@ public final class OpenPawModel {
     /// Follows the host's SSE stream. Resumes from the highest `seq` we already hold, which is exact because
     /// `seq` is dense per session and `event_id` is content addressed, so a reconnect cannot duplicate a row.
     public func startFollowing(session sessionID: String?) {
-        guard let backend else { return }
+        guard canRefreshRemoteState, let backend else { return }
         eventTask?.cancel()
         let afterSeq = sessionID.flatMap { transcripts[$0]?.map(\.seq).max() }
         eventTask = Task { [weak self] in
