@@ -41,6 +41,11 @@ public struct DictationRuntimeTurnID: Sendable, Hashable {
     fileprivate let generation: Int
 }
 
+public struct DictationRuntimeReplacement: Sendable, Hashable {
+    public let newTurn: DictationRuntimeTurnID
+    public let replacedTurn: DictationRuntimeTurnID?
+}
+
 public struct DictationRuntimeLifecycle: Sendable, Hashable {
     private var generation = 0
     private var activeTurn: DictationRuntimeTurnID?
@@ -54,6 +59,22 @@ public struct DictationRuntimeLifecycle: Sendable, Hashable {
         activeTurn = turn
         lateFinalTurn = nil
         return turn
+    }
+
+    public mutating func prepareReplacementTurn() -> DictationRuntimeReplacement {
+        generation += 1
+        return DictationRuntimeReplacement(
+            newTurn: DictationRuntimeTurnID(generation: generation),
+            replacedTurn: activeTurn
+        )
+    }
+
+    @discardableResult
+    public mutating func activatePreparedTurn(_ turn: DictationRuntimeTurnID) -> Bool {
+        guard turn.generation == generation else { return false }
+        activeTurn = turn
+        lateFinalTurn = nil
+        return true
     }
 
     public mutating func stop() {

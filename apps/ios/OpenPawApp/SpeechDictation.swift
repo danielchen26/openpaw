@@ -122,7 +122,6 @@ private actor DictationSession {
     func beginTurn() -> Int {
         generation += 1
         let turn = generation
-        activeTurn = nil
         lateFinalTurn = nil
         return turn
     }
@@ -203,6 +202,7 @@ private actor DictationSession {
 
         isRunning = true
         activeTurn = turn
+        lateFinalTurn = nil
 
         recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self else { return }
