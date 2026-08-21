@@ -179,6 +179,19 @@ struct OpenPawNotificationsTests {
         #expect(throws: NotificationPayloadError.invalidIdentifier) { try JSONDecoder().decode(NotificationHint.self, from: Data(badActionJSON.utf8)) }
     }
 
+    @Test func directDecodeRejectsTopLevelUnknownForbiddenAliasAndCaseVariantKeys() throws {
+        let probes = [
+            jsonWithTopLevel("extra", value: "1"),
+            jsonWithTopLevel("command", value: "\"rm\""),
+            jsonWithTopLevel("Action_Token", value: "\"x\""),
+            jsonWithTopLevel("actionToken", value: "\"x\""),
+            jsonWithTopLevel("auth", value: "\"x\"")
+        ]
+        for json in probes {
+            #expect(throws: (any Error).self) { try JSONDecoder().decode(NotificationHint.self, from: Data(json.utf8)) }
+        }
+    }
+
     @Test func directDecodeRejectsActionIntentUnknownForbiddenAndAliasKeysByKind() throws {
         let directDecodeProbes = [
             validJSON(id: "direct-extra", action: "{\"extra\":1,\"inbox_id\":\"inbox\",\"type\":\"open_detail\"}"),

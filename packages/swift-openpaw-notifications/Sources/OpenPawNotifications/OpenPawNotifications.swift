@@ -175,6 +175,7 @@ public struct NotificationHint: Hashable, Codable, Sendable {
     }
 
     public init(from decoder: Decoder) throws {
+        try Self.validateTopLevelKeys(decoder)
         let c = try decoder.container(keyedBy: CodingKeys.self)
         guard Set(c.allKeys.map(\.stringValue)) == Self.allowedKeys else { throw NotificationPayloadError.malformed }
         let version = try c.decode(Int.self, forKey: .schemaVersion)
@@ -190,6 +191,16 @@ public struct NotificationHint: Hashable, Codable, Sendable {
     }
 
     private static let allowedKeys: Set<String> = ["schema_version", "id", "host_id", "device_id", "session_id", "inbox_id", "category", "risk", "created_at", "expires_at", "nonce", "title", "action_intent"]
+
+    private static func validateTopLevelKeys(_ decoder: Decoder) throws {
+        let raw = try decoder.container(keyedBy: AnyCodingKey.self)
+        let keys = Set(raw.allKeys.map(\.stringValue))
+        for key in keys {
+            let normalized = key.lowercased().replacingOccurrences(of: "_", with: "").replacingOccurrences(of: "-", with: "")
+            if NotificationPayloadValidator.forbiddenFields.contains(key) || NotificationPayloadValidator.forbiddenFields.contains(normalized) { throw NotificationPayloadError.forbiddenField(key) }
+        }
+        guard keys == allowedKeys else { throw NotificationPayloadError.malformed }
+    }
 }
 
 private enum NotificationOpaqueIDValidator {
