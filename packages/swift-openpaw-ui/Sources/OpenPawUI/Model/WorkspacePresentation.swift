@@ -77,7 +77,7 @@ public struct WorkspaceDevicePresentation: Sendable, Hashable, Identifiable {
         self.metrics = [
             WorkspaceMetric(id: "active-sessions", label: "Agent sessions", value: "\(scopedActiveSessionCount)"),
             WorkspaceMetric(id: "pending-approvals", label: "Pending approvals", value: "\(scopedPendingApprovalCount)"),
-            WorkspaceMetric(id: "transport", label: "Transport", value: transportLabel),
+            WorkspaceMetric(id: "transport", label: "Transport preference", value: transportLabel),
             WorkspaceMetric(id: "multiplexer", label: "Mux preference", value: muxLabel),
         ]
     }
@@ -180,7 +180,7 @@ public struct WorkspaceHomePresentation: Sendable, Hashable {
                     state: session.state
                 )
             }
-        self.pendingApprovals = pendingInbox
+        self.pendingApprovals = pendingInbox.filter { $0.category == .permission }
         self.recentWorkspaces = Self.recentWorkspaces(sessions: sessions, repos: repos)
     }
 
@@ -240,7 +240,7 @@ public struct WorkspaceHomePresentation: Sendable, Hashable {
         var result: [WorkspaceHomeSection] = [.networkSummary]
         if !hosts.isEmpty { result.append(.devices) }
         if sessions.contains(where: { $0.state != .exited }) { result.append(.agentSessions) }
-        if !pendingInbox.isEmpty { result.append(.pendingApprovals) }
+        if pendingInbox.contains(where: { $0.category == .permission }) { result.append(.pendingApprovals) }
         if !recentWorkspaces(sessions: sessions, repos: repos).isEmpty { result.append(.recentWorkspaces) }
         return result
     }

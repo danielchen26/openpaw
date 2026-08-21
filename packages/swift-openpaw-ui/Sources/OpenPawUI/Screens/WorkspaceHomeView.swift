@@ -118,7 +118,7 @@ public struct WorkspaceHomeView: View {
             connection: model.connection,
             lastConnectedAt: Dictionary(uniqueKeysWithValues: model.hostStore.hosts.map { ($0.id, settings.profile(for: $0.id).lastConnectedAt) }.compactMap { id, date in date.map { (id, $0) } }),
             activeSessionCount: model.sessions.filter { $0.state != .exited }.count,
-            pendingApprovalCount: model.pendingInbox.count
+            pendingApprovalCount: model.pendingInbox.filter { $0.category == .permission }.count
         )
     }
 

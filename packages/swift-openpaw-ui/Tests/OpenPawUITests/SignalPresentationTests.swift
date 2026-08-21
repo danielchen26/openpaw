@@ -19,6 +19,7 @@ struct SignalPresentationTests {
     @Test("Every connection signal state has exact semantic presentation")
     func everySignalStateHasExactSemanticPresentation() {
         let expectations: [(state: ConnectionSignalState, label: String, glyph: String, tone: ConnectionSignalTone, rotatesWhenAllowed: Bool)] = [
+            (.unknown, "Not checked", "questionmark.circle", .quiet, false),
             (.discovering, "Discovering", "dot.radiowaves.left.and.right", .quiet, true),
             (.connecting, "Connecting", "arrow.triangle.2.circlepath", .signal, true),
             (.online, "Online", "checkmark.circle.fill", .pulse, false),
@@ -69,11 +70,13 @@ struct SignalPresentationTests {
         #expect(SignalOrb.motionPolicy(reduceMotion: true, appIsActive: true, signal: .connecting).rotates == false)
         #expect(SignalOrb.motionPolicy(reduceMotion: false, appIsActive: false, signal: .connecting).rotates == false)
         #expect(SignalOrb.motionPolicy(reduceMotion: false, appIsActive: true, signal: .offline).rotates == false)
+        #expect(SignalOrb.motionPolicy(reduceMotion: false, appIsActive: true, signal: .unknown).rotates == false)
     }
 
     @Test("Availability maps to connection signal semantics")
     func availabilityMapsToConnectionSignal() {
-        #expect(ConnectionSignal(availability: .unknown).state == .discovering)
+        #expect(ConnectionSignal(availability: .unknown).state == .unknown)
+        #expect(ConnectionSignal(availability: .unknown).label == "Not checked")
         #expect(ConnectionSignal(availability: .connecting).state == .connecting)
         #expect(ConnectionSignal(availability: .online).state == .online)
         #expect(ConnectionSignal(availability: .offline).state == .offline)

@@ -1,6 +1,7 @@
 import SwiftUI
 
 public enum ConnectionSignalState: String, CaseIterable, Sendable, Hashable {
+    case unknown
     case discovering
     case connecting
     case online
@@ -39,7 +40,7 @@ public struct ConnectionSignal: Sendable, Hashable, Identifiable {
 
     public init(availability: DeviceAvailabilityPresentation) {
         switch availability {
-        case .unknown: self.init(.discovering)
+        case .unknown: self.init(.unknown)
         case .connecting: self.init(.connecting)
         case .online: self.init(.online)
         case .offline: self.init(.offline)
@@ -49,6 +50,7 @@ public struct ConnectionSignal: Sendable, Hashable, Identifiable {
 
     public var label: String {
         switch state {
+        case .unknown: "Not checked"
         case .discovering: "Discovering"
         case .connecting: "Connecting"
         case .online: "Online"
@@ -61,6 +63,7 @@ public struct ConnectionSignal: Sendable, Hashable, Identifiable {
 
     public var glyph: String {
         switch state {
+        case .unknown: "questionmark.circle"
         case .discovering: "dot.radiowaves.left.and.right"
         case .connecting: "arrow.triangle.2.circlepath"
         case .online: "checkmark.circle.fill"
@@ -73,6 +76,7 @@ public struct ConnectionSignal: Sendable, Hashable, Identifiable {
 
     public var tone: ConnectionSignalTone {
         switch state {
+        case .unknown: .quiet
         case .discovering: .quiet
         case .connecting: .signal
         case .online: .pulse

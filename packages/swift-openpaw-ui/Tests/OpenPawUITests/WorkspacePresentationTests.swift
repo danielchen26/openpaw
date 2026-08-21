@@ -169,9 +169,22 @@ struct WorkspacePresentationTests {
         #expect(card.metrics == [
             WorkspaceMetric(id: "active-sessions", label: "Agent sessions", value: "3"),
             WorkspaceMetric(id: "pending-approvals", label: "Pending approvals", value: "2"),
-            WorkspaceMetric(id: "transport", label: "Transport", value: "Mosh"),
+            WorkspaceMetric(id: "transport", label: "Transport preference", value: "Mosh"),
             WorkspaceMetric(id: "multiplexer", label: "Mux preference", value: "Zellij"),
         ])
+    }
+
+    @Test("Home pending approvals include only permission approvals while preserving pending inbox permission order")
+    func homePendingApprovalsAreOnlyPermissionsInInboxOrder() {
+        let question = inbox("question", status: .pending, category: .question, createdAt: Date(timeIntervalSince1970: 0))
+        let laterPermission = inbox("later", status: .pending, category: .permission, createdAt: Date(timeIntervalSince1970: 10))
+        let completion = inbox("completion", status: .pending, category: .completion, createdAt: Date(timeIntervalSince1970: 1))
+        let earlierPermission = inbox("earlier", status: .pending, category: .permission, createdAt: Date(timeIntervalSince1970: 5))
+
+        let pendingInbox = [question, laterPermission, completion, earlierPermission]
+        let presentation = WorkspaceHomePresentation(sessions: [], pendingInbox: pendingInbox, repos: [])
+
+        #expect(presentation.pendingApprovals.map(\.id.rawValue) == ["later", "earlier"])
     }
 
     @Test("Devices sort connected selected host first, then recency, then normalized nickname")
@@ -254,15 +267,20 @@ private func resolvedApproval(_ id: String) -> InboxItem {
     inbox(id, status: .resolved)
 }
 
-private func inbox(_ id: String, status: InboxStatus) -> InboxItem {
+private func inbox(
+    _ id: String,
+    status: InboxStatus,
+    category: InboxCategory = .permission,
+    createdAt: Date = Date(timeIntervalSince1970: 0)
+) -> InboxItem {
     InboxItem(
         id: InboxID(rawValue: id),
         sessionID: SessionID(rawValue: "session-\(id)"),
         agent: .claudeCode,
-        category: .permission,
+        category: category,
         title: "Approval",
         actions: [.approveOnce, .deny],
-        createdAt: Date(timeIntervalSince1970: 0),
+        createdAt: createdAt,
         status: status,
         sourceEventID: EventID(rawValue: "event-\(id)")
     )
