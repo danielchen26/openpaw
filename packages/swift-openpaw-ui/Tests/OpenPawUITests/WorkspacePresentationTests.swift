@@ -120,6 +120,32 @@ struct WorkspacePresentationTests {
         #expect(card.metrics.first { $0.id == "active-sessions" }?.value == "1")
     }
 
+    @MainActor
+    @Test("No selected host keeps all cards unscoped from shared connection and counts")
+    func noSelectedHostKeepsAllCardsUnscopedFromSharedConnectionAndCounts() {
+        let first = fixture(nickname: "first")
+        let second = fixture(nickname: "second", lastSuccessfulTransport: .ssh)
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]))
+        model.selectedHostID = nil
+        model.connection = .failed(.connectionFailed("shared failure"))
+        model.sessions = [session("one"), session("two")]
+        model.inbox = [pendingApproval("approval")]
+
+        let cards = [
+            WorkspaceDevicePresentation(host: first, model: model),
+            WorkspaceDevicePresentation(host: second, model: model),
+        ]
+
+        for card in cards {
+            #expect(card.availability != .online)
+            #expect(card.availability != .failed)
+            #expect(card.activeSessionCount == 0)
+            #expect(card.pendingApprovalCount == 0)
+            #expect(card.metrics.first { $0.id == "active-sessions" }?.value == "0")
+            #expect(card.metrics.first { $0.id == "pending-approvals" }?.value == "0")
+        }
+    }
+
     @Test("Preferred transport and multiplexer use existing display names")
     func displayNamesAreHumanReadable() {
         let card = WorkspaceDevicePresentation(
@@ -132,8 +158,10 @@ struct WorkspacePresentationTests {
 
     @Test("Metrics have deterministic ordering")
     func metricsHaveDeterministicOrdering() {
+        let host = fixture(preferredTransport: .mosh, multiplexerPreference: .zellij)
         let card = WorkspaceDevicePresentation(
-            host: fixture(preferredTransport: .mosh, multiplexerPreference: .zellij),
+            host: host,
+            selectedHostID: host.id,
             activeSessionCount: 3,
             pendingApprovalCount: 2
         )

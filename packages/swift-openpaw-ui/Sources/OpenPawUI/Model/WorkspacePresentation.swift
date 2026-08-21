@@ -54,7 +54,7 @@ public struct WorkspaceDevicePresentation: Sendable, Hashable, Identifiable {
         activeSessionCount: Int = 0,
         pendingApprovalCount: Int = 0
     ) {
-        let isSelected = selectedHostID.map { $0 == host.id } ?? true
+        let isSelected = selectedHostID.map { $0 == host.id } ?? false
         let scopedActiveSessionCount = isSelected ? activeSessionCount : 0
         let scopedPendingApprovalCount = isSelected ? pendingApprovalCount : 0
         let transportLabel = host.preferredTransport?.displayName ?? "Auto"
