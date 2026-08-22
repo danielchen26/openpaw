@@ -114,6 +114,51 @@ final class LocalDictationAccuracyTests: XCTestCase {
             "the transcript has leading or trailing whitespace, which lands in the composer")
     }
 
+    /// The guard that keeps a simulator from taking the app down, asserted where the danger actually is.
+    ///
+    /// Inverted on purpose: this is the one test in the file that runs on a simulator and skips on a phone. The
+    /// other two need hardware, so without this the whole file would be green-by-absence in CI, which is the state
+    /// a test file drifts into and rots in. Here the failure of the guard *is* the crash — if `state(of:)` ever
+    /// reports installed again on a simulator, the factory hands back an engine, the user holds the button, and
+    /// Metal aborts the process. So this asserts the three separate doors are all shut.
+    func testLocalEnginesAreRefusedOnASimulatorRatherThanCrashing() async throws {
+        try XCTSkipUnless(isSimulator, "this asserts the simulator guard, and there is no guard on a phone")
+        let store = await MainActor.run { LocalASRModelStore() }
+
+        for choice in DictationEngineChoice.allCases where choice.requiresDownload {
+            let state = await MainActor.run { store.state(of: choice) }
+            guard case .unsupported = state else {
+                return XCTFail("\(choice.displayName) reports \(state) on a simulator, which crashes on load")
+            }
+            XCTAssertFalse(state.isInstalled, "\(choice.displayName) must never look loadable here")
+            XCTAssertFalse(state.isActionable, "\(choice.displayName) must not offer a download that cannot work")
+
+            // The factory is what the push-to-talk hold asks, and nil is what makes it say "unavailable" rather
+            // than arming a ring over an engine that will kill the process.
+            let engine = await MainActor.run {
+                LocalASREngineFactory(store: store).engine(for: choice)
+            }
+            XCTAssertNil(engine, "\(choice.displayName) handed back an engine that aborts on first use")
+
+            // And the loader itself, reachable directly, throws instead of reaching MLX.
+            do {
+                _ = try await store.loadedModel(for: choice)
+                XCTFail("\(choice.displayName) loaded on a simulator, which should be impossible")
+            } catch LocalASRError.simulatorUnsupported {
+                // Correct: a Swift error, which a caller can show, rather than a C++ abort nobody can catch.
+            } catch {
+                XCTFail("\(choice.displayName) threw \(error) rather than naming the simulator")
+            }
+        }
+
+        // Apple's recogniser is untouched by all of this. If the guard ever widened to catch it, dictation would
+        // be gone entirely on a simulator and the settings screen would be inert for no reason.
+        let apple = await MainActor.run {
+            LocalASREngineFactory(store: store).engine(for: .appleSpeech)
+        }
+        XCTAssertNotNil(apple, "Apple's recogniser still has to work on a simulator")
+    }
+
     // MARK: Machinery
 
     /// A sentence as 16 kHz mono float, which is exactly what `LocalASRSession` hands the model from the
