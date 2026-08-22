@@ -112,7 +112,10 @@ public final class OpenPawSettings {
         // Absent means on, matching the lock itself: `bool(forKey:)` reports false for a key that was never written,
         // which would show the switch off while the app was in fact locking on every launch.
         requiresBiometricGate = defaults.object(forKey: Key.biometricGate) as? Bool ?? true
-        dictationLocaleID = defaults.string(forKey: Key.dictationLocale) ?? Locale.current.identifier
+        // Normalised on the way in because the picker's choices are: `Locale.current.identifier` yields `en_US`,
+        // which matches no tag among `["en-US", "zh-CN"]`, so the language field rendered blank on a fresh install.
+        dictationLocaleID = VoiceLocaleChoices.normalize(
+            defaults.string(forKey: Key.dictationLocale) ?? Locale.current.identifier)
         dictationMode =
             defaults.string(forKey: Key.dictationMode).flatMap(DictationMode.init(rawValue:)) ?? .composer
         let storedSize = defaults.double(forKey: Key.fontSize)

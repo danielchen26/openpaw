@@ -360,6 +360,21 @@ struct VoiceCompositionTests {
         #expect(OpenPawSettings.dictationLocaleChoices(deviceLocale: "en_US") == ["en-US", "zh-CN"])
     }
 
+    /// The stored value has to be one of the identifiers the picker offers, or SwiftUI finds no matching tag and
+    /// the control shows no selection at all: "Picker: the selection \"en_US\" is invalid and does not have an
+    /// associated tag". `Locale.current.identifier` uses underscores, while the choices are normalised to hyphens,
+    /// so a fresh install on a US device stored a value its own picker could not display.
+    @MainActor @Test func theStoredDictationLocaleIsOneThePickerOffers() {
+        let defaults = UserDefaults(suiteName: "dictation-locale-\(UUID().uuidString)")!
+        let settings = OpenPawSettings(defaults: defaults)
+
+        #expect(
+            OpenPawSettings.dictationLocaleChoices(deviceLocale: settings.dictationLocaleID)
+                .contains(settings.dictationLocaleID),
+            "the picker cannot show \(settings.dictationLocaleID), so the language field renders blank"
+        )
+    }
+
     @Test func settingsDictationModeMapsToComposerDestination() {
         #expect(VoiceDestination(dictationMode: .composer) == .agent)
         #expect(VoiceDestination(dictationMode: .terminal) == .terminal)
