@@ -55,10 +55,11 @@ func characterErrorRate(reference: String, hypothesis: String) -> Double {
 /// Strips the tags a model may emit around its own output, exactly as `LoadedASRModel` does in the app.
 ///
 /// Duplicated rather than imported because the app target cannot be linked from a macOS command line tool. If
-/// these two ever diverge, the benchmark stops describing what ships.
+/// these two ever diverge, the benchmark stops describing what ships — which happened once already: this used to
+/// also strip anything between angle brackets, and so did the app, until that was found to be deleting shell
+/// redirection out of dictated commands. Keep this identical to `LoadedASRModel.clean`.
 func clean(_ text: String) -> String {
     text
-        .replacingOccurrences(of: "<[^>]{0,40}>", with: "", options: .regularExpression)
         .replacingOccurrences(of: "<\\|[^|]{0,40}\\|>", with: "", options: .regularExpression)
         .trimmingCharacters(in: .whitespacesAndNewlines)
 }

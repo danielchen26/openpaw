@@ -197,6 +197,45 @@ final class LocalDictationAccuracyTests: XCTestCase {
             "an unterminated model tag ate the command: \(stray)")
     }
 
+    /// The benchmark's copy of the cleaner must match the app's.
+    ///
+    /// `tools/dictation-cer` reimplements `clean` because a macOS command line tool cannot link the app target,
+    /// and its comment asks the next person to keep the two in step. A comment is not a mechanism: the two had in
+    /// fact drifted apart the moment the app's copy was fixed, and the only thing that would have noticed is
+    /// somebody rereading both files. Since the benchmark's entire claim is that it measures what ships, a
+    /// divergence makes the numbers in its README quietly wrong.
+    ///
+    /// Compares source text rather than behaviour, because behaviour would need the tool linked in, which is the
+    /// thing that cannot be done.
+    ///
+    /// It has already earned its place: it failed on the first run, on a real divergence introduced minutes
+    /// earlier, before anybody had noticed.
+    func testTheBenchmarkCleanerStillMatchesTheAppsCleaner() throws {
+        // Walks up from this file to the repository root, so it works from any derived-data location.
+        var root = URL(fileURLWithPath: #filePath)
+        while root.pathComponents.count > 1, root.lastPathComponent != "openpaw" {
+            root.deleteLastPathComponent()
+        }
+        let benchmark = root
+            .appendingPathComponent("tools/dictation-cer/Sources/dictation-cer/main.swift")
+        guard let text = try? String(contentsOf: benchmark, encoding: .utf8) else {
+            throw XCTSkip("the benchmark source is not reachable from this checkout")
+        }
+
+        // The regex the app uses, as it appears in Swift source: inside a normal string literal each backslash is
+        // written twice, so this looks doubled compared with the pattern the regex engine actually sees.
+        let appPattern = #"<\\|[^|]{0,40}\\|>"#
+        XCTAssertTrue(
+            text.contains(appPattern),
+            "tools/dictation-cer no longer strips tags the way the app does, so its numbers describe "
+                + "something that does not ship")
+
+        // And it must not have reacquired the one that ate shell redirection.
+        XCTAssertFalse(
+            text.contains(#"<[^>]{0,40}>"#),
+            "tools/dictation-cer strips anything in angle brackets again, which deletes shell redirection")
+    }
+
     // MARK: Machinery
 
     /// A sentence as 16 kHz mono float, which is exactly what `LocalASRSession` hands the model from the
