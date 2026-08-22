@@ -121,6 +121,38 @@ final class LocalDictationAccuracyTests: XCTestCase {
     /// a test file drifts into and rots in. Here the failure of the guard *is* the crash — if `state(of:)` ever
     /// reports installed again on a simulator, the factory hands back an engine, the user holds the button, and
     /// Metal aborts the process. So this asserts the three separate doors are all shut.
+    /// The sentence shown to a user on an unsupported device must stay the sentence the UI test looks for.
+    ///
+    /// `DictationEngineSettingsUITests` finds that row by searching the screen for "real device". That string
+    /// lives here, in the app, and nothing connects the two but hope. Reword this reason and the only thing that
+    /// notices is a four-minute UI test on a simulator, whose failure reads like a broken picker rather than like
+    /// a renamed string. This is the cheap check that fails first and says which it was. It also pins the shape of
+    /// the sentence: a reason a person can act on, not a Metal error, and never a promise that retrying helps.
+    func testTheUnsupportedReasonStaysTheSentenceTheUITestSearchesFor() throws {
+        let reason = LocalASRModelStore.simulatorReason
+        XCTAssertTrue(
+            reason.lowercased().contains("real device"),
+            "DictationEngineSettingsUITests locates the unsupported row by searching for 'real device'. "
+                + "This reason no longer contains it, so that test is now looking for a string nothing shows: "
+                + reason
+        )
+        // Whatever it says, it must not sound like something a second attempt would fix, because nothing here
+        // is retryable — the device has no GPU this model can use, and that will not change on a retry.
+        for misleading in ["try again", "retry", "failed", "error"] {
+            XCTAssertFalse(
+                reason.lowercased().contains(misleading),
+                "the reason reads like a transient failure ('\(misleading)'), inviting a retry that cannot work: "
+                    + reason
+            )
+        }
+        // And it has to fit a settings row rather than wrap into a paragraph.
+        XCTAssertLessThanOrEqual(
+            reason.count, 80,
+            "this has to fit on one settings row; at \(reason.count) characters it will wrap or truncate: "
+                + reason
+        )
+    }
+
     func testLocalEnginesAreRefusedOnASimulatorRatherThanCrashing() async throws {
         try XCTSkipUnless(isSimulator, "this asserts the simulator guard, and there is no guard on a phone")
         let store = await MainActor.run { LocalASRModelStore() }
@@ -184,11 +216,39 @@ final class LocalDictationAccuracyTests: XCTestCase {
             "echo hi > /dev/null 2>&1",
             "python3 -c 'print(1 < 2)'",
             "if [ $a -lt $b ]; then echo '<yes>'; fi",
+            // Angle brackets were the bug, but the rest of shell syntax deserves the same guarantee, because the
+            // next person to reach for a regex here will be aiming at one of these.
+            "ls | grep foo",
+            "echo `date`",
+            "a && b || c",
+            "awk '{print $1}' file",
+            "curl -H 'X-A: b' https://x/y?a=1&b=2",
+            "sed 's/<old>/<new>/g' f.txt",
+            "cat <<EOF > f.txt",
         ] {
             XCTAssertEqual(
                 LoadedASRModel.clean(command), command,
                 "the transcript cleaner rewrote a shell command the user dictated")
         }
+
+        // The exact strings the model produced in the last benchmark run, which is what actually reaches a
+        // terminal. Transcripts, not invented fixtures: if the cleaner damages one of these, the numbers in
+        // tools/dictation-cer/README.md describe an experience nobody is having.
+        for transcript in [
+            "运行 NPM install 安装依赖。",
+            "用 Git Commit 提交这个改动。",
+            "把这个文件 rename 成 index.ts。",
+            "先 C D 到项目根目录，再跑测试。",
+            "这个 pull request 需要 review 一下。",
+            "Run npm install to fetch the dependencies.",
+        ] {
+            XCTAssertEqual(
+                LoadedASRModel.clean(transcript), transcript,
+                "the cleaner altered a transcript the model actually produced in the benchmark")
+        }
+
+        // A tag in the middle is still a tag and still goes, so the fix did not simply stop stripping.
+        XCTAssertEqual(LoadedASRModel.clean("test <|zh|> mid tag"), "test  mid tag")
 
         // A stray opening tag must not swallow the rest of the sentence.
         let stray = LoadedASRModel.clean("<|zh 运行 npm install 安装依赖")

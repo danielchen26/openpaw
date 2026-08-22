@@ -161,8 +161,10 @@ struct DictationEngineChoiceTests {
 
     @Test("a state the user cannot act on says so, and every other one offers a way forward")
     func unsupportedIsNotOfferedAsRetryable() {
-        // The settings row keys its button off `isActionable`, so this is the difference between a device that
-        // cannot run the model saying so once, and it offering a 450 MB download that ends in the same place.
+        // The row switches over the state exhaustively rather than reading this, so that a new state cannot be
+        // silently absorbed. This asserts the two agree: `unsupported` is the one case that draws no button, and
+        // the difference is a device that cannot run the model saying so once, versus offering a 450 MB download
+        // that ends in the same place.
         #expect(!DictationModelState.unsupported("no GPU").isActionable)
         #expect(DictationModelState.absent.isActionable)
         #expect(DictationModelState.failed("network").isActionable)

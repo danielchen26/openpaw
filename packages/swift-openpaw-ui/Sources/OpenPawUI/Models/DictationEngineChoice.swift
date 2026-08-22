@@ -144,8 +144,15 @@ public enum DictationModelState: Sendable, Equatable {
     }
 
     /// Whether the user can do anything about this state, which decides if a row offers a button at all.
+    ///
+    /// The settings row switches over the state exhaustively rather than calling this, and that is on purpose: a
+    /// new state added to this enum should make the row fail to compile until somebody decides what it offers,
+    /// which a boolean would silently answer for them. This exists for callers that only need the question and not
+    /// the answer — and it is asserted in tests, so it cannot drift away from what the row actually does.
     public var isActionable: Bool {
-        if case .unsupported = self { return false }
-        return true
+        switch self {
+        case .unsupported: false
+        case .absent, .downloading, .installed, .failed: true
+        }
     }
 }
