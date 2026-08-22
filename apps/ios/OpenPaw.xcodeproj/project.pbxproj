@@ -39,6 +39,7 @@
 		1A2B3C000000000000000076 /* ParakeetASR in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000066 /* ParakeetASR */; };
 		1A2B3C000000000000000077 /* AudioCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000067 /* AudioCommon */; };
 		1A2B3C00000000000000D200 /* DictationFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D201 /* DictationFlowUITests.swift */; };
+		1A2B3C00000000000000D280 /* DictationEngineSettingsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D281 /* DictationEngineSettingsUITests.swift */; };
 		1A2B3C00000000000000D210 /* ControlDeckUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D211 /* ControlDeckUITests.swift */; };
 
 		1A2B3C00000000000000D231 /* GlassChromeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D230 /* GlassChromeUITests.swift */; };
@@ -96,6 +97,7 @@
 		1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSSHConnectionTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002E /* HostAPIBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAPIBackendTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000D201 /* DictationFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationFlowUITests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000D281 /* DictationEngineSettingsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationEngineSettingsUITests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000D211 /* ControlDeckUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlDeckUITests.swift; sourceTree = "<group>"; };
 
 		1A2B3C00000000000000D230 /* GlassChromeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassChromeUITests.swift; sourceTree = "<group>"; };
@@ -205,6 +207,7 @@
 			children = (
 				1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */,
 				1A2B3C00000000000000D201 /* DictationFlowUITests.swift */,
+				1A2B3C00000000000000D281 /* DictationEngineSettingsUITests.swift */,
 				1A2B3C00000000000000D211 /* ControlDeckUITests.swift */,
 
 				1A2B3C00000000000000D230 /* GlassChromeUITests.swift */,
@@ -387,6 +390,7 @@
 			files = (
 				1A2B3C0000000000000000B0 /* ConnectFlowUITests.swift in Sources */,
 				1A2B3C00000000000000D200 /* DictationFlowUITests.swift in Sources */,
+				1A2B3C00000000000000D280 /* DictationEngineSettingsUITests.swift in Sources */,
 				1A2B3C00000000000000D210 /* ControlDeckUITests.swift in Sources */,
 
 				1A2B3C00000000000000D231 /* GlassChromeUITests.swift in Sources */,

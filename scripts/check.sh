@@ -77,7 +77,36 @@ app_test_step() {
     -quiet test
 }
 
+# One UI class, named explicitly rather than by running the whole suite.
+#
+# Most of OpenPawUITests needs a live host and a seeded key, so running all of it here would spend ten minutes
+# mostly waiting for connections that cannot happen on a clean machine. This class needs neither, and it is the
+# only automated check that the local recognisers are refused rather than fatal: without it, selecting Qwen on a
+# simulator terminates the app the moment anyone holds the dictation button, and every other test in this
+# repository still passes.
+ui_test_step() {
+  if ! xcodebuild -project apps/ios/OpenPaw.xcodeproj -list >/dev/null 2>&1; then
+    printf '   xcodebuild cannot load its plug-ins here; skipping the dictation UI test.\n'
+    return 0
+  fi
+  local destination
+  destination=$(xcrun simctl list devices available -j \
+    | python3 -c 'import json,sys; ds=[d for v in json.load(sys.stdin)["devices"].values() for d in v if d.get("isAvailable")]; print(ds[0]["udid"] if ds else "")')
+  if [ -z "$destination" ]; then
+    printf '   no available iOS Simulator; skipping the dictation UI test.\n'
+    return 0
+  fi
+  in_dir apps/ios xcodebuild \
+    -project OpenPaw.xcodeproj -scheme OpenPaw \
+    -destination "platform=iOS Simulator,id=$destination" \
+    -skipPackagePluginValidation -skipMacroValidation \
+    -only-testing:OpenPawUITests/DictationEngineSettingsUITests \
+    -quiet test
+}
+
 step "app · test" app_test_step
+
+step "app · dictation ui" ui_test_step
 
 step "ui · snapshots" in_dir tools/openpaw-snapshot \
   swift run openpaw-snapshot --output "${TMPDIR:-/tmp}/openpaw-snapshots"
