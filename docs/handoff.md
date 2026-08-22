@@ -35,8 +35,9 @@ It runs, failing fastest first: `cargo fmt --check`, `cargo clippy -D warnings`,
 check that the protocol goldens are unchanged, `swift test` in all four packages, the iOS app build, the headless
 UI snapshot render, and `scripts/smoke.py` end to end against the freshly built daemon.
 
-Latest verified on 2026-08-21: **all canonical steps passed**, including **188 non-blank snapshots** and **39 host
-end-to-end checks**. The script prints the current test counts; do not freeze them here as the suites are growing.
+Latest verified on 2026-08-22: **all canonical steps passed** in 259s, including **276 non-blank snapshots** and
+**39 host end-to-end checks**. The script prints the current test counts; do not freeze them here as the suites
+are growing.
 
 ## Simulator acceptance completed on 2026-08-21
 
@@ -80,9 +81,11 @@ The Milestone 1 app was built, installed and launched on an **iPhone 16 Pro simu
    on, and past that (`MLX_METAL_GPU_ARCH` sets the name by hand) Metal asserts `MTLStorageModePrivate is required
    for heaps`, because MLX allocates shared-storage heaps on the premise of unified memory. Both are aborts inside
    C++, not Swift errors, so nothing can catch them. The app therefore reports the local engines as
-   `.unsupported` on a simulator and refuses to build, download or load one; `LocalDictationAccuracyTests` is
-   written and registered against the app target and skips there with that reason, so a cable is the only thing
-   between this repository and a measured on-device answer.
+   `.unsupported` on a simulator and refuses to build, download or load one, and that refusal is driven through
+   the real screen by `DictationEngineSettingsUITests` — which was confirmed to catch the crash by deleting the
+   guards and watching `XCUIApplicationState` drop to `notRunning`. `LocalDictationAccuracyTests` is written and
+   registered against the app target and skips there with that reason, so a cable is the only thing between this
+   repository and a measured on-device answer.
 4. **Terminal input and media.** Real PTY bytes, rotation resize, hardware keyboard chords, bracketed paste, OSC 8,
    OSC 52 pasteboard handoff, pinch zoom, Pinyin composition and image upload still need a credentialed live session.
 5. **Resilient transport and ecosystem claims.** Production terminal transport is SSH. Native Mosh is not implemented
