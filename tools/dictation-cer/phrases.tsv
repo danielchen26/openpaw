@@ -1,0 +1,8 @@
+zh1	运行 npm install 安装依赖
+zh2	用 git commit 提交这个改动
+zh3	帮我看一下 docker ps 的输出
+zh4	把这个文件 rename 成 index.ts
+zh5	先 cd 到项目根目录再跑测试
+zh6	这个 pull request 需要 review 一下
+en1	run npm install to fetch the dependencies
+en2	commit this change with git commit

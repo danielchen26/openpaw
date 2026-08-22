@@ -25,3 +25,8 @@ Package.resolved.lock
 # Scratch build trees from the no-Xcode iOS typecheck path
 .build-ios/
 .build-*/
+
+# Dictation benchmark clips, synthesised by tools/dictation-cer/make-corpus.sh. Regenerable from phrases.tsv, and
+# a repository is not the place for a WAV corpus.
+tools/dictation-cer/*.wav
+tools/dictation-cer/*.aiff
