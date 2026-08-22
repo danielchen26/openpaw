@@ -143,6 +143,22 @@ struct DictationEngineChoiceTests {
         }
     }
 
+    @Test("the recogniser the screen shows is always one the picker actually offers")
+    func resolvedEngineIsAlwaysOffered() {
+        // A SwiftUI Picker whose selection matches none of its tags renders as an empty box. The recogniser field
+        // is populated from the resolved engine and its options from the same locale filter, so this pairing is
+        // what keeps a user who picked Parakeet and then switched to Chinese from seeing a blank control.
+        for locale in ["en-US", "zh-CN", "zh-Hans-CN", "ja-JP", "de-DE"] {
+            let offered = DictationEngineChoice.choices(forLocale: locale)
+            for stored in DictationEngineChoice.allCases {
+                let resolved = DictationEngineChoice.resolve(stored, forLocale: locale)
+                #expect(
+                    offered.contains(resolved),
+                    "\(stored) in \(locale) resolves to \(resolved), which the picker does not list")
+            }
+        }
+    }
+
     private static func freshDefaults() -> UserDefaults {
         let suite = "openpaw.tests.dictation.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite) ?? .standard

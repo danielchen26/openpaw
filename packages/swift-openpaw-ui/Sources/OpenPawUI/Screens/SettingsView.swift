@@ -491,7 +491,10 @@ public struct SettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if model.dictation?.isAvailable != true {
+                // Only when nothing can be done about it. A local engine whose weights are still absent also has no
+                // live recogniser, but the row above already says "Not downloaded" next to the button that fixes
+                // it, and telling that user their device cannot dictate would be both false and discouraging.
+                if model.dictation?.isAvailable != true, !engineAwaitsDownload {
                     Text("No dictation engine is available on this device, so these settings are inert for now.")
                         .font(OpenPawTheme.Human.caption)
                         .foregroundStyle(OpenPawTheme.warn)
@@ -510,7 +513,7 @@ public struct SettingsView: View {
     private var engineChoice: some View {
         VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
             Text("Recogniser").microLabel()
-            Picker("Recogniser", selection: bind(\.dictationEngine)) {
+            Picker("Recogniser", selection: engineSelection) {
                 ForEach(engineChoices, id: \.self) { choice in
                     Text(choice.displayName).tag(choice)
                 }
@@ -595,6 +598,27 @@ public struct SettingsView: View {
 
     private var engineChoices: [DictationEngineChoice] {
         DictationEngineChoice.choices(forLocale: settings.dictationLocaleID)
+    }
+
+    /// Reads the engine that will actually run and writes the one the user picked.
+    ///
+    /// Asymmetric on purpose. A `Picker` whose selection is not among its tags draws an empty box, and the stored
+    /// choice is exactly that whenever the language rules it out — a user who once chose Parakeet and then switched
+    /// to Chinese was shown a recogniser field with nothing in it. Reading the resolved engine keeps the field
+    /// truthful about what will happen, while writing the raw choice keeps the preference the user expressed, so
+    /// switching the language back restores it.
+    private var engineSelection: Binding<DictationEngineChoice> {
+        Binding(
+            get: { settings.effectiveDictationEngine },
+            set: { settings.dictationEngine = $0 }
+        )
+    }
+
+    /// True when the selected engine simply has not been fetched yet, which is a state the user can leave.
+    private var engineAwaitsDownload: Bool {
+        let choice = settings.effectiveDictationEngine
+        guard choice.requiresDownload else { return false }
+        return !model.dictationModels.state(of: choice).isInstalled
     }
 
     /// Where the user's voice goes, stated per engine rather than once for the screen.

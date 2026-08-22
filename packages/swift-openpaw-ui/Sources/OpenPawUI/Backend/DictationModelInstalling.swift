@@ -44,3 +44,34 @@ public final class UnavailableDictationModelStore: DictationModelInstalling {
     public func cancelInstall(of choice: DictationEngineChoice) {}
     public func remove(_ choice: DictationEngineChoice) {}
 }
+
+/// A store frozen in one state, so a screen can be drawn mid-download without a download.
+///
+/// The states worth looking at — a stalled 1.9 GB fetch, a failure the user has to be told to retry — are the ones
+/// that never occur while a snapshot runner is rendering, which is precisely why they are the ones that rot. This
+/// makes them addressable by name.
+@MainActor
+@Observable
+public final class StubDictationModelStore: DictationModelInstalling {
+    public var states: [DictationEngineChoice: DictationModelState]
+    private let fallback: DictationModelState
+
+    public init(
+        states: [DictationEngineChoice: DictationModelState] = [:],
+        fallback: DictationModelState = .absent
+    ) {
+        self.states = states
+        self.fallback = fallback
+    }
+
+    public func state(of choice: DictationEngineChoice) -> DictationModelState {
+        if let state = states[choice] { return state }
+        return choice.requiresDownload ? fallback : .installed
+    }
+
+    public func install(_ choice: DictationEngineChoice) {
+        states[choice] = .downloading(progress: 0, detail: "Fetching")
+    }
+    public func cancelInstall(of choice: DictationEngineChoice) { states[choice] = .absent }
+    public func remove(_ choice: DictationEngineChoice) { states[choice] = .absent }
+}

@@ -148,7 +148,9 @@ public final class PushToTalkController {
             await engine?.stop()
             // The stream ends when the engine emits its final text; `listenTask` has been writing each update into
             // `transcript`, so awaiting its completion is how the last one is picked up.
-            let waited: Void? = try? await withThrowingTaskGroup(of: Void.self) { group in
+            // Whichever finishes first wins: the model's answer, or the timeout that stops a wedged model from
+            // leaving the UI transcribing forever. Either way whatever text exists is delivered below.
+            _ = try? await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask { _ = await listening?.value }
                 group.addTask {
                     try await Task.sleep(for: PushToTalkController.finalizeTimeout)

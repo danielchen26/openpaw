@@ -440,6 +440,56 @@ enum ScreenCatalog {
             build: { model, _ in AnyView(SettingsView(model: model, settings: OpenPawSettings.preview())) },
             unavailableReason: ""
         ),
+        // The three states of the local-model row. None of them can occur during a headless render on their own —
+        // nothing downloads here — so without these the download button, the progress bar and the failure message
+        // are code no reviewer ever sees until a user hits them.
+        Screen(
+            name: "SettingsView-modelAbsent",
+            build: { model, _ in
+                let settings = OpenPawSettings.preview()
+                settings.dictationEngine = .qwen3Small
+                model.dictationModels = StubDictationModelStore()
+                return AnyView(SettingsView(model: model, settings: settings))
+            },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "SettingsView-modelDownloading",
+            build: { model, _ in
+                let settings = OpenPawSettings.preview()
+                settings.dictationEngine = .qwen3Large
+                model.dictationModels = StubDictationModelStore(states: [
+                    .qwen3Large: .downloading(progress: 0.42, detail: "Downloading")
+                ])
+                return AnyView(SettingsView(model: model, settings: settings))
+            },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "SettingsView-modelFailed",
+            build: { model, _ in
+                let settings = OpenPawSettings.preview()
+                settings.dictationEngine = .qwen3Small
+                model.dictationModels = StubDictationModelStore(states: [
+                    .qwen3Small: .failed("The network connection was lost.")
+                ])
+                return AnyView(SettingsView(model: model, settings: settings))
+            },
+            unavailableReason: ""
+        ),
+        // Chinese selected while the stored engine is the one that cannot speak it. The screen has to say why the
+        // recogniser it is using is not the one that was picked, and this is the only place that sentence renders.
+        Screen(
+            name: "SettingsView-engineOverruled",
+            build: { model, _ in
+                let settings = OpenPawSettings.preview()
+                settings.dictationEngine = .parakeet
+                settings.dictationLocaleID = "zh-CN"
+                model.dictationModels = StubDictationModelStore()
+                return AnyView(SettingsView(model: model, settings: settings))
+            },
+            unavailableReason: ""
+        ),
         Screen(
             name: "DiagnosticsView",
             build: { model, _ in AnyView(DiagnosticsView(model: model, forwardedPort: 53_871)) },
