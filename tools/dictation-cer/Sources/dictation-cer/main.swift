@@ -7,10 +7,10 @@ import Speech
 // Answers, with numbers, the question the recogniser picker is built around: can this engine hear a Chinese
 // sentence with an English command name in it?
 //
-// This exists because the claim in `DictationEngineChoice` — that Apple's recogniser gets 39% of the characters
-// wrong on "运行 npm install 安装依赖" while a local model gets ~3% wrong — is the entire justification for
-// shipping a 450 MB download, and a justification nobody can re-run is a rumour. Every engine is measured on
-// byte-identical audio through the same call the app itself makes.
+// This exists because the claim in `DictationEngineChoice` — that Apple's recogniser destroys the command name in
+// "运行 npm install 安装依赖" while a local model gets it right — is the entire justification for shipping a
+// 450 MB download, and a justification nobody can re-run is a rumour. Every engine is measured on byte-identical
+// audio through the same call the app itself makes.
 
 // MARK: - Corpus
 

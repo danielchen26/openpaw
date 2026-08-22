@@ -3,11 +3,11 @@ import Foundation
 /// Which recogniser turns a held thumb into words.
 ///
 /// Apple's recogniser is not the only option because it is not good enough at the sentence this product is built
-/// around. Measured on synthesised speech, Apple's on-device recogniser gets 39% of the characters wrong in a
-/// Chinese sentence with an English command name in it — "运行 npm install 安装依赖" — which is exactly how a
-/// bilingual developer talks to a terminal. A local Qwen3-ASR model gets 3% wrong on the same audio. That gap is
-/// the whole reason this enum exists: the choice is not a preference between equivalent engines, it is a choice
-/// between one that can hear the user and one that cannot.
+/// around. Measured by `tools/dictation-cer`, Apple's on-device recogniser gets 44% of the characters wrong in a
+/// Chinese sentence with an English command name in it — "运行 npm install 安装依赖", which it hears as
+/// "运行BPM in so安装" — and averages 22% across the benchmark corpus. Qwen3-ASR 0.6B gets that sentence exactly
+/// right and averages 2%. That gap is the whole reason this enum exists: the choice is not a preference between
+/// equivalent engines, it is a choice between one that can hear the user and one that cannot.
 ///
 /// The cost of the better answer is a model download and a slower turnaround, so the choice stays the user's.
 public enum DictationEngineChoice: String, Codable, Sendable, CaseIterable, Hashable {

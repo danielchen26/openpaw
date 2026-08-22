@@ -6,10 +6,11 @@ import Qwen3ASR
 
 /// Push-to-talk backed by a speech model that lives on this phone.
 ///
-/// Exists because Apple's recogniser cannot hear this product's core sentence. Measured on synthesised speech,
-/// `SFSpeechRecognizer` gets 39% of the characters wrong in "运行 npm install 安装依赖" — a Chinese sentence with an
-/// English command in it — while Qwen3-ASR gets 3% wrong on the same audio. A terminal client for bilingual
-/// developers that mishears every second command is not usable, and no amount of UI work fixes it.
+/// Exists because Apple's recogniser cannot hear this product's core sentence. Measured by `tools/dictation-cer`,
+/// `SFSpeechRecognizer` turns "运行 npm install 安装依赖" into "运行BPM in so安装" — 44% of the characters wrong,
+/// and the part it destroys is the command name, which is the only part that has to be exact. Qwen3-ASR gets that
+/// sentence right. A terminal client for bilingual developers that mishears every second command is not usable,
+/// and no amount of UI work fixes it.
 ///
 /// The shape is different from `SpeechDictation` in one way that reaches the UI: there are no partial results.
 /// These models transcribe a complete recording, so the audio is buffered while the finger is down and handed over
