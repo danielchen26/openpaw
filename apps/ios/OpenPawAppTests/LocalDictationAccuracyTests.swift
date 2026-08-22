@@ -114,13 +114,98 @@ final class LocalDictationAccuracyTests: XCTestCase {
             "the transcript has leading or trailing whitespace, which lands in the composer")
     }
 
-    /// The guard that keeps a simulator from taking the app down, asserted where the danger actually is.
+    /// The scoring behind the on-device verdict must discriminate, and the tag test must not be redundant.
     ///
-    /// Inverted on purpose: this is the one test in the file that runs on a simulator and skips on a phone. The
-    /// other two need hardware, so without this the whole file would be green-by-absence in CI, which is the state
-    /// a test file drifts into and rots in. Here the failure of the guard *is* the crash — if `state(of:)` ever
-    /// reports installed again on a simulator, the factory hands back an engine, the user holds the button, and
-    /// Metal aborts the process. So this asserts the three separate doors are all shut.
+    /// `characterErrorRate` decides whether the accuracy test passes, and it has never run in this repository
+    /// either. A scorer that returned 0 on anything would make that test pass vacuously on the first phone that
+    /// plugs in, and it would be believed. So this pins it against the transcripts both recognisers actually
+    /// produced: Apple scores 0.379 on the three sentences and Qwen 0.0, which puts the 0.15 threshold in the
+    /// gap rather than close to either side.
+    ///
+    /// The second half is the part worth keeping. `testTranscriptsArriveWithoutModelTags` looks redundant beside
+    /// an accuracy test, and the obvious cleanup is to merge them. It is not redundant: a leaked `<|zh|>` on a
+    /// long sentence costs 0.146 character error, which is *under* the threshold, so a transcript that pastes
+    /// `<|zh|>` into the user's terminal would pass the accuracy test outright. This asserts that, so the next
+    /// person to reach for the merge sees why it stays.
+    func testTheScoringDiscriminatesAndALeakedTagCanStillSlipPastIt() {
+        let truth = Self.sentences
+        let apple = ["运行BPM in so安装", "用jacket提交这个改动", "这个poo request需要rave一下"]
+        let qwen = [
+            "运行 NPM install 安装依赖。", "用 Git Commit 提交这个改动。",
+            "这个 pull request 需要 review 一下。",
+        ]
+
+        // A scorer that cannot tell these apart cannot be the basis of a verdict.
+        let appleMean = zip(apple, truth)
+            .map { DictationAccuracyTests.characterErrorRate(heard: $0, spoken: $1) }
+            .reduce(0, +) / Double(truth.count)
+        let qwenMean = zip(qwen, truth)
+            .map { DictationAccuracyTests.characterErrorRate(heard: $0, spoken: $1) }
+            .reduce(0, +) / Double(truth.count)
+
+        XCTAssertGreaterThan(
+            appleMean, 0.15,
+            "the scorer rates Apple's real transcripts at \(appleMean), below the threshold the on-device test "
+                + "uses. Either the scoring is broken or the threshold no longer means anything.")
+        XCTAssertLessThan(
+            qwenMean, 0.15,
+            "the scorer rates the model's real transcripts at \(qwenMean), so the on-device test would fail on "
+                + "output that is actually correct.")
+
+        // Identical strings must be free, or every threshold is measuring the scorer's own noise.
+        XCTAssertEqual(DictationAccuracyTests.characterErrorRate(heard: truth[0], spoken: truth[0]), 0)
+        // And an empty transcript must be a total loss, not a free pass.
+        XCTAssertEqual(DictationAccuracyTests.characterErrorRate(heard: "", spoken: truth[0]), 1)
+
+        // Why the tag test is separate: on a sentence of ordinary length, a leaked tag hides under the threshold.
+        let long = "这个 pull request 需要 review 一下然后合并到主分支再通知团队里的所有人"
+        let leaked = DictationAccuracyTests.characterErrorRate(heard: "<|zh|>" + long, spoken: long)
+        XCTAssertLessThan(
+            leaked, 0.15,
+            "a leaked model tag now scores \(leaked), above the accuracy threshold. If that stays true the tag "
+                + "test really is redundant, but until then, deleting it lets `<|zh|>` reach a terminal with the "
+                + "accuracy test still green.")
+    }
+
+    /// The audio harness the on-device tests depend on must actually produce audio, checked where it can run.
+    ///
+    /// The two accuracy tests above skip on every machine in this repository, so nothing in them has ever
+    /// executed — including `synthesise` and `readSamples`, which are the parts most likely to be quietly
+    /// broken. A phone arrives, the tests finally run, and they fail on a nil buffer or a wrong sample rate,
+    /// which reads as "the model is bad" rather than "the test harness never worked". That would waste the one
+    /// scarce thing here, which is time with hardware plugged in.
+    ///
+    /// Speech synthesis and audio conversion need no GPU, so this runs anywhere and pins the contract the
+    /// accuracy tests assume: real samples arrive, at the 16 kHz mono the model expects, long enough to be a
+    /// sentence and not silence. It deliberately does not transcribe anything.
+    func testTheAudioHarnessTheOnDeviceTestsRelyOnActuallyProducesSamples() throws {
+        let sentence = Self.sentences[0]
+        guard let samples = try Self.synthesise(sentence, language: "zh-CN") else {
+            throw XCTSkip(
+                "no Chinese voice is installed on this machine, so synthesis produced nothing. The on-device "
+                    + "accuracy tests would skip here too rather than fail.")
+        }
+
+        // A sentence at rate 0.45, resampled to 16 kHz, cannot be shorter than about a second. Anything less
+        // means the write callback ended early and the accuracy tests would be transcribing a fragment.
+        XCTAssertGreaterThan(
+            samples.count, 16_000,
+            "synthesis produced \(samples.count) samples, under a second at 16 kHz, for: \(sentence)")
+
+        // Silence would still satisfy a length check while making every transcript empty, and an empty
+        // transcript scores 100% error, which looks exactly like a bad model.
+        let peak = samples.map(abs).max() ?? 0
+        XCTAssertGreaterThan(
+            peak, 0.01, "the synthesised audio is silent (peak \(peak)); the model would hear nothing")
+
+        // The wrapper hands these straight to the model, which assumes normalised float samples. Values outside
+        // this range mean the conversion is wrong and inference would be garbage in a way no assertion names.
+        XCTAssertLessThanOrEqual(peak, 1.0, "samples are not normalised floats (peak \(peak))")
+        XCTAssertFalse(
+            samples.contains { $0.isNaN || $0.isInfinite },
+            "the converted audio contains NaN or infinite samples")
+    }
+
     /// The sentence shown to a user on an unsupported device must stay the sentence the UI test looks for.
     ///
     /// `DictationEngineSettingsUITests` finds that row by searching the screen for "real device". That string
@@ -153,6 +238,13 @@ final class LocalDictationAccuracyTests: XCTestCase {
         )
     }
 
+    /// The guard that keeps a simulator from taking the app down, asserted where the danger actually is.
+    ///
+    /// Inverted on purpose: this is the one test in the file that runs on a simulator and skips on a phone. The
+    /// other two need hardware, so without this the whole file would be green-by-absence in CI, which is the state
+    /// a test file drifts into and rots in. Here the failure of the guard *is* the crash — if `state(of:)` ever
+    /// reports installed again on a simulator, the factory hands back an engine, the user holds the button, and
+    /// Metal aborts the process. So this asserts the three separate doors are all shut.
     func testLocalEnginesAreRefusedOnASimulatorRatherThanCrashing() async throws {
         try XCTSkipUnless(isSimulator, "this asserts the simulator guard, and there is no guard on a phone")
         let store = await MainActor.run { LocalASRModelStore() }
