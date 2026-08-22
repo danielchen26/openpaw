@@ -165,14 +165,117 @@ struct PushToTalkControllerTests {
         #expect(controller.transcript.isEmpty)
         #expect(controller.ring == nil)
     }
+
+    @Test("a model that only answers after the microphone closes still gets its words delivered")
+    func nonStreamingEngineCommitsAfterStop() async {
+        // Apple's recogniser has text by the time the finger lifts. A downloaded Qwen3 or Parakeet model has
+        // nothing until the recording is handed to it whole, so the release path that reads `transcript` and
+        // commits would deliver "" and lose the sentence entirely. This is the bug that would make the better
+        // engines look broken while the worse one worked.
+        let engine = FakeEngine(deliversFinalAfterStop: true)
+        let controller = PushToTalkController()
+        controller.configure(engine: engine, locale: Locale(identifier: "zh-CN"), mode: .terminal)
+
+        var committed: [String] = []
+        controller.onCommit = { committed.append($0) }
+
+        controller.touchBegan(at: CGPoint(x: 100, y: 200))
+        controller.arm()
+        await until { engine.startedNow }
+        try? await Task.sleep(for: PushToTalk.minimumUtterance + .milliseconds(60))
+
+        // Nothing was heard while the finger was down, exactly as a whole-utterance model behaves.
+        #expect(controller.transcript.isEmpty)
+        controller.touchEnded()
+
+        // The words arrive after the microphone closed, which is the whole point of the state.
+        await until { engine.stoppedNow }
+        await engine.emitFinal("运行 npm install 安装依赖")
+
+        await until { !committed.isEmpty }
+        #expect(committed == ["运行 npm install 安装依赖"])
+        #expect(controller.transcript.isEmpty)
+        #expect(controller.isTranscribing == false, "the spinner must not outlive the answer it was waiting for")
+    }
+
+    @Test("the user is told the model is still thinking rather than shown nothing")
+    func nonStreamingEngineReportsTranscribing() async {
+        // Without this the release looks identical to a dropped sentence for as long as the model takes, and the
+        // user's next move is to hold and say it again, producing two copies of the command.
+        let engine = FakeEngine(deliversFinalAfterStop: true)
+        let controller = PushToTalkController()
+        controller.configure(engine: engine, locale: .current, mode: .composer)
+
+        controller.touchBegan(at: CGPoint(x: 10, y: 10))
+        controller.arm()
+        await until { engine.startedNow }
+        try? await Task.sleep(for: PushToTalk.minimumUtterance + .milliseconds(60))
+        controller.touchEnded()
+
+        await until { controller.isTranscribing }
+        #expect(controller.isTranscribing)
+
+        await engine.emitFinal("hello")
+        await until { !controller.isTranscribing }
+        #expect(controller.isTranscribing == false)
+    }
+
+    @Test("holding again while a model is still thinking does not paste the old sentence into the new one")
+    func newHoldSupersedesPendingFinalize() async {
+        let engine = FakeEngine(deliversFinalAfterStop: true)
+        let controller = PushToTalkController()
+        controller.configure(engine: engine, locale: .current, mode: .terminal)
+
+        var committed: [String] = []
+        controller.onCommit = { committed.append($0) }
+
+        controller.touchBegan(at: CGPoint(x: 10, y: 10))
+        controller.arm()
+        try? await Task.sleep(for: PushToTalk.minimumUtterance + .milliseconds(60))
+        controller.touchEnded()
+        await until { controller.isTranscribing }
+
+        // The user gave up waiting and started a second sentence. The abandoned answer must not land in it.
+        controller.touchBegan(at: CGPoint(x: 20, y: 20))
+        controller.arm()
+        #expect(controller.isTranscribing == false)
+
+        await engine.emitFinal("stale words")
+        try? await Task.sleep(for: .milliseconds(80))
+        #expect(committed.isEmpty, "an answer to a hold the user abandoned is not something they asked to send")
+    }
+
+    @Test("a slip of the finger says nothing even when the model would have answered")
+    func nonStreamingSlipIsDiscarded() async {
+        let engine = FakeEngine(deliversFinalAfterStop: true)
+        let controller = PushToTalkController()
+        controller.configure(engine: engine, locale: .current, mode: .terminal)
+
+        var committed: [String] = []
+        controller.onCommit = { committed.append($0) }
+
+        controller.touchBegan(at: CGPoint(x: 10, y: 10))
+        controller.arm()
+        controller.touchEnded()
+
+        await engine.emitFinal("uh")
+        try? await Task.sleep(for: .milliseconds(80))
+        #expect(committed.isEmpty)
+        #expect(controller.isTranscribing == false)
+    }
 }
 
 private actor FakeEngine: DictationEngine {
     nonisolated var isAvailable: Bool { true }
+    nonisolated let deliversFinalAfterStop: Bool
     private(set) var requestedModes: [DictationMode] = []
     private(set) var startCount = 0
     private(set) var stopCount = 0
     private var continuation: AsyncThrowingStream<DictationUpdate, any Error>.Continuation?
+
+    init(deliversFinalAfterStop: Bool = false) {
+        self.deliversFinalAfterStop = deliversFinalAfterStop
+    }
 
     nonisolated func transcribe(locale: Locale, mode: DictationMode)
         -> AsyncThrowingStream<DictationUpdate, any Error>
@@ -185,7 +288,9 @@ private actor FakeEngine: DictationEngine {
     func stop() async {
         stopCount += 1
         stopped.set()
-        continuation?.finish()
+        // A whole-utterance model has not produced its text when `stop` returns: the recording is only handed to
+        // the model at that point. Finishing the stream here would model the wrong engine.
+        if !deliversFinalAfterStop { continuation?.finish() }
     }
 
     /// Non-isolated peeks so a test can wait on the actor without serialising behind its own await.
@@ -199,6 +304,15 @@ private actor FakeEngine: DictationEngine {
             try? await Task.sleep(for: .milliseconds(5))
         }
         continuation?.yield(DictationUpdate(text: text, isFinal: false))
+    }
+
+    /// The single answer a non-streaming model produces once the microphone has closed.
+    func emitFinal(_ text: String) async {
+        for _ in 0..<200 where continuation == nil {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        continuation?.yield(DictationUpdate(text: text, isFinal: true))
+        continuation?.finish()
     }
 
     private func began(

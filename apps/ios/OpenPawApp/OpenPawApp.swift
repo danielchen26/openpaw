@@ -103,6 +103,13 @@ struct AppShell: View {
                 break
             }
         }
+        // Loaded speech weights are the largest thing this app holds, and the system asking for memory back is the
+        // one moment where keeping them is worse than reloading them.
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)
+        ) { _ in
+            wiring.handleMemoryWarning()
+        }
     }
 }
 
@@ -122,6 +129,9 @@ final class AppWiring {
     let hostAPI: HostAPIBackend
     let gate: GateController
     let restorationStore = LocalSessionRestorationStore()
+    /// Downloaded speech models. Held so the app can hand them back on a memory warning, which the model layer
+    /// has no way to hear.
+    let asrModels: LocalASRModelStore
 
     /// A device preference, so it lives in `UserDefaults` rather than in the model, which holds host state.
     var terminalFontSize: CGFloat {
@@ -220,12 +230,17 @@ final class AppWiring {
         let hostAPI = HostAPIBackend(
             forwarder: SSHLoopbackForwarder(connection: { await transportBox.get()?.connection })
         )
+        let asrModels = LocalASRModelStore()
+        let appleSpeech = SpeechDictation()
         let model = OpenPawModel(
             hostStore: hosts.load(),
             backend: hostAPI,
             terminal: terminal,
-            dictation: SpeechDictation()
+            dictation: appleSpeech,
+            dictationModels: asrModels,
+            dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech)
         )
+        self.asrModels = asrModels
 
         let stored = UserDefaults.standard.double(forKey: Self.fontSizeKey)
         terminalFontSize = stored > 0 ? CGFloat(stored) : TerminalSurface.defaultFontSize
@@ -276,6 +291,13 @@ final class AppWiring {
         gate.handleBackground()
         recordBareShellRestorationPlanIfNeeded()
         persistHosts()
+    }
+
+    /// The system is short of memory. A resident speech model is hundreds of megabytes held for a feature the user
+    /// may not touch again this session, so it goes first — losing it costs one slow reload, and not losing it
+    /// costs the whole app being killed mid-session.
+    func handleMemoryWarning() {
+        asrModels.releaseLoadedModels()
     }
 
     private func recordBareShellRestorationPlanIfNeeded() {

@@ -100,6 +100,9 @@ public struct DictationRuntimeLifecycle: Sendable, Hashable {
 
 public enum VoicePrivacyDisclosure {
     public static let appleSpeech = "Speech may use Apple's on-device recognizer. If on-device recognition is unavailable for the selected language or device, Apple may use fallback recognition outside this app."
+    /// A downloaded model runs inside this app's process. The only network access it involves is the one-time
+    /// weight fetch, which is worth naming because that download is the thing the user consented to.
+    public static let localModel = "Speech is transcribed by a model stored on this device, inside this app. Audio never leaves the phone, and the only network access is the one-time model download."
 }
 
 public enum VoiceTerminalActionController {

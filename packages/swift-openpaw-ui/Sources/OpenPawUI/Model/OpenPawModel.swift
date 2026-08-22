@@ -30,6 +30,12 @@ public final class OpenPawModel {
     public private(set) var terminal: (any TerminalBackend)?
     public private(set) var structuredBackendReady = false
     public var dictation: (any DictationEngine)?
+    /// Fetches weights for the engines that are not built into iOS. Defaults to a store that downloads nothing, so
+    /// a preview or a test that constructs a model cannot start a gigabyte transfer by rendering a screen.
+    public var dictationModels: any DictationModelInstalling = UnavailableDictationModelStore()
+    /// Builds the engine for whichever recogniser the user picked. Nil in previews and tests, where the injected
+    /// `dictation` engine (usually none) stands on its own.
+    @ObservationIgnored public var dictationEngineFactory: (any DictationEngineMaking)?
     /// The last thing the user said while holding the screen, staged for whichever screen is on top.
     ///
     /// Staged rather than executed on purpose. Speech recognition is wrong often enough that running what it
@@ -94,12 +100,16 @@ public final class OpenPawModel {
         hostStore: HostStore = HostStore(),
         backend: (any OpenPawBackend)? = nil,
         terminal: (any TerminalBackend)? = nil,
-        dictation: (any DictationEngine)? = nil
+        dictation: (any DictationEngine)? = nil,
+        dictationModels: (any DictationModelInstalling)? = nil,
+        dictationEngineFactory: (any DictationEngineMaking)? = nil
     ) {
         self.hostStore = hostStore
         self.backend = backend
         self.terminal = terminal
         self.dictation = dictation
+        self.dictationEngineFactory = dictationEngineFactory
+        if let dictationModels { self.dictationModels = dictationModels }
         self.selectedHostID = hostStore.hosts.first?.id
         self.structuredBackendReady = backend.map { !($0 is any StructuredBackendLifecycle) } ?? false
     }

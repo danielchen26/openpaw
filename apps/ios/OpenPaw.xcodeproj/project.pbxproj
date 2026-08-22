@@ -12,6 +12,8 @@
 		1A2B3C000000000000000032 /* SSHTerminalBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000022 /* SSHTerminalBackend.swift */; };
 		1A2B3C000000000000000033 /* HostAPIBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000023 /* HostAPIBackend.swift */; };
 		1A2B3C000000000000000034 /* SpeechDictation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000024 /* SpeechDictation.swift */; };
+		1A2B3C00000000000000E010 /* LocalASRDictation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000E000 /* LocalASRDictation.swift */; };
+		1A2B3C00000000000000E011 /* LocalASRModelStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000E001 /* LocalASRModelStore.swift */; };
 		1A2B3C000000000000000035 /* ImageAttachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000025 /* ImageAttachment.swift */; };
 		1A2B3C000000000000000036 /* BiometricGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000026 /* BiometricGate.swift */; };
 		1A2B3C000000000000000037 /* MarkedTextComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000027 /* MarkedTextComposer.swift */; };
@@ -32,6 +34,9 @@
 		1A2B3C000000000000000072 /* OpenPawSSH in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000062 /* OpenPawSSH */; };
 		1A2B3C000000000000000073 /* OpenPawUI in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000063 /* OpenPawUI */; };
 		1A2B3C000000000000000074 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000064 /* SwiftTerm */; };
+		1A2B3C000000000000000075 /* Qwen3ASR in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000065 /* Qwen3ASR */; };
+		1A2B3C000000000000000076 /* ParakeetASR in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000066 /* ParakeetASR */; };
+		1A2B3C000000000000000077 /* AudioCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000067 /* AudioCommon */; };
 		1A2B3C00000000000000D200 /* DictationFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D201 /* DictationFlowUITests.swift */; };
 		1A2B3C00000000000000D210 /* ControlDeckUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D211 /* ControlDeckUITests.swift */; };
 
@@ -70,6 +75,8 @@
 		1A2B3C000000000000000022 /* SSHTerminalBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHTerminalBackend.swift; sourceTree = "<group>"; };
 		1A2B3C000000000000000023 /* HostAPIBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAPIBackend.swift; sourceTree = "<group>"; };
 		1A2B3C000000000000000024 /* SpeechDictation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechDictation.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000E000 /* LocalASRDictation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalASRDictation.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000E001 /* LocalASRModelStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalASRModelStore.swift; sourceTree = "<group>"; };
 		1A2B3C000000000000000025 /* ImageAttachment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageAttachment.swift; sourceTree = "<group>"; };
 		1A2B3C000000000000000026 /* BiometricGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricGate.swift; sourceTree = "<group>"; };
 		1A2B3C000000000000000027 /* MarkedTextComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkedTextComposer.swift; sourceTree = "<group>"; };
@@ -110,6 +117,9 @@
 				1A2B3C000000000000000072 /* OpenPawSSH in Frameworks */,
 				1A2B3C000000000000000073 /* OpenPawUI in Frameworks */,
 				1A2B3C000000000000000074 /* SwiftTerm in Frameworks */,
+				1A2B3C000000000000000075 /* Qwen3ASR in Frameworks */,
+				1A2B3C000000000000000076 /* ParakeetASR in Frameworks */,
+				1A2B3C000000000000000077 /* AudioCommon in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -158,6 +168,8 @@
 				1A2B3C000000000000000022 /* SSHTerminalBackend.swift */,
 				1A2B3C000000000000000023 /* HostAPIBackend.swift */,
 				1A2B3C000000000000000024 /* SpeechDictation.swift */,
+				1A2B3C00000000000000E000 /* LocalASRDictation.swift */,
+				1A2B3C00000000000000E001 /* LocalASRModelStore.swift */,
 				1A2B3C000000000000000025 /* ImageAttachment.swift */,
 				1A2B3C000000000000000026 /* BiometricGate.swift */,
 				1A2B3C000000000000000027 /* MarkedTextComposer.swift */,
@@ -225,6 +237,9 @@
 				1A2B3C000000000000000062 /* OpenPawSSH */,
 				1A2B3C000000000000000063 /* OpenPawUI */,
 				1A2B3C000000000000000064 /* SwiftTerm */,
+				1A2B3C000000000000000065 /* Qwen3ASR */,
+				1A2B3C000000000000000066 /* ParakeetASR */,
+				1A2B3C000000000000000067 /* AudioCommon */,
 			);
 			productName = OpenPaw;
 			productReference = 1A2B3C000000000000000008 /* OpenPaw.app */;
@@ -302,6 +317,7 @@
 				1A2B3C000000000000000052 /* XCLocalSwiftPackageReference "../../packages/swift-ssh-transport" */,
 				1A2B3C000000000000000053 /* XCLocalSwiftPackageReference "../../packages/swift-openpaw-ui" */,
 				1A2B3C000000000000000054 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+				1A2B3C000000000000000055 /* XCRemoteSwiftPackageReference "speech-swift" */,
 			);
 			productRefGroup = 1A2B3C000000000000000003 /* Products */;
 			projectDirPath = "";
@@ -335,6 +351,8 @@
 				1A2B3C000000000000000032 /* SSHTerminalBackend.swift in Sources */,
 				1A2B3C000000000000000033 /* HostAPIBackend.swift in Sources */,
 				1A2B3C000000000000000034 /* SpeechDictation.swift in Sources */,
+				1A2B3C00000000000000E010 /* LocalASRDictation.swift in Sources */,
+				1A2B3C00000000000000E011 /* LocalASRModelStore.swift in Sources */,
 				1A2B3C000000000000000035 /* ImageAttachment.swift in Sources */,
 				1A2B3C000000000000000036 /* BiometricGate.swift in Sources */,
 				1A2B3C000000000000000037 /* MarkedTextComposer.swift in Sources */,
@@ -411,7 +429,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
@@ -448,7 +466,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
@@ -521,7 +539,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				BUNDLE_LOADER = "$(TEST_HOST)";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -549,7 +567,7 @@
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				BUNDLE_LOADER = "$(TEST_HOST)";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -575,7 +593,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -602,7 +620,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -696,6 +714,14 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		1A2B3C000000000000000055 /* XCRemoteSwiftPackageReference "speech-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/soniqo/speech-swift";
+			requirement = {
+				kind = revision;
+				revision = 7b2d17fe2a607738e9cca63cd909c5101964dfc8;
+			};
+		};
 		1A2B3C000000000000000054 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm";
@@ -727,6 +753,21 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 1A2B3C000000000000000054 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
 			productName = SwiftTerm;
+		};
+		1A2B3C000000000000000065 /* Qwen3ASR */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1A2B3C000000000000000055 /* XCRemoteSwiftPackageReference "speech-swift" */;
+			productName = Qwen3ASR;
+		};
+		1A2B3C000000000000000066 /* ParakeetASR */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1A2B3C000000000000000055 /* XCRemoteSwiftPackageReference "speech-swift" */;
+			productName = ParakeetASR;
+		};
+		1A2B3C000000000000000067 /* AudioCommon */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 1A2B3C000000000000000055 /* XCRemoteSwiftPackageReference "speech-swift" */;
+			productName = AudioCommon;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

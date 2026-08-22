@@ -71,6 +71,11 @@ public final class OpenPawSettings {
     public var dictationMode: DictationMode {
         didSet { defaults.set(dictationMode.rawValue, forKey: Key.dictationMode) }
     }
+    /// Which recogniser hears the user. Stored rather than derived because the better engines cost a download, and
+    /// a device that has paid that cost once should keep using what it downloaded across launches.
+    public var dictationEngine: DictationEngineChoice {
+        didSet { defaults.set(dictationEngine.rawValue, forKey: Key.dictationEngine) }
+    }
     public var terminalFontSize: CGFloat {
         didSet { defaults.set(Double(terminalFontSize), forKey: Key.fontSize) }
     }
@@ -105,6 +110,7 @@ public final class OpenPawSettings {
         static let biometricGate = "openpaw.settings.biometricGate"
         static let dictationLocale = "openpaw.settings.dictationLocale"
         static let dictationMode = "openpaw.settings.dictationMode"
+        static let dictationEngine = "openpaw.settings.dictationEngine"
         static let fontSize = "openpaw.settings.terminalFontSize"
         static let theme = "openpaw.settings.terminalTheme"
         static let scrollback = "openpaw.settings.scrollbackLines"
@@ -126,6 +132,12 @@ public final class OpenPawSettings {
             defaults.string(forKey: Key.dictationLocale) ?? Locale.current.identifier)
         dictationMode =
             defaults.string(forKey: Key.dictationMode).flatMap(DictationMode.init(rawValue:)) ?? .composer
+        // Apple's recogniser by default: it is the only one that works before anything has been downloaded, and a
+        // fresh install that could not dictate until a 450 MB fetch finished would be a worse first launch than a
+        // recogniser that is merely imperfect.
+        dictationEngine =
+            defaults.string(forKey: Key.dictationEngine).flatMap(DictationEngineChoice.init(rawValue:))
+            ?? .appleSpeech
         let storedSize = defaults.double(forKey: Key.fontSize)
         terminalFontSize = storedSize > 0 ? CGFloat(storedSize) : 13
         terminalTheme = defaults.string(forKey: Key.theme).flatMap(TerminalTheme.init(rawValue:)) ?? .slate
@@ -141,6 +153,15 @@ public final class OpenPawSettings {
     }
 
     public var dictationLocale: Locale { Locale(identifier: dictationLocaleID) }
+
+    /// The engine that will actually run, which is the stored choice unless the selected language rules it out.
+    ///
+    /// Resolved on read rather than rewritten on language change: silently overwriting a user's stored preference
+    /// because they dictated one sentence in Chinese would lose the choice they made, and they would find English
+    /// dictation quietly demoted to Apple's recogniser the next time they switched back.
+    public var effectiveDictationEngine: DictationEngineChoice {
+        DictationEngineChoice.resolve(dictationEngine, forLocale: dictationLocaleID)
+    }
 
     public static func dictationLocaleChoices(deviceLocale: String) -> [String] {
         VoiceLocaleChoices.choices(deviceLocale: deviceLocale)
@@ -174,6 +195,7 @@ public final class OpenPawSettings {
             requiresBiometricGate: requiresBiometricGate,
             dictationLocaleID: dictationLocaleID,
             dictationMode: dictationMode,
+            dictationEngine: dictationEngine,
             terminalFontSize: Double(terminalFontSize),
             terminalTheme: terminalTheme,
             scrollbackLines: scrollbackLines,
@@ -192,6 +214,7 @@ public final class OpenPawSettings {
         requiresBiometricGate = snapshot.requiresBiometricGate
         dictationLocaleID = snapshot.dictationLocaleID
         dictationMode = snapshot.dictationMode
+        dictationEngine = snapshot.dictationEngine
         terminalFontSize = min(
             max(CGFloat(snapshot.terminalFontSize), Self.fontSizeRange.lowerBound),
             Self.fontSizeRange.upperBound)
@@ -237,6 +260,9 @@ public struct SettingsSnapshot: Codable, Sendable, Hashable {
     public var requiresBiometricGate: Bool
     public var dictationLocaleID: String
     public var dictationMode: DictationMode
+    /// Absent in snapshots written before engine choice existed, which decode as Apple's recogniser: that is what
+    /// those devices were running, so an old export restores the behaviour it was taken from.
+    public var dictationEngine: DictationEngineChoice
     public var terminalFontSize: Double
     public var terminalTheme: TerminalTheme
     public var scrollbackLines: Int
@@ -250,6 +276,7 @@ public struct SettingsSnapshot: Codable, Sendable, Hashable {
         requiresBiometricGate: Bool,
         dictationLocaleID: String,
         dictationMode: DictationMode,
+        dictationEngine: DictationEngineChoice = .appleSpeech,
         terminalFontSize: Double,
         terminalTheme: TerminalTheme,
         scrollbackLines: Int,
@@ -262,6 +289,7 @@ public struct SettingsSnapshot: Codable, Sendable, Hashable {
         self.requiresBiometricGate = requiresBiometricGate
         self.dictationLocaleID = dictationLocaleID
         self.dictationMode = dictationMode
+        self.dictationEngine = dictationEngine
         self.terminalFontSize = terminalFontSize
         self.terminalTheme = terminalTheme
         self.scrollbackLines = scrollbackLines
@@ -276,6 +304,7 @@ public struct SettingsSnapshot: Codable, Sendable, Hashable {
         case requiresBiometricGate = "requires_biometric_gate"
         case dictationLocaleID = "dictation_locale"
         case dictationMode = "dictation_mode"
+        case dictationEngine = "dictation_engine"
         case terminalFontSize = "terminal_font_size"
         case terminalTheme = "terminal_theme"
         case scrollbackLines = "scrollback_lines"
@@ -284,6 +313,28 @@ public struct SettingsSnapshot: Codable, Sendable, Hashable {
         case eventBudgetPerSession = "event_budget_per_session"
         case shortcuts
         case sessionProfiles = "session_profiles"
+    }
+
+    /// Written by hand so a settings file exported before engine choice existed still imports.
+    ///
+    /// The synthesised decoder treats every stored property as required, so adding one field would make every
+    /// previously exported settings file fail to import with "keyNotFound" — a data-loss bug for anyone restoring a
+    /// backup, in exchange for nothing.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        requiresBiometricGate = try container.decode(Bool.self, forKey: .requiresBiometricGate)
+        dictationLocaleID = try container.decode(String.self, forKey: .dictationLocaleID)
+        dictationMode = try container.decode(DictationMode.self, forKey: .dictationMode)
+        dictationEngine =
+            try container.decodeIfPresent(DictationEngineChoice.self, forKey: .dictationEngine) ?? .appleSpeech
+        terminalFontSize = try container.decode(Double.self, forKey: .terminalFontSize)
+        terminalTheme = try container.decode(TerminalTheme.self, forKey: .terminalTheme)
+        scrollbackLines = try container.decode(Int.self, forKey: .scrollbackLines)
+        applicationCursorKeys = try container.decode(Bool.self, forKey: .applicationCursorKeys)
+        previewPort = try container.decode(Int.self, forKey: .previewPort)
+        eventBudgetPerSession = try container.decode(Int.self, forKey: .eventBudgetPerSession)
+        shortcuts = try container.decode(ShortcutSet.self, forKey: .shortcuts)
+        sessionProfiles = try container.decode([String: SessionProfile].self, forKey: .sessionProfiles)
     }
 }
 
@@ -417,10 +468,13 @@ public struct SettingsView: View {
                     .frame(minHeight: 44)
                     .accessibilityLabel("Dictation language")
                     .accessibilityValue(localeName(settings.dictationLocaleID))
-                    Text(VoicePrivacyDisclosure.appleSpeech)
+                    Text(privacyDisclosure)
                         .font(OpenPawTheme.Human.caption)
                         .foregroundStyle(OpenPawTheme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+
+                engineChoice
 
                 VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
                     Text("Default destination").microLabel()
@@ -445,6 +499,113 @@ public struct SettingsView: View {
                 }
             }
         }
+    }
+
+    /// Which recogniser runs, and whether its weights are on the phone yet.
+    ///
+    /// The download button lives next to the picker rather than behind a separate "manage models" screen because
+    /// selecting an engine whose weights are absent is the same act as wanting them: hiding the fetch one
+    /// navigation level away produces a setting that is switched on and does nothing.
+    @ViewBuilder
+    private var engineChoice: some View {
+        VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+            Text("Recogniser").microLabel()
+            Picker("Recogniser", selection: bind(\.dictationEngine)) {
+                ForEach(engineChoices, id: \.self) { choice in
+                    Text(choice.displayName).tag(choice)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .font(OpenPawTheme.Machine.body)
+            .frame(minHeight: 44)
+            .accessibilityLabel("Dictation recogniser")
+            .accessibilityValue(settings.effectiveDictationEngine.displayName)
+
+            Text(settings.effectiveDictationEngine.summary)
+                .font(OpenPawTheme.Human.caption)
+                .foregroundStyle(OpenPawTheme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // Said only when the stored choice was overruled, and it names both engines: "why is this on Apple when
+            // I picked Qwen" is otherwise unanswerable from this screen.
+            if settings.dictationEngine != settings.effectiveDictationEngine {
+                Text(
+                    "\(settings.dictationEngine.displayName) cannot transcribe "
+                        + "\(localeName(settings.dictationLocaleID)), so "
+                        + "\(settings.effectiveDictationEngine.displayName) is being used for it."
+                )
+                .font(OpenPawTheme.Human.caption)
+                .foregroundStyle(OpenPawTheme.warn)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if settings.effectiveDictationEngine.requiresDownload {
+                modelRow(for: settings.effectiveDictationEngine)
+            }
+        }
+    }
+
+    /// The download state of one engine, and the single action available in that state.
+    @ViewBuilder
+    private func modelRow(for choice: DictationEngineChoice) -> some View {
+        let state = model.dictationModels.state(of: choice)
+        VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+            if case .downloading(let progress, _) = state {
+                ProgressView(value: progress)
+                    .tint(OpenPawTheme.textPrimary)
+                    .accessibilityLabel("Downloading \(choice.displayName)")
+                    .accessibilityValue("\(Int(progress * 100)) percent")
+            }
+            HStack(spacing: OpenPawTheme.Space.tight) {
+                if let status = state.statusText {
+                    Text(status)
+                        .font(OpenPawTheme.Human.caption)
+                        .foregroundStyle(statusColor(state))
+                }
+                Spacer(minLength: 0)
+                switch state {
+                case .absent, .failed:
+                    Button("Download \(choice.approximateDownloadMegabytes) MB") {
+                        model.dictationModels.install(choice)
+                    }
+                    .buttonStyle(.bordered)
+                    .font(OpenPawTheme.Machine.code)
+                case .downloading:
+                    Button("Cancel") { model.dictationModels.cancelInstall(of: choice) }
+                        .buttonStyle(.bordered)
+                        .font(OpenPawTheme.Machine.code)
+                case .installed:
+                    Button("Remove") { model.dictationModels.remove(choice) }
+                        .buttonStyle(.bordered)
+                        .font(OpenPawTheme.Machine.code)
+                }
+            }
+            .frame(minHeight: 44)
+        }
+    }
+
+    private func statusColor(_ state: DictationModelState) -> Color {
+        switch state {
+        case .failed: OpenPawTheme.warn
+        case .installed: OpenPawTheme.textTertiary
+        default: OpenPawTheme.textTertiary
+        }
+    }
+
+    private var engineChoices: [DictationEngineChoice] {
+        DictationEngineChoice.choices(forLocale: settings.dictationLocaleID)
+    }
+
+    /// Where the user's voice goes, stated per engine rather than once for the screen.
+    ///
+    /// Apple's recogniser may leave the device for some locales, and the local models never can. Printing Apple's
+    /// caveat under a downloaded model would be a false statement about the user's privacy, in the direction that
+    /// makes the product look worse than it is, so the sentence follows the choice.
+    private var privacyDisclosure: String {
+        settings.effectiveDictationEngine == .appleSpeech
+            ? VoicePrivacyDisclosure.appleSpeech
+            : VoicePrivacyDisclosure.localModel
     }
 
     private var dictationExplanation: String {

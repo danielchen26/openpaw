@@ -270,6 +270,9 @@ public struct RootView: View {
         .task { await pumpScrollback() }
         .onChange(of: model.dictation == nil) { _, _ in configurePushToTalk() }
         .onChange(of: settings.dictationLocaleID) { _, _ in configurePushToTalk() }
+        // Switching recogniser has to take effect on the next hold, not the next launch: a user who just downloaded
+        // Qwen and held the screen would otherwise still be talking to Apple's.
+        .onChange(of: settings.dictationEngine) { _, _ in configurePushToTalk() }
         .onAppear { configurePushToTalk() }
         .sheet(item: sheetBinding) { sheet in
             switch sheet {
@@ -325,8 +328,12 @@ public struct RootView: View {
     }
 
     private func configurePushToTalk() {
+        // The chosen recogniser, built fresh whenever the choice changes: an engine holds a microphone graph and a
+        // loaded model, and reusing the previous one after the user switched from Apple to Qwen would leave the old
+        // recogniser hearing the next sentence.
+        let engine = model.dictationEngineFactory?.engine(for: settings.effectiveDictationEngine) ?? model.dictation
         pushToTalk.configure(
-            engine: model.dictation,
+            engine: engine,
             locale: settings.dictationLocale,
             mode: settings.dictationMode
         )

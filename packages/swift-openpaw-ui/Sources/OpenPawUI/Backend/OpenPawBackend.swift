@@ -57,6 +57,18 @@ public protocol DictationEngine: Sendable {
     /// Emits progressively refined transcripts until the returned stream finishes.
     func transcribe(locale: Locale, mode: DictationMode) -> AsyncThrowingStream<DictationUpdate, any Error>
     func stop() async
+    /// True when the words only arrive after `stop()`, because the engine transcribes a whole recording rather
+    /// than a live stream.
+    ///
+    /// The push-to-talk controller has to know this before the finger comes up. A streaming engine has already
+    /// produced text by then and can commit on release; a whole-utterance model has produced nothing, so releasing
+    /// would deliver an empty string and the sentence the user just spoke would vanish.
+    var deliversFinalAfterStop: Bool { get }
+}
+
+extension DictationEngine {
+    /// Streaming is the assumption, so an engine written before this existed keeps its behaviour.
+    public var deliversFinalAfterStop: Bool { false }
 }
 
 public enum DictationMode: String, Sendable, Codable, CaseIterable {
