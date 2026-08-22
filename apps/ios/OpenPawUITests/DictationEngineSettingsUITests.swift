@@ -184,14 +184,31 @@ final class DictationEngineSettingsUITests: XCTestCase {
 
     /// After choosing a local model, dictation must still be refusable rather than fatal.
     ///
-    /// The crash was never in Settings, it was one screen later: pick Qwen, go to the terminal, hold the button,
-    /// and the process aborts inside Metal. So the test follows the user there. Any assertion is secondary to the
-    /// app still being alive at the end of it, which is why the last check is that a control still responds.
+    /// The crash was never in Settings, it was one screen later: pick Qwen, hold the microphone, and the process
+    /// aborts inside Metal. So the test follows the user there. Any assertion is secondary to the app still being
+    /// alive at the end of it, which is why the last check is that a control still responds.
     ///
-    /// Confirmed to actually catch it, rather than assumed to. With the three simulator guards deleted from
-    /// `LocalASRModelStore`, this test reports the app in state 1 — `notRunning` — where a healthy run reports 4.
-    /// The app is gone by the time the assertion runs. That is the whole reason this file exists, and it is worth
-    /// re-running that experiment before ever weakening it.
+    /// It hunts for the microphone rather than pressing a location, and that distinction is the whole test. An
+    /// earlier version went to the Terminal tab and pressed a coordinate on the text view at (0.5, 0.4). Nothing
+    /// there is wired to `startDictation()` — the microphone lives in `ComposerView`, behind a real Button with a
+    /// `DragGesture` — so that version never entered the crash path at all. It passed, and it would have gone on
+    /// passing with the engine guard deleted, which is the precise failure this file was written to prevent.
+    ///
+    /// The composer needs a selected agent session, and a session needs the daemon, which is not up in this
+    /// environment: both Chat and Terminal render empty states instead. So on a machine with no host, the press
+    /// cannot happen and this test says so with `XCTSkip` rather than passing. That is deliberate. A silent pass
+    /// here would be counted as coverage of a crash it never went near, which is exactly how the coordinate-press
+    /// version survived review. What still runs unconditionally is the part that needs no session: choosing the
+    /// local engine, navigating away, and the app being alive and drawing afterwards.
+    ///
+    /// About that mutation check. An earlier run of this experiment — deleting the guards from
+    /// `LocalASRModelStore` — did report the app in state 1, `notRunning`, where healthy is 4, and that was read
+    /// as this test catching the crash. Repeating it after the press was corrected tells a more careful story:
+    /// with the guards removed it is `testChoosingALocalModelOnASimulatorExplainsItselfAndOffersNoDownload` that
+    /// fails, on the settings screen, because merely selecting the engine is enough to reach MLX. This test skips
+    /// instead, since the composer is still out of reach. So the file does catch guard removal, but through the
+    /// settings test rather than this one, and this one only becomes the real crash check when it runs somewhere
+    /// with a live session. Worth knowing before trusting either of them alone.
     func testHoldingDictationAfterChoosingALocalModelDoesNotKillTheApp() throws {
         #if !targetEnvironment(simulator)
             throw XCTSkip("on a phone the local model is expected to run, not to be refused")
@@ -203,21 +220,51 @@ final class DictationEngineSettingsUITests: XCTestCase {
         XCTAssertTrue(qwen.waitForExistence(timeout: 5), "the recogniser menu offers no local model to select")
         qwen.tap()
 
-        // Now the screen the crash happened on. `firstMatch` because "Terminal" is both a tab and a segment in the
+        // Now the screen the crash happened on. `firstMatch` because these names are both tabs and segments in the
         // dictation destination control that was just scrolled past, and an ambiguous query fails the test for a
         // reason that has nothing to do with the crash.
-        let terminalTab = app.buttons["Terminal"].firstMatch
-        XCTAssertTrue(terminalTab.waitForExistence(timeout: 15), "the Terminal tab never appeared")
+        let chatTab = app.buttons["Chat"].firstMatch
+        XCTAssertTrue(chatTab.waitForExistence(timeout: 15), "the Chat tab never appeared")
         clearAlertIfPresent(app)
-        terminalTab.tap()
+        chatTab.tap()
 
-        let terminal = app.textViews.firstMatch
-        if terminal.waitForExistence(timeout: 10) {
-            terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).press(forDuration: 1.0)
+        // Press the microphone control itself, not a coordinate on the terminal. This test used to press the text
+        // view at (0.5, 0.4) and claim in its own name to be holding dictation; nothing there is wired to
+        // `startDictation()`, so the crash path was never entered and the test would have passed with the engine
+        // guard removed from this screen entirely. The control is a Button carrying a
+        // `DragGesture(minimumDistance: 0)`, so a press on it is what actually starts a local engine.
+        clearAlertIfPresent(app)
+
+        let microphone = app.buttons
+            .matching(NSPredicate(format: "label CONTAINS[c] 'dictation'")).firstMatch
+        let reachedTheMicrophone = microphone.waitForExistence(timeout: 10)
+
+        // The app must survive the navigation itself, session or no session. Selecting a local engine touches the
+        // store, and if the guard were removed at the wrong layer the process could die on the way here.
+        XCTAssertEqual(
+            app.state, .runningForeground,
+            "the app died on the way to the composer after a local model was selected")
+
+        if !reachedTheMicrophone {
+            // Skip, never pass. Without the daemon there is no agent session, so the composer that carries the
+            // microphone is replaced by an empty state and the hold cannot be performed. Reporting success here
+            // would credit this file with covering a crash it never approached.
+            throw XCTSkip(
+                "no agent session on this machine, so the composer and its microphone are not on screen and the "
+                    + "hold cannot be performed. Run this against a live daemon to exercise the crash path.")
         }
+
+        // A drag gesture needs a press with duration; a tap is too short to produce onChanged then onEnded.
+        microphone.press(forDuration: 1.2)
+
+        // Microphone or speech permission, which on a fresh simulator container arrives on the first hold.
         let allow = app.alerts.buttons
             .matching(NSPredicate(format: "label CONTAINS[c] 'Allow' OR label CONTAINS[c] 'OK'")).firstMatch
-        if allow.waitForExistence(timeout: 3) { allow.tap() }
+        if allow.waitForExistence(timeout: 3) {
+            allow.tap()
+            // The permission alert swallows the first hold, so the gesture has to be repeated to reach the engine.
+            if microphone.exists, microphone.isHittable { microphone.press(forDuration: 1.2) }
+        }
 
         // The only assertion that matters: the app is still there. `XCUIApplication.state` reads the real process,
         // so an abort inside Metal shows up here as `.notRunning` no matter what the UI looked like a moment ago.
@@ -226,12 +273,15 @@ final class DictationEngineSettingsUITests: XCTestCase {
             "holding dictation with a local model selected killed the app"
         )
         // Still answering, not merely still running. A process can survive an abort on a background thread and
-        // leave a frozen screen, which to the user is the same thing. Checked against the terminal's own key bar
-        // rather than the tab bar: the tab bar is replaced by the key bar on this screen, so waiting for "Settings"
-        // here fails on an app that is perfectly healthy — which it did, and cost a run to work out.
+        // leave a frozen screen, which to the user is the same thing. Checked against the microphone the test just
+        // pressed, since on Chat the composer is still on screen. (On the terminal screen this had to be "Escape"
+        // instead: there the tab bar is replaced by the key bar, so waiting for a tab fails on a healthy app.)
         XCTAssertTrue(
-            app.buttons["Escape"].firstMatch.waitForExistence(timeout: 10),
-            "the app is running but no longer draws the terminal. On screen:\n\(app.debugDescription)"
+            microphone.waitForExistence(timeout: 10),
+            "the app is running but no longer draws the composer. On screen:\n\(app.debugDescription)"
         )
+        XCTAssertEqual(
+            app.state, .runningForeground,
+            "holding dictation with a local model selected killed the app")
     }
 }
