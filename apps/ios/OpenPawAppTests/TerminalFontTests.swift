@@ -59,6 +59,65 @@ final class TerminalFontTests: XCTestCase {
         }
     }
 
+    /// Every private-use codepoint the user's own prompt printed, captured from a real login shell on the host.
+    ///
+    /// A powerlevel10k prompt is drawn almost entirely from Nerd Font icons in the private use area, and no font
+    /// shipped on iOS contains a single one of them. Without a face that does, the terminal opens on a screen of
+    /// tofu boxes — which is what "terminal 什么都看不到" actually was.
+    private static let promptIcons: [(String, Character)] = [
+        ("powerline right separator", "\u{E0B0}"), ("powerline left separator", "\u{E0B2}"),
+        ("powerline right round", "\u{E0B4}"), ("powerline left round", "\u{E0B6}"),
+        ("branch", "\u{E285}"), ("node", "\u{E617}"), ("apple", "\u{E711}"),
+        ("folder opened", "\u{EA9C}"), ("terminal", "\u{EAB6}"), ("vm", "\u{EBA2}"),
+        ("calendar", "\u{F073}"), ("folder", "\u{F07B}"), ("wifi", "\u{F120}"),
+        ("database", "\u{F240}"), ("docker", "\u{F295}"), ("cloud", "\u{F308}"),
+    ]
+
+    /// The bug the user reported as the terminal showing nothing.
+    ///
+    /// The screen was not blank: it was their zsh prompt drawn entirely in tofu. These codepoints have no glyph in
+    /// any system face, so CoreText has nothing to substitute and draws the missing-glyph box for every one.
+    func testThePromptIconsTheHostPrintsHaveGlyphs() {
+        let font = OpenPawTerminalView.terminalFont(ofSize: 13)
+
+        for (name, icon) in Self.promptIcons {
+            // Asserted through the same CoreText layout the terminal draws with, not just glyph availability:
+            // a cascade that resolves for `CTFontCreateForString` can still be bypassed by the drawing path.
+            XCTAssertEqual(
+                renderedFace(of: String(icon), requesting: font), OpenPawTerminalView.symbolsFontName,
+                "the \(name) icon (U+\(String(format: "%04X", icon.unicodeScalars.first!.value))) is drawn by "
+                    + "another face, so the prompt is a row of tofu boxes"
+            )
+            XCTAssertTrue(
+                hasGlyph(icon, in: font),
+                "the \(name) icon (U+\(String(format: "%04X", icon.unicodeScalars.first!.value)) has no glyph, "
+                    + "so the prompt draws it as a tofu box"
+            )
+        }
+    }
+
+    /// Bold is not decoration in a prompt: powerlevel10k emits it constantly, and `withSymbolicTraits` drops the
+    /// cascade list, so a fallback attached only to the regular face would vanish exactly where the prompt is.
+    func testPromptIconsSurviveEverySGRVariant() {
+        for traits in [UIFontDescriptor.SymbolicTraits([]), .traitBold, .traitItalic, [.traitBold, .traitItalic]] {
+            let font = OpenPawTerminalView.terminalFont(ofSize: 13, traits: traits)
+            XCTAssertTrue(hasGlyph("\u{E0B0}", in: font), "the powerline separator is lost in \(traits)")
+        }
+    }
+
+    /// Asks CoreText which face would actually draw this character, walking the cascade the way drawing does.
+    ///
+    /// The glyph id alone cannot answer this. When nothing on the device has the character, CoreText resolves to
+    /// **LastResort**, a face that covers all of Unicode by design and returns a perfectly valid non-zero glyph —
+    /// the box with a question mark in it. Asserting on the glyph id therefore passes while the user is looking at
+    /// a screen of tofu, which is exactly what this test suite did at first.
+    private func hasGlyph(_ character: Character, in font: UIFont) -> Bool {
+        let text = String(character)
+        let face = CTFontCreateForString(font, text as CFString,
+                                         CFRange(location: 0, length: text.utf16.count))
+        return (CTFontCopyPostScriptName(face) as String) != "LastResort"
+    }
+
     /// A terminal is a fixed grid: SwiftTerm measures one cell from `"W"` and steps every column by that width. If
     /// the Latin glyphs are not all one width the text drifts away from the cursor. Adding the CJK fallback must
     /// not disturb this.

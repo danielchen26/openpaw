@@ -283,19 +283,43 @@ final class OpenPawTerminalView: TerminalView {
     /// the one it picks (`.PingFangUITextSC`) is a *UI* face the app never chose: it is not the family the rest of
     /// OpenPaw sets, and its weight is selected by CoreText rather than by the terminal's SGR state.
     ///
-    /// No font shipped on iOS has both a monospaced Latin set and Han glyphs, so the fix is a cascade: keep the
-    /// system monospaced face for Latin and name PingFang as the fallback for everything it cannot draw, which
-    /// makes the choice explicit and stable instead of leaving it to a per-run guess.
+    /// No font shipped on iOS has both a monospaced Latin set and Han glyphs, so the fix is a cascade. What is not
+    /// obvious is which face has to be the *base*.
+    ///
+    /// A shell prompt like powerlevel10k is drawn almost entirely from Nerd Font icons in the private use area, and
+    /// iOS ships nothing that has them: CoreText resolves them to **LastResort**, a face that covers all of Unicode
+    /// with a single glyph — the box with a question mark. So the terminal "showing nothing" was really the prompt
+    /// rendered as a screen of tofu. Bundling the symbols is the only fix available, because an app cannot read the
+    /// fonts installed on the remote machine.
+    ///
+    /// Bundling them is not enough on its own. **CoreText will not fall back into the private use area**: with the
+    /// system monospaced face as the base, the bundled font is skipped no matter how the cascade entry is spelled
+    /// (`.name`, `.family`, or a `CTFontDescriptor`) and the icons still resolve to LastResort. PUA codepoints carry
+    /// no Unicode identity to match on, so fallback declines to guess. Only a face asked for *directly* draws them.
+    ///
+    /// Hence the inversion: the symbols font is the base, and the monospaced system face and PingFang are its
+    /// fallbacks. Latin still resolves to `.SFUIMono` and Chinese to PingFang, exactly as before — the base is only
+    /// consulted first, and it contains nothing but symbols.
     static func terminalFont(ofSize size: CGFloat, traits: UIFontDescriptor.SymbolicTraits = []) -> UIFont {
-        let base = UIFont.monospacedSystemFont(ofSize: size, weight: traits.contains(.traitBold) ? .bold : .regular)
+        let mono = UIFont.monospacedSystemFont(ofSize: size, weight: traits.contains(.traitBold) ? .bold : .regular)
         // Traits first, cascade second. `withSymbolicTraits` resolves against a concrete family and drops any
         // cascade list already on the descriptor, so attaching the fallback first would silently lose it and
         // bold Chinese would fall back to CoreText's own substitution again.
-        let varied = base.fontDescriptor.withSymbolicTraits(traits) ?? base.fontDescriptor
-        let fallbacks = ["PingFangSC-Regular", "HiraginoSans-W3", "AppleSDGothicNeo-Regular"]
+        let varied = mono.fontDescriptor.withSymbolicTraits(traits) ?? mono.fontDescriptor
+        let fallbacks = [varied]
+            + ["PingFangSC-Regular", "HiraginoSans-W3", "AppleSDGothicNeo-Regular"]
             .map { UIFontDescriptor(fontAttributes: [.name: $0]) }
-        return UIFont(descriptor: varied.addingAttributes([.cascadeList: fallbacks]), size: size)
+        // A device that somehow lacks the bundled face must still get a working terminal rather than no font.
+        guard let symbols = UIFont(name: symbolsFontName, size: size) else {
+            return UIFont(descriptor: varied.addingAttributes([.cascadeList: Array(fallbacks.dropFirst())]),
+                          size: size)
+        }
+        return UIFont(descriptor: symbols.fontDescriptor.addingAttributes([.cascadeList: fallbacks]), size: size)
     }
+
+    /// PostScript name of the bundled Nerd Font symbols face. `UIAppFonts` in `Info.plist` registers the file; this
+    /// is the name CoreText knows it by, which is not derived from the filename.
+    static let symbolsFontName = "SymbolsNFM"
 
     /// Builds all four SGR variants explicitly rather than letting SwiftTerm derive them.
     ///
