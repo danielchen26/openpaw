@@ -35,7 +35,7 @@ It runs, failing fastest first: `cargo fmt --check`, `cargo clippy -D warnings`,
 check that the protocol goldens are unchanged, `swift test` in all four packages, the iOS app build, the headless
 UI snapshot render, and `scripts/smoke.py` end to end against the freshly built daemon.
 
-Latest verified on 2026-08-22: **all canonical steps passed** in 259s, including **276 non-blank snapshots** and
+Latest verified on 2026-08-22: **all canonical steps passed** in 241s, including **276 non-blank snapshots** and
 **39 host end-to-end checks**. The script prints the current test counts; do not freeze them here as the suites
 are growing.
 
@@ -86,6 +86,11 @@ The Milestone 1 app was built, installed and launched on an **iPhone 16 Pro simu
    guards and watching `XCUIApplicationState` drop to `notRunning`. `LocalDictationAccuracyTests` is written and
    registered against the app target and skips there with that reason, so a cable is the only thing between this
    repository and a measured on-device answer.
+   Being stuck there is worth something anyway: reading the wrapper instead of running it turned up a defect the
+   models could never have exposed. The transcript cleaner stripped everything between angle brackets, so a
+   dictated `cat < in.txt > out.txt` reached the draft as `cat  out.txt` — a different command, still valid,
+   waiting on Execute. Fixed, covered by a test that needs no GPU, and the benchmark's duplicate copy of that
+   function is now checked for drift rather than asked politely to stay in step.
 4. **Terminal input and media.** Real PTY bytes, rotation resize, hardware keyboard chords, bracketed paste, OSC 8,
    OSC 52 pasteboard handoff, pinch zoom, Pinyin composition and image upload still need a credentialed live session.
 5. **Resilient transport and ecosystem claims.** Production terminal transport is SSH. Native Mosh is not implemented
