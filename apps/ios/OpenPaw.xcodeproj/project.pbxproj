@@ -18,6 +18,7 @@
 		1A2B3C000000000000000038 /* Redaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C000000000000000028 /* Redaction.swift */; };
 		1A2B3C000000000000000043 /* BiometricGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002A /* BiometricGateTests.swift */; };
 		1A2B3C000000000000000044 /* MarkedTextComposerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */; };
+		1A2B3C00000000000000D100 /* LiveDictationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D101 /* LiveDictationTests.swift */; };
 		1A2B3C0000000000000000D1 /* TerminalFontTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000D0 /* TerminalFontTests.swift */; };
 		1A2B3C0000000000000000C0 /* HomeInteractionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000C1 /* HomeInteractionUITests.swift */; };
 		1A2B3C000000000000000045 /* RedactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002C /* RedactionTests.swift */; };
@@ -29,6 +30,7 @@
 		1A2B3C000000000000000072 /* OpenPawSSH in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000062 /* OpenPawSSH */; };
 		1A2B3C000000000000000073 /* OpenPawUI in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000063 /* OpenPawUI */; };
 		1A2B3C000000000000000074 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000064 /* SwiftTerm */; };
+		1A2B3C00000000000000D200 /* DictationFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D201 /* DictationFlowUITests.swift */; };
 		1A2B3C0000000000000000B0 /* ConnectFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */; };
 /* End PBXBuildFile section */
 
@@ -64,12 +66,14 @@
 		1A2B3C000000000000000029 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		1A2B3C00000000000000002A /* BiometricGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricGateTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkedTextComposerTests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000D101 /* LiveDictationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveDictationTests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000D0 /* TerminalFontTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFontTests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000C1 /* HomeInteractionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeInteractionUITests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002C /* RedactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedactionTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002D /* SSHTerminalBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHTerminalBackendTests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSSHConnectionTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002E /* HostAPIBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAPIBackendTests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000D201 /* DictationFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationFlowUITests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectFlowUITests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000B2 /* OpenPawUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenPawUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -147,6 +151,7 @@
 				1A2B3C00000000000000002A /* BiometricGateTests.swift */,
 				1A2B3C00000000000000002B /* MarkedTextComposerTests.swift */,
 				1A2B3C0000000000000000D0 /* TerminalFontTests.swift */,
+				1A2B3C00000000000000D101 /* LiveDictationTests.swift */,
 				1A2B3C00000000000000002C /* RedactionTests.swift */,
 				1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */,
 				1A2B3C00000000000000002D /* SSHTerminalBackendTests.swift */,
@@ -159,6 +164,7 @@
 			isa = PBXGroup;
 			children = (
 				1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */,
+				1A2B3C00000000000000D201 /* DictationFlowUITests.swift */,
 				1A2B3C0000000000000000C1 /* HomeInteractionUITests.swift */,
 			);
 			path = OpenPawUITests;
@@ -309,6 +315,7 @@
 				1A2B3C000000000000000043 /* BiometricGateTests.swift in Sources */,
 				1A2B3C000000000000000044 /* MarkedTextComposerTests.swift in Sources */,
 				1A2B3C0000000000000000D1 /* TerminalFontTests.swift in Sources */,
+				1A2B3C00000000000000D100 /* LiveDictationTests.swift in Sources */,
 				1A2B3C000000000000000045 /* RedactionTests.swift in Sources */,
 				1A2B3C0000000000000000A0 /* LiveSSHConnectionTests.swift in Sources */,
 				1A2B3C000000000000000046 /* SSHTerminalBackendTests.swift in Sources */,
@@ -321,6 +328,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A2B3C0000000000000000B0 /* ConnectFlowUITests.swift in Sources */,
+				1A2B3C00000000000000D200 /* DictationFlowUITests.swift in Sources */,
 				1A2B3C0000000000000000C0 /* HomeInteractionUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
