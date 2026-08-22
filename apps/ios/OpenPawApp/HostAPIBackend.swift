@@ -275,6 +275,29 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle {
 
 // MARK: - SSH forwarder
 
+#if DEBUG && targetEnvironment(simulator)
+
+    /// A `LoopbackForwarder` that forwards nothing, because the daemon is already on this machine's loopback.
+    ///
+    /// The simulator shares the Mac's network stack, so a real `openpaw-host` bound to 127.0.0.1 is directly
+    /// reachable and no SSH channel is required to talk to it. That makes it possible for a UI test to drive the
+    /// app against a live daemon, which is the only way to reach `ComposerView` and therefore the only way to
+    /// press the microphone that used to abort the process on a local model.
+    ///
+    /// Fenced to DEBUG *and* the simulator, and only ever constructed from an explicit launch argument, so the
+    /// shipping app keeps its property that there is no route to the structured API without SSH.
+    actor DirectLoopbackForwarder: LoopbackForwarder {
+        private let port: UInt16
+
+        init(port: UInt16) { self.port = port }
+
+        /// Ignores `remotePort`: the daemon is not behind a tunnel, so the caller's local port *is* the real one.
+        func start(remotePort: UInt16) async throws -> UInt16 { port }
+        func stop() async {}
+    }
+
+#endif
+
 /// `LoopbackForwarder` over `OpenPawSSH.PortForwarder`.
 ///
 /// The forwarder rides the SSH connection the terminal already opened rather than dialling its own. That is not an

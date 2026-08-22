@@ -20,10 +20,47 @@ final class DictationEngineSettingsUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    /// The daemon `scripts/dictation-ui-live.py` started, if this run has one.
+    ///
+    /// Absent in a normal `check.sh` run, present when the live script drove it. Everything that does not need a
+    /// session behaves the same either way; the hold test is the one that changes.
+    /// The SSH target handed over by `scripts/dictation-ui-live.py`, when the developer supplied one.
+    ///
+    /// Distinguishes "the composer is missing because nothing could reach a session" from "the composer is missing
+    /// even though everything needed was supplied", which is a regression worth failing on.
+    private var sshHost: String? {
+        ProcessInfo.processInfo.environment["OPENPAW_UITEST_SSH_HOST"].flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private var liveDaemon: (port: String, pairingCode: String)? {
+        let environment = ProcessInfo.processInfo.environment
+        guard let port = environment["OPENPAW_UITEST_DIRECT_PORT"], !port.isEmpty,
+            let code = environment["OPENPAW_UITEST_PAIRING_CODE"], !code.isEmpty
+        else { return nil }
+        return (port, code)
+    }
+
     private func launchedApp() -> XCUIApplication {
         let app = XCUIApplication()
         // Must be a plist literal: the argument domain parses `-key NO` as the string "NO", which the gate refuses.
         app.launchArguments = ["-openpaw.settings.biometricGate", "<false/>"]
+        let environment = ProcessInfo.processInfo.environment
+        if let sshHost = environment["OPENPAW_UITEST_SSH_HOST"], !sshHost.isEmpty {
+            // The app only marks the structured backend ready once the terminal connects, so reaching the
+            // composer needs a host this machine can actually SSH into. Supplied by scripts/dictation-ui-live.py.
+            app.launchArguments += ["-openpaw-debug-ssh-host", sshHost]
+            if let key = environment["OPENPAW_UITEST_SSH_KEY"], !key.isEmpty {
+                app.launchArguments += ["-openpaw-debug-seed-key", key]
+            }
+        }
+        if let live = liveDaemon {
+            // Points the structured API straight at loopback and pairs on launch, so the app comes up with real
+            // sessions and therefore a real composer. Both hooks are DEBUG+simulator only; see `OpenPawApp.swift`.
+            app.launchArguments += [
+                "-openpaw-debug-direct-port", live.port,
+                "-openpaw-debug-pairing-code", live.pairingCode,
+            ]
+        }
         app.launch()
         return app
     }
@@ -246,12 +283,27 @@ final class DictationEngineSettingsUITests: XCTestCase {
             "the app died on the way to the composer after a local model was selected")
 
         if !reachedTheMicrophone {
+            // A daemon alone is not enough to reach the composer, and that is the app behaving correctly rather
+            // than a gap in this test. `OpenPawModel` only sets `structuredBackendReady` once
+            // `terminal.connect(host:)` succeeds, so that it never lists a session the user cannot yet type into.
+            // The sessions list therefore stays empty until SSH is up. Only when the runner was also given a host
+            // to SSH into is an empty composer a real regression.
+            if liveDaemon != nil, sshHost != nil {
+                return XCTFail(
+                    "a live daemon and an SSH host were supplied but the composer never appeared, so the app is "
+                        + "not getting from a paired host to a session. On screen:\n\(app.debugDescription)")
+            }
+            if liveDaemon != nil {
+                throw XCTSkip(
+                    "paired with a live daemon, but no SSH host was supplied, so the terminal never connects and "
+                        + "the app correctly lists no session. Pass --ssh-host to dictation-ui-live.py.")
+            }
             // Skip, never pass. Without the daemon there is no agent session, so the composer that carries the
             // microphone is replaced by an empty state and the hold cannot be performed. Reporting success here
             // would credit this file with covering a crash it never approached.
             throw XCTSkip(
                 "no agent session on this machine, so the composer and its microphone are not on screen and the "
-                    + "hold cannot be performed. Run this against a live daemon to exercise the crash path.")
+                    + "hold cannot be performed. Run scripts/dictation-ui-live.py to exercise the crash path.")
         }
 
         // A drag gesture needs a press with duration; a tap is too short to produce onChanged then onEnded.

@@ -227,9 +227,14 @@ final class AppWiring {
             onHostKeyProblem: { error in promptSink.get()?(error) }
         )
 
-        let hostAPI = HostAPIBackend(
-            forwarder: SSHLoopbackForwarder(connection: { await transportBox.get()?.connection })
-        )
+        // A UI test can point the structured API at a daemon on this machine instead of tunnelling. Fenced so the
+        // shipping build has no such path: see `debugDirectForwarder()`.
+        var forwarder: any LoopbackForwarder = SSHLoopbackForwarder(
+            connection: { await transportBox.get()?.connection })
+        #if DEBUG && targetEnvironment(simulator)
+            if let direct = Self.debugDirectForwarder() { forwarder = direct }
+        #endif
+        let hostAPI = HostAPIBackend(forwarder: forwarder)
         let asrModels = LocalASRModelStore()
         let appleSpeech = SpeechDictation()
         let model = OpenPawModel(
@@ -267,10 +272,118 @@ final class AppWiring {
 
     func start() async {
         guard gate.decision == .unlocked else { return }
+        #if DEBUG && targetEnvironment(simulator)
+            await debugPairIfRequested()
+        #endif
         guard model.canRefreshRemoteState else { return }
         await model.refresh()
         model.startFollowing(session: model.selectedSessionID)
     }
+
+    #if DEBUG && targetEnvironment(simulator)
+
+        /// Adopts a host and a pairing code handed over on the command line, so a UI test starts up already paired.
+        ///
+        /// Pairing is normally a human reading a code off their workstation and typing it into a sheet, which a UI
+        /// test cannot do and should not have to simulate: what the test is about is the composer, and the composer
+        /// needs a session, and a session needs a paired host. This walks the app's own `pair(pairingCode:)` rather
+        /// than writing credentials into the keychain behind its back, so what the test exercises afterwards is the
+        /// real client with a real signer talking to a real daemon.
+        ///
+        /// The host record points at loopback with a placeholder credential: `DirectLoopbackForwarder` means the
+        /// SSH fields are never dialled. Same fence as everything else here, DEBUG and simulator and opt-in.
+        private func debugPairIfRequested() async {
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let flag = arguments.firstIndex(of: "-openpaw-debug-pairing-code"),
+                arguments.index(after: flag) < arguments.endIndex
+            else { return }
+            let code = arguments[arguments.index(after: flag)]
+
+            // Where the terminal dials. The structured API does not need this — `DirectLoopbackForwarder` already
+            // reaches the daemon — but `OpenPawModel` only marks the structured backend ready once the terminal is
+            // connected, on purpose: it must not claim a session is live while the user cannot type into it. So
+            // reaching the composer needs a host that really answers SSH, supplied with `--ssh-host`.
+            let sshTarget = arguments.firstIndex(of: "-openpaw-debug-ssh-host")
+                .flatMap { index -> String? in
+                    let next = arguments.index(after: index)
+                    return next < arguments.endIndex ? arguments[next] : nil
+                }
+            let seededKey = arguments.firstIndex(of: "-openpaw-debug-seed-key")
+                .flatMap { index -> String? in
+                    let next = arguments.index(after: index)
+                    return next < arguments.endIndex ? arguments[next] : nil
+                }
+                .map { ($0 as NSString).lastPathComponent }
+            let auth: AuthMethod =
+                seededKey
+                .flatMap { try? KeychainReference(identifier: $0) }
+                .map { AuthMethod.privateKey(reference: $0, passphraseRef: nil) } ?? .agentForwarding
+
+            // A fixed id, so relaunching reuses one host instead of adding another. With a random UUID every
+            // launch appended a new "Debug daemon" — nineteen of them after an afternoon — and, worse, the
+            // credential is keyed by host id, so each launch looked unpaired, re-sent a single-use code, and the
+            // app auto-connected to a previous run's dead port and reported a transport failure.
+            let record = HostRecord(
+                id: UUID(uuidString: "0BDEBE00-0000-4000-8000-00000DEBEB00") ?? UUID(),
+                nickname: "Debug daemon",
+                hostname: sshTarget.flatMap { $0.split(separator: "@").last.map(String.init) } ?? "127.0.0.1",
+                username: sshTarget.flatMap {
+                    $0.contains("@") ? String($0.split(separator: "@")[0]) : nil
+                } ?? "debug",
+                auth: auth
+            )
+            model.hostStore.upsert(record)
+            model.selectedHostID = record.id
+            persistHosts()
+
+            // Pair once per daemon, not once per launch and not never.
+            //
+            // A pairing code is single-use, and one `xcodebuild test` launches the app once per test, so pairing
+            // on every launch spends the code and the later launches are told "forbidden". But skipping whenever
+            // a credential exists is just as wrong in the other direction: every run starts a *fresh* daemon that
+            // has never heard of the device this container is holding, so the app would present a credential the
+            // host rejects and never recover. Keying on the port distinguishes the two: same daemon, reuse; new
+            // daemon, pair again.
+            let pairedPortKey = "openpaw.debug.pairedPort"
+            let pairedPort = UserDefaults.standard.string(forKey: pairedPortKey)
+            let currentPort =
+                arguments.firstIndex(of: "-openpaw-debug-direct-port")
+                .flatMap { index -> String? in
+                    let next = arguments.index(after: index)
+                    return next < arguments.endIndex ? arguments[next] : nil
+                }
+
+            // One throwaway request before the one that counts.
+            //
+            // The first URL request a freshly launched app makes to the simulator's loopback comes back as
+            // `NSURLErrorNetworkConnectionLost`, and the daemon's log shows it never arrived, so the connection is
+            // being dropped on this side before it reaches the wire. Retrying `pair` cannot repair it, because a
+            // pairing code is single-use and the first attempt may have half-spent it; a GET to `/v1/health` is
+            // safe to lose. Skipping this cost several runs where the app looked unpaired for no visible reason.
+            if let warmUp = URL(string: "http://127.0.0.1:\(currentPort ?? "0")/v1/health") {
+                _ = try? await URLSession.shared.data(from: warmUp)
+            }
+
+            do {
+                try await hostAPI.connect(hostID: record.id)
+
+                if !hostAPI.isPaired || pairedPort != currentPort {
+                    try await hostAPI.pair(pairingCode: code, deviceName: "uitest")
+                    UserDefaults.standard.set(currentPort, forKey: pairedPortKey)
+                }
+            } catch {
+                // Deliberately not fatal. The test asserts on what the screen shows, and a failure here surfaces
+                // there as an empty session list with a far more useful message than a crash on launch.
+                // `print` goes to stdout, which xcodebuild does not capture from the app under test, so this
+                // also leaves the reason in the container, where the runner script reads it back and reports it.
+                print("debug pairing failed: \(error)")
+                try? "\(error)".write(
+                    to: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("pairing-error.txt"),
+                    atomically: true, encoding: .utf8)
+            }
+        }
+
+    #endif
 
     /// The terminal reports a pasted image rather than handling it, because a bitmap is a prompt attachment and a PTY
     /// has nowhere to put one.
@@ -383,6 +496,28 @@ extension TransportError {
         /// app goes looking for: a device build has no path into this at all, and nothing happens unless someone
         /// explicitly launched with the flag. The key is stored without biometric protection because the simulator
         /// has no enrolled biometry to satisfy the check with.
+        /// A forwarder that skips SSH and points the structured API at a port on this machine.
+        ///
+        /// Exists so a UI test can drive the app against a real `openpaw-host` running on the developer's Mac. The
+        /// simulator shares the host's loopback, so a daemon on 127.0.0.1 is directly reachable and no tunnel is
+        /// needed; the shipping path still has no route that works without SSH.
+        ///
+        /// This is what makes `testHoldingDictationAfterChoosingALocalModelDoesNotKillTheApp` able to do what its
+        /// name says. The microphone lives in `ComposerView`, which needs an agent session, which needs a live
+        /// daemon; without one the app shows an empty state and the crash path cannot be entered at all. That test
+        /// skips rather than pretending otherwise, and this flag is how it stops skipping.
+        ///
+        /// Same fence and same shape as the debug key seed above: DEBUG *and* simulator, opt-in by launch
+        /// argument, so a device build contains no path into it and nothing changes unless somebody asks.
+        static func debugDirectForwarder() -> (any LoopbackForwarder)? {
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let flag = arguments.firstIndex(of: "-openpaw-debug-direct-port"),
+                arguments.index(after: flag) < arguments.endIndex,
+                let port = UInt16(arguments[arguments.index(after: flag)])
+            else { return nil }
+            return DirectLoopbackForwarder(port: port)
+        }
+
         static func seedDebugKeyIfRequested(into keychain: KeychainStore) {
             let arguments = ProcessInfo.processInfo.arguments
             guard let flag = arguments.firstIndex(of: "-openpaw-debug-seed-key"),

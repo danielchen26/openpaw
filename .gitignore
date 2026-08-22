@@ -30,3 +30,6 @@ Package.resolved.lock
 # a repository is not the place for a WAV corpus.
 tools/dictation-cer/*.wav
 tools/dictation-cer/*.aiff
+
+# Bytecode from scripts/dictation-ui-live.py importing smoke.py as a module to reuse its daemon setup.
+scripts/__pycache__/
