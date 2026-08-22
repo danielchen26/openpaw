@@ -257,7 +257,7 @@ extension SSHConnection {
 
         do {
             try await Self.awaitAuthentication(
-                authPromise.futureResult,
+                authPromise,
                 on: channel,
                 timeout: configuration.connectTimeout
             )
@@ -306,16 +306,26 @@ extension SSHConnection {
 
     /// Wait for `UserAuthSuccessEvent`, bounded by `timeout` and by the channel closing.
     private static func awaitAuthentication(
-        _ future: EventLoopFuture<Void>,
+        _ promise: EventLoopPromise<Void>,
         on channel: Channel,
         timeout: Duration
     ) async throws {
+        // `NIOSSHHandler.channelInactive` does not forward the event, so `AuthenticationGate` sitting behind it
+        // never hears that the socket died. Watch `closeFuture` instead: a server that accepts the TCP connection
+        // and then never sends a banner would otherwise leave this await unresolved forever, which the user sees
+        // as a connection stuck on "authenticating" with no error and nothing to retry.
+        channel.closeFuture.whenComplete { _ in
+            promise.fail(
+                TransportError.authenticationFailed(
+                    reason: "the connection closed before authentication completed"))
+        }
         let scheduled = channel.eventLoop.scheduleTask(in: timeout.asTimeAmount) {
+            promise.fail(TransportError.timeout)
             channel.close(promise: nil)
         }
         defer { scheduled.cancel() }
         do {
-            try await future.get()
+            try await promise.futureResult.get()
         } catch let error as TransportError {
             throw error
         } catch {

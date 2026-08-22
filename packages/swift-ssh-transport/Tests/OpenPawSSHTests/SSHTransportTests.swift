@@ -376,3 +376,101 @@ struct SSHTransportTests {
         }
     }
 }
+
+// MARK: - Silent peer
+
+/// A TCP listener that accepts a connection and then says nothing at all.
+///
+/// Models a wedged sshd or a black-holing middlebox: the socket connects, so the bootstrap's `connectTimeout` is
+/// satisfied and everything looks healthy, but the SSH banner never arrives.
+final class SilentListener: @unchecked Sendable {
+    private let handle: Int32
+    private let accepted = NIOLockedValueBox<[Int32]>([])
+    let port: Int
+
+    init() throws {
+        let listening = socket(AF_INET, SOCK_STREAM, 0)
+        guard listening >= 0 else { throw SilentListenerError.failed("socket") }
+        handle = listening
+        var reuse: Int32 = 1
+        setsockopt(listening, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0  // the kernel picks a free port
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(listening, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0, listen(listening, 4) == 0 else {
+            close(listening)
+            throw SilentListenerError.failed("listen")
+        }
+
+        var actual = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &actual) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(listening, $0, &length) }
+        }
+        guard named == 0 else {
+            close(listening)
+            throw SilentListenerError.failed("getsockname")
+        }
+        port = Int(UInt16(bigEndian: actual.sin_port))
+
+        // Accept and hold the peer open. Closing it would surface as a clean disconnect, which is a different
+        // failure from the silence being reproduced here.
+        let held = accepted
+        Thread.detachNewThread {
+            while true {
+                let client = accept(listening, nil, nil)
+                if client < 0 { return }
+                held.withLockedValue { $0.append(client) }
+            }
+        }
+    }
+
+    func stop() {
+        close(handle)
+        accepted.withLockedValue { clients in
+            for client in clients { close(client) }
+            clients.removeAll()
+        }
+    }
+
+    enum SilentListenerError: Error {
+        case failed(String)
+    }
+}
+
+@Suite("A peer that never speaks")
+struct SilentPeerTests {
+
+    /// The bug a user sees as a card stuck on "authenticating" with a spinner that never resolves: nothing to read,
+    /// nothing to retry, and no way to tell whether the machine is unreachable or the app is simply wedged.
+    ///
+    /// `connectTimeout` is supposed to make a silent peer a visible failure. The TCP connect succeeds here, so the
+    /// bootstrap's own timeout never fires, and the wait for authentication has to carry its own deadline.
+    @Test("a server that accepts and then says nothing fails instead of hanging forever", .timeLimit(.minutes(1)))
+    func silentServerTimesOut() async throws {
+        let listener = try SilentListener()
+        defer { listener.stop() }
+
+        let transport = try TransportFixture.makeTransport(trusting: "never-offered")
+        var configuration = try TransportFixture.configuration(port: listener.port)
+        configuration.connectTimeout = .seconds(2)
+
+        let started = ContinuousClock.now
+        await #expect(throws: (any Error).self) {
+            try await transport.connect(configuration: configuration)
+        }
+        let elapsed = ContinuousClock.now - started
+
+        #expect(
+            elapsed < .seconds(20),
+            "the connection to a silent server never failed, so the app sits on a spinner forever"
+        )
+    }
+}
