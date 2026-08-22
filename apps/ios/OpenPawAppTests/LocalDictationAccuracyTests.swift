@@ -159,6 +159,44 @@ final class LocalDictationAccuracyTests: XCTestCase {
         XCTAssertNotNil(apple, "Apple's recogniser still has to work on a simulator")
     }
 
+    /// What the model says must reach the terminal unchanged, apart from the model's own tags.
+    ///
+    /// Runs everywhere, GPU or not, because it is pure string work — and it had to be pulled out of the actor to
+    /// be reachable at all, which is the point: this function decides what gets typed into somebody's shell and
+    /// until now nothing could test it.
+    ///
+    /// It caught a real one. The stripper also removed anything matching `<[^>]*>`, so
+    /// `cat < input.txt > output.txt` arrived as `cat  output.txt`: a different command, still valid, silently
+    /// substituted for the one the user spoke. In a chat box that is a cosmetic bug. In a terminal draft the user
+    /// is about to execute, it is the worst thing this app could do.
+    func testShellRedirectionSurvivesTagStripping() {
+        // The tags this exists for.
+        XCTAssertEqual(LoadedASRModel.clean("<|zh|>运行 npm install"), "运行 npm install")
+        XCTAssertEqual(LoadedASRModel.clean("<|en|><|transcribe|>git status"), "git status")
+        XCTAssertEqual(LoadedASRModel.clean("  git commit  \n"), "git commit")
+
+        // Shell syntax, which must not be touched. Every one of these was mangled before.
+        for command in [
+            "cat < input.txt > output.txt",
+            "sort < a.txt > b.txt",
+            "diff <(ls) <(ls -a)",
+            "grep foo < log",
+            "echo hi > /dev/null 2>&1",
+            "python3 -c 'print(1 < 2)'",
+            "if [ $a -lt $b ]; then echo '<yes>'; fi",
+        ] {
+            XCTAssertEqual(
+                LoadedASRModel.clean(command), command,
+                "the transcript cleaner rewrote a shell command the user dictated")
+        }
+
+        // A stray opening tag must not swallow the rest of the sentence.
+        let stray = LoadedASRModel.clean("<|zh 运行 npm install 安装依赖")
+        XCTAssertTrue(
+            stray.contains("npm install"),
+            "an unterminated model tag ate the command: \(stray)")
+    }
+
     // MARK: Machinery
 
     /// A sentence as 16 kHz mono float, which is exactly what `LocalASRSession` hands the model from the

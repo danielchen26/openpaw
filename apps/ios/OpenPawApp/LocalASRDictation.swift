@@ -321,9 +321,21 @@ actor LoadedASRModel {
     ///
     /// A transcript that arrives with `<|zh|>` on the front is not a transcript, it is a debug string, and it would
     /// be pasted straight into a terminal draft.
-    private static func clean(_ text: String) -> String {
+    ///
+    /// Only the `<|...|>` form is removed, and that restriction is the whole point. This used to also strip
+    /// anything matching `<[^>]*>`, which in a terminal client is a disaster: `cat < input.txt > output.txt` came
+    /// back as `cat  output.txt`. The user dictates a redirection, the app silently deletes half of it, and what
+    /// lands in the draft is a different, valid command — the worst possible failure for something a person is
+    /// about to run. Angle brackets are shell syntax here, not markup, and this text is going to a shell.
+    ///
+    /// The bounded `{0,40}` guards against a sentence full of comparisons collapsing into nothing if a model ever
+    /// emits a stray `<|`.
+    ///
+    /// Not private, so it can be tested without a GPU. `LoadedASRModel` cannot be constructed on a simulator at
+    /// all — building either backend goes through MLX or CoreML — so a `private` helper here is a piece of logic
+    /// that decides what the user's terminal receives and that no automated check can ever reach.
+    static func clean(_ text: String) -> String {
         text
-            .replacingOccurrences(of: "<[^>]{0,40}>", with: "", options: .regularExpression)
             .replacingOccurrences(of: "<\\|[^|]{0,40}\\|>", with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
