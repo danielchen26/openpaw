@@ -20,6 +20,21 @@ public struct SessionSpaceSnapshot: Sendable, Hashable {
         self.transport = transport
         self.issues = issues
     }
+
+    /// Which multiplexer a "new session" should be created with.
+    ///
+    /// An explicit host preference always wins. Otherwise the host itself is the evidence: creating a tmux session on
+    /// a host that only runs herdr silently does nothing, so the most common multiplexer among the sessions actually
+    /// discovered is used, and tmux remains the fallback only when nothing at all is running.
+    public var multiplexerForNewSessions: MultiplexerKind {
+        if let preferred = transport.preferredMultiplexer { return preferred }
+        let tally = Dictionary(grouping: remoteSessions, by: \.kind).mapValues(\.count)
+        // Ties break by name so the choice cannot flip between two equally common multiplexers.
+        let winner = tally.max { lhs, rhs in
+            lhs.value == rhs.value ? lhs.key.rawValue > rhs.key.rawValue : lhs.value < rhs.value
+        }
+        return winner?.key ?? .tmux
+    }
 }
 
 public struct SessionTransportPresentation: Sendable, Hashable {

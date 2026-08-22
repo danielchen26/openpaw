@@ -687,7 +687,7 @@ public struct RootView: View {
 
     private func createSession(_ name: String) {
         guard canUseCurrentSessionSpace() else { return }
-        let adapter = MultiplexerAdapters.adapter(for: sessionSpace.transport.preferredMultiplexer ?? .tmux)
+        let adapter = MultiplexerAdapters.adapter(for: sessionSpace.multiplexerForNewSessions)
         runSessionCommand(adapter.create(name: name, directory: nil), refreshAfterCommand: false)
         router.destination = .terminal
     }

@@ -4,6 +4,40 @@ import OpenPawTerminalCore
 @testable import OpenPawUI
 
 final class SessionSpacePresentationTests: XCTestCase {
+    // MARK: creating a session on a host with no explicit preference
+
+    func testCreationFollowsWhatIsActuallyRunningOnTheHost() {
+        // The user's host runs herdr and no tmux. Creating a session used to fall back to tmux and fail silently.
+        let herdr = RemoteSession(id: "w3:p9", name: "fix the build", kind: .herdr)
+        let transport = SessionTransportPresentation(preferredMultiplexer: nil, attemptedMultiplexers: [.tmux, .zellij, .screen, .herdr])
+        let snapshot = SessionSpaceSnapshot(remoteSessions: [herdr], transport: transport)
+        XCTAssertEqual(snapshot.multiplexerForNewSessions, .herdr)
+    }
+
+    func testAnExplicitHostPreferenceStillWins() {
+        let herdr = RemoteSession(id: "w3:p9", name: "fix the build", kind: .herdr)
+        let transport = SessionTransportPresentation(preferredMultiplexer: .screen, attemptedMultiplexers: [.screen])
+        let snapshot = SessionSpaceSnapshot(remoteSessions: [herdr], transport: transport)
+        XCTAssertEqual(snapshot.multiplexerForNewSessions, .screen)
+    }
+
+    func testTheMostCommonRunningMultiplexerWins() {
+        // A host with one stray tmux session and three herdr agents should create herdr sessions.
+        let sessions = [
+            RemoteSession(id: "$0", name: "stray", kind: .tmux),
+            RemoteSession(id: "w3:p1", name: "a", kind: .herdr),
+            RemoteSession(id: "w3:p9", name: "b", kind: .herdr),
+            RemoteSession(id: "w3:pB", name: "c", kind: .herdr),
+        ]
+        let snapshot = SessionSpaceSnapshot(remoteSessions: sessions, transport: .init(attemptedMultiplexers: [.tmux, .herdr]))
+        XCTAssertEqual(snapshot.multiplexerForNewSessions, .herdr)
+    }
+
+    func testAnEmptyHostStillFallsBackToTmux() {
+        let snapshot = SessionSpaceSnapshot(remoteSessions: [], transport: .init(attemptedMultiplexers: [.tmux, .herdr]))
+        XCTAssertEqual(snapshot.multiplexerForNewSessions, .tmux)
+    }
+
     func testMixedProvenancePreservesAgentAndRawSessionsWithDuplicateNames() {
         let agent = SessionSummary(sessionID: "agent-1", agent: .codex, title: "api", multiplexerTarget: "api", state: .waiting, pendingInbox: 2)
         let raw = RemoteSession(id: "$0", name: "api", kind: .tmux, isAttached: false, isAlive: true, windowCount: 2)
