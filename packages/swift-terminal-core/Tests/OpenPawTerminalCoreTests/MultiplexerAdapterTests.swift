@@ -245,8 +245,8 @@ final class MultiplexerAdapterTests: XCTestCase {
 
     /// Verbatim `herdr agent list` output from a real host. The app previously invoked `herdr list --json`, a
     /// subcommand that does not exist, so every agent on the host was invisible in Chat.
-    private static let realAgentListJSON = """
-        {"id":"cli:agent:list","result":{"agents":[\
+    private static let realPaneListingJSON = """
+        {"id":"cli:pane:list","result":{"panes":[\
         {"agent":"pi","agent_session":{"agent":"pi","kind":"path","source":"herdr:pi",\
         "value":"/Users/tianchichen/.pi/agent/sessions/x.jsonl"},"agent_status":"idle",\
         "cwd":"/Users/tianchichen","focused":false,"foreground_cwd":"/Users/tianchichen",\
@@ -259,11 +259,11 @@ final class MultiplexerAdapterTests: XCTestCase {
         "pane_id":"w3:p9","revision":1149,"state_change_seq":145,"tab_id":"w3:t1",\
         "terminal_id":"term_65909b7e020c13","terminal_title":"✳ 修复Codex和Claude不可用的问题",\
         "terminal_title_stripped":"修复Codex和Claude不可用的问题","workspace_id":"w3"}],\
-        "type":"agent_list"}}
+        "type":"pane_list"}}
         """
 
     func testHerdrDiscoversAgentsFromTheRealCLI() async throws {
-        let runner = StubRunner([("herdr agent list", .output(Self.realAgentListJSON))])
+        let runner = StubRunner([("herdr pane list", .output(Self.realPaneListingJSON))])
         let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
 
         XCTAssertEqual(sessions.map(\.id), ["w3:p1", "w3:p9"])
@@ -275,12 +275,12 @@ final class MultiplexerAdapterTests: XCTestCase {
     }
 
     func testHerdrUsesTheSubcommandsTheCLIActuallyHas() async throws {
-        let runner = StubRunner([("herdr agent list", .output(Self.realAgentListJSON))])
+        let runner = StubRunner([("herdr pane list", .output(Self.realPaneListingJSON))])
         let adapter = HerdrAdapter()
         _ = try await adapter.discoverSessions(runner: runner)
-        // `herdr list` does not exist; the real listing subcommand is `herdr agent list`.
         let executed = await runner.commands()
-        XCTAssertEqual(executed, ["herdr agent list"])
+        // `herdr list` does not exist, and `herdr agent list` omits the bare shells the phone creates.
+        XCTAssertEqual(executed, ["herdr pane list", "herdr tab list"])
 
         let session = RemoteSession.target("w3:p9", kind: .herdr)
         XCTAssertEqual(adapter.attach(session), "herdr agent attach w3:p9")
@@ -298,12 +298,12 @@ final class MultiplexerAdapterTests: XCTestCase {
             "unknown command: list",
             "usage: herdr agent list",
         ] {
-            let failing = StubRunner([("herdr agent list", .failing(message, exitCode: 1))])
+            let failing = StubRunner([("herdr pane list", .failing(message, exitCode: 1))])
             let viaFailure = try await HerdrAdapter().discoverSessions(runner: failing)
             XCTAssertTrue(viaFailure.isEmpty, "failed \(message)")
 
             // Herdr reports most of these on stdout with exit 0, so the success path needs the same handling.
-            let succeeding = StubRunner([("herdr agent list", .output(message))])
+            let succeeding = StubRunner([("herdr pane list", .output(message))])
             let viaOutput = try await HerdrAdapter().discoverSessions(runner: succeeding)
             XCTAssertTrue(viaOutput.isEmpty, "output \(message)")
         }
@@ -311,7 +311,7 @@ final class MultiplexerAdapterTests: XCTestCase {
 
     func testHerdrReportsTheSocketAPIErrorEnvelopeAsMalformed() {
         // `{"error":{...}}` carries no agents; decoding it as a listing would silently show an empty Chat.
-        let json = #"{"error":{"code":"agent_not_found","message":"nope"},"id":"cli:agent:list"}"#
+        let json = #"{"error":{"code":"pane_not_found","message":"nope"},"id":"cli:pane:list"}"#
         XCTAssertThrowsError(try HerdrAdapter().parseSessions(json)) { error in
             guard case MultiplexerError.malformedOutput(let kind, _) = error else {
                 return XCTFail("unexpected error \(error)")
@@ -321,13 +321,13 @@ final class MultiplexerAdapterTests: XCTestCase {
     }
 
     func testHerdrFallsBackToTheAgentNameWhenThePaneHasNoTitle() throws {
-        let json = #"{"result":{"agents":[{"pane_id":"w1:p1","agent":"codex","terminal_title_stripped":"  "}]}}"#
+        let json = #"{"result":{"panes":[{"pane_id":"w1:p1","agent":"codex","terminal_title_stripped":"  "}]}}"#
         let sessions = try HerdrAdapter().parseSessions(json)
         XCTAssertEqual(sessions.map(\.name), ["codex"])
     }
 
     func testHerdrTreatsAnAgentPaneAsItsOwnSingleWindow() async throws {
-        let runner = StubRunner([("herdr agent list", .output(Self.realAgentListJSON))])
+        let runner = StubRunner([("herdr pane list", .output(Self.realPaneListingJSON))])
         let adapter = HerdrAdapter()
         let sessions = try await adapter.discoverSessions(runner: runner)
         let claude = try XCTUnwrap(sessions.first { $0.id == "w3:p9" })
@@ -335,6 +335,58 @@ final class MultiplexerAdapterTests: XCTestCase {
         XCTAssertEqual(windows.map(\.id), ["w3:p9"])
         XCTAssertEqual(windows.first?.name, "修复Codex和Claude不可用的问题")
         XCTAssertEqual(windows.first.map(adapter.focus(window:)), "herdr agent focus w3:p9")
+    }
+
+    /// Verbatim `herdr pane list` output: one agent pane, and one bare shell created from the phone. A shell pane has
+    /// no agent and no title, so it is named by its tab's label.
+    private static let realPaneListJSON = """
+        {"id":"cli:pane:list","result":{"panes":[\
+        {"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude",\
+        "value":"51d4bacb"},"agent_status":"idle","cwd":"/Users/tianchichen","focused":false,\
+        "foreground_cwd":"/Users/tianchichen","pane_id":"w3:p9","revision":1149,\
+        "scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":51},\
+        "tab_id":"w3:t1","terminal_id":"term_65909b7e020c13",\
+        "terminal_title":"✳ 修复Codex和Claude不可用的问题",\
+        "terminal_title_stripped":"修复Codex和Claude不可用的问题","workspace_id":"w3"},\
+        {"agent_status":"unknown","cwd":"/Users/tianchichen/tmp","focused":false,\
+        "foreground_cwd":"/Users/tianchichen/tmp","pane_id":"w4:p6","revision":0,\
+        "scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":53},\
+        "tab_id":"w4:t4","terminal_id":"term_659a4f2c68d8513","workspace_id":"w4"}],\
+        "type":"pane_list"}}
+        """
+
+    private static let realTabListJSON = """
+        {"id":"cli:tab:list","result":{"tabs":[\
+        {"agent_status":"idle","focused":false,"label":"1","number":1,"pane_count":2,\
+        "tab_id":"w3:t1","workspace_id":"w3"},\
+        {"agent_status":"unknown","focused":false,"label":"openpaw-uitest","number":4,\
+        "pane_count":1,"tab_id":"w4:t4","workspace_id":"w4"}],"type":"tab_list"}}
+        """
+
+    func testHerdrListsShellPanesNotJustAgents() async throws {
+        // A session created from the phone is a bare shell with no agent in it yet. Listing only agents made every
+        // freshly created session invisible, so creation looked like it had done nothing.
+        let runner = StubRunner([
+            ("herdr pane list", .output(Self.realPaneListJSON)),
+            ("herdr tab list", .output(Self.realTabListJSON)),
+        ])
+        let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
+
+        XCTAssertEqual(sessions.map(\.id), ["w3:p9", "w4:p6"])
+        // The shell pane has no title of its own, so it is named by the tab label the user typed.
+        XCTAssertEqual(sessions.map(\.name), ["修复Codex和Claude不可用的问题", "openpaw-uitest"])
+        XCTAssertEqual(sessions.map(\.workingDirectory), ["/Users/tianchichen", "/Users/tianchichen/tmp"])
+    }
+
+    func testHerdrStillListsPanesWhenTabLabelsAreUnavailable() async throws {
+        // Tab labels are a nicety; losing them must not lose the sessions themselves.
+        let runner = StubRunner([
+            ("herdr pane list", .output(Self.realPaneListJSON)),
+            ("herdr tab list", .failing("error: could not connect to server", exitCode: 1)),
+        ])
+        let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
+        XCTAssertEqual(sessions.map(\.id), ["w3:p9", "w4:p6"])
+        XCTAssertEqual(sessions.last?.name, "w4:p6")
     }
 
     // MARK: factory

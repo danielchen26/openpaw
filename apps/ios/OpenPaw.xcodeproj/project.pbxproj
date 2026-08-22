@@ -31,6 +31,7 @@
 		1A2B3C000000000000000073 /* OpenPawUI in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000063 /* OpenPawUI */; };
 		1A2B3C000000000000000074 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000064 /* SwiftTerm */; };
 		1A2B3C00000000000000D200 /* DictationFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D201 /* DictationFlowUITests.swift */; };
+		1A2B3C00000000000000CB01 /* SessionCreationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000CB02 /* SessionCreationUITests.swift */; };
 		1A2B3C0000000000000000B0 /* ConnectFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */; };
 /* End PBXBuildFile section */
 
@@ -74,6 +75,7 @@
 		1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSSHConnectionTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002E /* HostAPIBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAPIBackendTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000D201 /* DictationFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationFlowUITests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000CB02 /* SessionCreationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCreationUITests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectFlowUITests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000B2 /* OpenPawUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenPawUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -165,6 +167,7 @@
 			children = (
 				1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */,
 				1A2B3C00000000000000D201 /* DictationFlowUITests.swift */,
+				1A2B3C00000000000000CB02 /* SessionCreationUITests.swift */,
 				1A2B3C0000000000000000C1 /* HomeInteractionUITests.swift */,
 			);
 			path = OpenPawUITests;
@@ -329,6 +332,7 @@
 			files = (
 				1A2B3C0000000000000000B0 /* ConnectFlowUITests.swift in Sources */,
 				1A2B3C00000000000000D200 /* DictationFlowUITests.swift in Sources */,
+				1A2B3C00000000000000CB01 /* SessionCreationUITests.swift in Sources */,
 				1A2B3C0000000000000000C0 /* HomeInteractionUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

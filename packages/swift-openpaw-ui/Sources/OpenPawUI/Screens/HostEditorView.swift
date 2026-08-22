@@ -809,7 +809,11 @@ struct ShellField: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+            // Hidden from accessibility because the label is carried by the field itself below. Combining the two
+            // into one element, as this view used to, replaces the text field with a plain group: VoiceOver then
+            // offers nothing to type into, and the field cannot be reached at all.
             Text(label).microLabel()
+                .accessibilityHidden(true)
             TextField(placeholder, text: $text)
                 .font(OpenPawTheme.Machine.body)
                 .foregroundStyle(OpenPawTheme.textPrimary)
@@ -824,12 +828,12 @@ struct ShellField: View {
                 #if os(iOS)
                     .textInputAutocapitalization(.never)
                 #endif
+                .accessibilityLabel(issue.map { "\(label). \($0)" } ?? label)
+                .accessibilityIdentifier(label)
             if let issue {
                 ShellIssueText(issue)
             }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(issue.map { "\(label). \($0)" } ?? label)
     }
 }
 

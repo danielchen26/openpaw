@@ -670,7 +670,13 @@ public struct HerdrAdapter: MultiplexerAdapter {
 
     public init() {}
 
-    public var discoverCommand: String { "herdr agent list" }
+    /// Panes rather than agents: a session created from the phone is a bare shell with no agent running in it yet,
+    /// and `herdr agent list` omits those entirely, so a freshly created session would never appear.
+    public var discoverCommand: String { "herdr pane list" }
+
+    /// Tab labels are what the user typed when creating a session. A bare shell pane has no title of its own, so
+    /// without this its only name would be an opaque pane id.
+    public var tabListCommand: String { "herdr tab list" }
 
     /// Herdr wraps every socket-API reply in `{"id":…, "result":…}`, and reports failures as a JSON `error` object
     /// rather than a non-zero exit, so the envelope has to be unwrapped before anything can be decoded.
@@ -684,8 +690,17 @@ public struct HerdrAdapter: MultiplexerAdapter {
         }
     }
 
-    private struct AgentList: Decodable {
-        var agents: [AgentDTO]
+    private struct PaneList: Decodable {
+        var panes: [AgentDTO]
+    }
+
+    private struct TabList: Decodable {
+        var tabs: [TabDTO]
+    }
+
+    private struct TabDTO: Decodable {
+        var tab_id: String
+        var label: String?
     }
 
     private struct AgentDTO: Decodable {
@@ -699,13 +714,17 @@ public struct HerdrAdapter: MultiplexerAdapter {
         var terminal_title: String?
         var workspace_id: String?
 
-        /// What the user recognises the agent by. Herdr already strips the status glyph from the raw title, so the
-        /// stripped form is preferred; the agent binary name is only a fallback for a pane with no title yet.
-        var displayName: String {
-            for candidate in [terminal_title_stripped, terminal_title] {
+        /// What the user recognises the pane by. Herdr already strips the status glyph from the raw title, so the
+        /// stripped form is preferred; a bare shell has no title, and falls back to the label of the tab it was
+        /// created in, then to the agent name, then to the pane id.
+        func displayName(tabLabels: [String: String]) -> String {
+            var candidates = [terminal_title_stripped, terminal_title]
+            if let tab_id { candidates.append(tabLabels[tab_id]) }
+            candidates.append(agent)
+            for candidate in candidates {
                 if let candidate, !candidate.trimmingCharacters(in: .whitespaces).isEmpty { return candidate }
             }
-            return agent ?? pane_id
+            return pane_id
         }
     }
 
@@ -757,19 +776,40 @@ public struct HerdrAdapter: MultiplexerAdapter {
         {
             return []
         }
-        return try parseSessions(output)
+        // Tab labels only improve the names, so a failure here must not lose the panes themselves.
+        let tabs = (try? await runner.run(tabListCommand)).map(Self.parseTabLabels) ?? [:]
+        return try parseSessions(output, tabLabels: tabs)
+    }
+
+    static func parseTabLabels(_ json: String) -> [String: String] {
+        guard let data = json.data(using: .utf8) else { return [:] }
+        let decoder = Self.decoder()
+        let tabs: [TabDTO]
+        if let envelope = try? decoder.decode(Envelope<TabList>.self, from: data), let result = envelope.result {
+            tabs = result.tabs
+        } else if let bare = try? decoder.decode(TabList.self, from: data) {
+            tabs = bare.tabs
+        } else {
+            return [:]
+        }
+        return Dictionary(tabs.compactMap { tab in tab.label.map { (tab.tab_id, $0) } },
+                          uniquingKeysWith: { first, _ in first })
     }
 
     public func parseSessions(_ json: String) throws -> [RemoteSession] {
+        try parseSessions(json, tabLabels: [:])
+    }
+
+    public func parseSessions(_ json: String, tabLabels: [String: String]) throws -> [RemoteSession] {
         guard let data = json.data(using: .utf8) else {
             throw MultiplexerError.malformedOutput(kind: .herdr, detail: "output is not UTF-8")
         }
         let decoder = Self.decoder()
         let dtos: [AgentDTO]
-        if let envelope = try? decoder.decode(Envelope<AgentList>.self, from: data), let result = envelope.result {
-            dtos = result.agents
-        } else if let bare = try? decoder.decode(AgentList.self, from: data) {
-            dtos = bare.agents
+        if let envelope = try? decoder.decode(Envelope<PaneList>.self, from: data), let result = envelope.result {
+            dtos = result.panes
+        } else if let bare = try? decoder.decode(PaneList.self, from: data) {
+            dtos = bare.panes
         } else if let bare = try? decoder.decode([AgentDTO].self, from: data) {
             dtos = bare
         } else {
@@ -778,7 +818,7 @@ public struct HerdrAdapter: MultiplexerAdapter {
         return dtos.map { dto in
             RemoteSession(
                 id: dto.pane_id,
-                name: dto.displayName,
+                name: dto.displayName(tabLabels: tabLabels),
                 kind: .herdr,
                 // Herdr has no "attached" concept; the focused pane is the one the user is looking at.
                 isAttached: dto.focused ?? false,
