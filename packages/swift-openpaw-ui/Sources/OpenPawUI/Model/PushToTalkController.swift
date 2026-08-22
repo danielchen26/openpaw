@@ -1,0 +1,142 @@
+import CoreGraphics
+import Foundation
+
+/// App-wide push-to-talk, owned by the model so the ring is drawn once at the root and the transcript is
+/// available to whichever screen the user is on when they let go.
+///
+/// Living on the model rather than in a view is what makes "hold anywhere" mean anywhere: a per-screen
+/// implementation would need the gesture, the ring and the engine plumbing repeated on every destination, and
+/// would still lose the recording when a screen changed underneath it.
+@MainActor
+@Observable
+public final class PushToTalkController {
+
+    public private(set) var state = PushToTalk()
+    /// What has been heard so far in this hold. Editable text goes to the screen that claims it on release.
+    public private(set) var transcript = ""
+    public private(set) var isUnavailable = false
+
+    /// Set by the screen currently on top. Release delivers the transcript here.
+    public var onCommit: ((String) -> Void)?
+
+    /// Words that were spoken while no screen was listening.
+    ///
+    /// The gesture is installed app-wide, so a user can hold and speak on Chat, Settings or the repo browser —
+    /// screens with nowhere to put a terminal draft. Dropping the sentence there would mean the ring armed, the
+    /// user spoke, and nothing happened, which is the failure this whole feature exists to avoid. Held instead,
+    /// so a screen that can use it may take it, and so the root can tell the user it was heard.
+    public private(set) var unclaimed: String?
+
+    /// Takes the held words, if any. Claiming empties the store: the draft owns them now, and holding again must
+    /// not reinsert the previous sentence.
+    @discardableResult
+    public func claim() -> String? {
+        defer { unclaimed = nil }
+        return unclaimed
+    }
+
+    private var engine: (any DictationEngine)?
+    private var locale: Locale = .current
+    private var mode: DictationMode = .composer
+    private var listenTask: Task<Void, Never>?
+    private var armTask: Task<Void, Never>?
+    private let clock = ContinuousClock()
+
+    public init() {}
+
+    public func configure(engine: (any DictationEngine)?, locale: Locale, mode: DictationMode) {
+        self.engine = engine
+        self.locale = locale
+        self.mode = mode
+    }
+
+    public var ring: TouchRingPresentation? { TouchRingPresentation(state) }
+
+    /// A finger went down. The ring appears immediately, before the hold has armed, so the press is visibly
+    /// acknowledged rather than seeming to do nothing for a third of a second.
+    public func touchBegan(at point: CGPoint) {
+        guard engine?.isAvailable == true else {
+            isUnavailable = true
+            return
+        }
+        isUnavailable = false
+        state.touchBegan(at: point)
+    }
+
+    /// The hold threshold elapsed. Recognition starts here, not on touch down: starting on every tap would open
+    /// the microphone dozens of times a minute and make the first word of a real utterance arrive late.
+    public func arm() {
+        guard state.holdElapsed(at: clock.now), let engine else { return }
+        transcript = ""
+        listenTask?.cancel()
+        listenTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                for try await update in engine.transcribe(locale: locale, mode: mode) {
+                    guard !Task.isCancelled else { return }
+                    self.transcript = update.text
+                }
+            } catch is CancellationError {
+                // Releasing the finger cancels the stream. That is the normal end of every utterance.
+            } catch {
+                self.transcript = ""
+            }
+        }
+    }
+
+    public func touchMoved(to point: CGPoint) {
+        state.touchMoved(to: point, slop: PushToTalk.slop)
+        if case .idle = state.phase { cancelListening() }
+    }
+
+    /// The finger came up. Whether anything is delivered depends on how long the microphone was actually open.
+    public func touchEnded() {
+        let release = state.touchEnded(at: clock.now)
+        let heard = transcript
+        stopEngine()
+        switch release {
+        case .nothingToDo:
+            break
+        case .discard:
+            // Too short to have said anything. Delivering it would insert a stray word into a terminal draft.
+            transcript = ""
+        case .commit:
+            let text = heard.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                if let onCommit {
+                    onCommit(text)
+                } else {
+                    unclaimed = text
+                }
+            }
+            transcript = ""
+        }
+    }
+
+    /// A call arrived, or the app went to the background. Never delivers: no one chose to stop speaking.
+    public func cancel() {
+        state.cancel()
+        transcript = ""
+        stopEngine()
+    }
+
+    private func cancelListening() {
+        transcript = ""
+        stopEngine()
+    }
+
+    private func stopEngine() {
+        armTask?.cancel()
+        armTask = nil
+        let task = listenTask
+        listenTask = nil
+        let engine = engine
+        Task {
+            await engine?.stop()
+            // The engine emits a final result after `stop`, so the stream is given a moment to deliver it before
+            // being torn down. Cancelling immediately loses the last words of every utterance.
+            try? await Task.sleep(for: .milliseconds(50))
+            task?.cancel()
+        }
+    }
+}

@@ -94,8 +94,9 @@ public struct TerminalScreenView: View {
     @State private var matches: [ScrollbackMatch] = []
     @State private var focused: ScrollbackMatch?
     @State private var lineCount = 0
-    @State private var isSelectionMenuPresented = false
     @State private var pinchBase: CGFloat?
+    /// Collapsed by default: the rail exists because the expanded arrangement was taking a quarter of the screen.
+    @State private var isRailExpanded = false
     @State private var voice = VoiceComposition(destination: .terminal)
     @State private var dictationTask: Task<Void, Never>?
     @State private var dictationTurnID: VoiceTurnID?
@@ -145,22 +146,11 @@ public struct TerminalScreenView: View {
                 search
             }
         }
-        .confirmationDialog(
-            "Terminal output", isPresented: $isSelectionMenuPresented, titleVisibility: .visible
-        ) {
-            Button("Select text") {
-                isSearching = true
-                isSelectionMenuPresented = false
-            }
-            Button("Copy all output") { Task { await copyAllOutput() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("\(lineCount) lines held on this device.")
-        }
-        .task(id: isSelectionMenuPresented) {
-            lineCount = await scrollback.lineCount
-        }
         .onDisappear(perform: cancelDictation)
+        .onChange(of: model.dictatedText) { _, text in claimDictatedText(text) }
+        // Also on appear, not only on change: a sentence spoken on another screen is waiting to be claimed by
+        // whichever screen can hold a draft, and arriving here is the moment this one can.
+        .onAppear { claimDictatedText(model.dictatedText) }
     }
 
     // MARK: Header
@@ -262,9 +252,9 @@ public struct TerminalScreenView: View {
                     }
                     .onEnded { _ in pinchBase = nil }
             )
-            .onLongPressGesture(minimumDuration: 0.45) {
-                isSelectionMenuPresented = true
-            }
+            // No long press here. Holding the terminal means "talk to it": that gesture is what the app is built
+            // around, and any menu that answers a hold first takes it away. Select and copy moved to the rail's
+            // search control, which reaches the same scrollback. See `PushToTalk.reservedForSpeech`.
             .overlay {
                 #if os(iOS)
                     // Two-finger tap toggles the key bar. The recognizer lives on the window and passes touches
@@ -273,6 +263,16 @@ public struct TerminalScreenView: View {
                         .allowsHitTesting(false)
                 #endif
             }
+    }
+
+    /// Speech from the hold-anywhere gesture lands in the terminal draft rather than being executed.
+    ///
+    /// The user is holding a screen, not confirming a command, and a misheard `rm` that ran itself would be
+    /// unrecoverable. Staging it keeps the confirmation the Execute button already provides.
+    private func claimDictatedText(_ text: String?) {
+        guard let text, !text.isEmpty else { return }
+        voice.draft = voice.draft.isEmpty ? text : voice.draft + " " + text
+        model.dictatedText = nil
     }
 
     // MARK: Footer
@@ -295,45 +295,86 @@ public struct TerminalScreenView: View {
         }
     }
 
+    /// One rail instead of two stacked bars.
+    ///
+    /// The controls the user reaches for constantly stay out; font size and scrollback search fold behind a
+    /// disclosure. See ``CompactChrome`` for the height this is allowed to cost and why.
     private var controls: some View {
-        HStack(spacing: OpenPawTheme.Space.medium) {
-            dictationButton
-
-            Button {
-                settings.isShortcutBarVisible.toggle()
-            } label: {
-                Image(systemName: settings.isShortcutBarVisible ? "keyboard.chevron.compact.down" : "keyboard")
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
+        let rail = TerminalRailPresentation(isExpanded: isRailExpanded)
+        return VStack(spacing: 0) {
+            HStack(spacing: OpenPawTheme.Space.small) {
+                dictationButton
+                keyboardButton
+                if rail.controls.contains(.search) { searchButton }
+                if rail.controls.contains(.copyAll) { copyAllButton }
+                Spacer(minLength: 0)
+                if rail.controls.contains(.fontSize) { fontStepper }
+                expandButton(rail)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(OpenPawTheme.textSecondary)
-            .accessibilityLabel(settings.isShortcutBarVisible ? "Hide terminal keys" : "Show terminal keys")
-            #if os(macOS)
-                .keyboardShortcut("k", modifiers: .command)
-            #endif
-
-            Button {
-                isSearching = true
-            } label: {
-                Image(systemName: "magnifyingglass")
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(OpenPawTheme.textSecondary)
-            .accessibilityLabel("Search scrollback")
-
-            Spacer(minLength: 0)
-
-            fontStepper
+            .padding(.horizontal, OpenPawTheme.Space.medium)
         }
-        .padding(.horizontal, OpenPawTheme.Space.medium)
-        .padding(.vertical, OpenPawTheme.Space.tight)
+        .frame(height: rail.height)
         .background(OpenPawTheme.panel)
         .overlay(alignment: .top) {
             Rectangle().fill(OpenPawTheme.line).frame(height: OpenPawTheme.hairline)
         }
+        .animation(.snappy(duration: 0.22), value: isRailExpanded)
+    }
+
+    private var keyboardButton: some View {
+        Button {
+            settings.isShortcutBarVisible.toggle()
+        } label: {
+            Image(systemName: settings.isShortcutBarVisible ? "keyboard.chevron.compact.down" : "keyboard")
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(OpenPawTheme.textSecondary)
+        .accessibilityLabel(settings.isShortcutBarVisible ? "Hide terminal keys" : "Show terminal keys")
+        #if os(macOS)
+            .keyboardShortcut("k", modifiers: .command)
+        #endif
+    }
+
+    private var searchButton: some View {
+        Button {
+            isSearching = true
+        } label: {
+            Image(systemName: "magnifyingglass")
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(OpenPawTheme.textSecondary)
+        .accessibilityLabel("Search scrollback")
+    }
+
+    /// The scrollback's copy action, which used to live behind a long press on the terminal.
+    private var copyAllButton: some View {
+        Button {
+            Task { await copyAllOutput() }
+        } label: {
+            Image(systemName: "doc.on.doc")
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(OpenPawTheme.textSecondary)
+        .accessibilityLabel("Copy all output")
+    }
+
+    private func expandButton(_ rail: TerminalRailPresentation) -> some View {
+        Button {
+            isRailExpanded.toggle()
+        } label: {
+            Image(systemName: rail.expandGlyph)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(OpenPawTheme.textSecondary)
+        .accessibilityLabel(rail.expandLabel)
     }
 
     private var fontStepper: some View {

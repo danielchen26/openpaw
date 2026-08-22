@@ -168,6 +168,9 @@ public struct RootView: View {
     private let sessionCommandExecutor: any SessionSpaceCommandExecuting
     private let restorationStore: (any SessionRestorationStoring)?
     @State private var sessionSpace = SessionSpaceSnapshot()
+    /// Hold-anywhere dictation. Owned here so the gesture and its ring exist on every destination rather than
+    /// being reimplemented per screen.
+    @State private var pushToTalk = PushToTalkController()
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     #if os(iOS)
@@ -224,6 +227,7 @@ public struct RootView: View {
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
+        .overlay { pushToTalkLayer }
         .background(OpenPawTheme.ink)
         .tint(OpenPawTheme.textPrimary)
         .task {
@@ -257,6 +261,9 @@ public struct RootView: View {
         }
 #endif
         .task { await pumpScrollback() }
+        .onChange(of: model.dictation == nil) { _, _ in configurePushToTalk() }
+        .onChange(of: settings.dictationLocaleID) { _, _ in configurePushToTalk() }
+        .onAppear { configurePushToTalk() }
         .sheet(item: sheetBinding) { sheet in
             switch sheet {
             case .hostKey(let prompt):
@@ -276,6 +283,57 @@ public struct RootView: View {
             Button("Dismiss", role: .cancel) { model.lastError = nil }
         } message: { error in
             Text(error.detail)
+        }
+    }
+
+    // MARK: Hold anywhere to talk
+
+    /// The gesture and its ring, installed once for the whole app.
+    ///
+    /// The catcher observes the window and consumes nothing, so every button, scroll and text field underneath
+    /// keeps working while a hold is being measured. The ring is drawn above everything because it has to be
+    /// visible over the terminal, a sheet, or whatever else is on screen when the user decides to talk.
+    @ViewBuilder
+    private var pushToTalkLayer: some View {
+        #if os(iOS)
+            ZStack {
+                PushToTalkCatcher(
+                    onBegan: { pushToTalk.touchBegan(at: $0) },
+                    onArmed: {
+                        pushToTalk.arm()
+                        // The only confirmation available to someone who is looking at their thumb, not the screen.
+                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    },
+                    onMoved: { pushToTalk.touchMoved(to: $0) },
+                    onEnded: { pushToTalk.touchEnded() },
+                    onCancelled: { pushToTalk.cancel() }
+                )
+                .allowsHitTesting(false)
+                if let ring = pushToTalk.ring {
+                    TouchRing(ring)
+                }
+            }
+            .ignoresSafeArea()
+        #endif
+    }
+
+    private func configurePushToTalk() {
+        pushToTalk.configure(
+            engine: model.dictation,
+            locale: settings.dictationLocale,
+            mode: settings.dictationMode
+        )
+        // Speech lands wherever the user is. Terminal text is staged as a draft rather than executed: a
+        // misheard command that runs itself on a remote machine is not a bug anyone gets to make twice.
+        pushToTalk.onCommit = { [weak model] text in
+            guard let model else { return }
+            // Appended rather than replaced: a second sentence spoken before a screen has claimed the first must
+            // not silently delete it. The claimer clears the slot when it takes the words.
+            if let pending = model.dictatedText, !pending.isEmpty {
+                model.dictatedText = pending + " " + text
+            } else {
+                model.dictatedText = text
+            }
         }
     }
 
@@ -302,9 +360,7 @@ public struct RootView: View {
             }
         }
         .frame(
-            height: RootNavigationLayout.compactTabBarHeight(
-                isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
-            ),
+            height: CompactChrome.tabBarHeight(isAccessibilitySize: dynamicTypeSize.isAccessibilitySize),
             alignment: .center
         )
         .background(OpenPawTheme.panel)
@@ -337,8 +393,8 @@ public struct RootView: View {
                                 .alignmentGuide(.trailing) { $0[.leading] }
                         }
                     }
-                if RootNavigationLayout.showsVisualTabTitles(
-                    isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
+                if CompactChrome.showsTabTitle(
+                    isSelected: isSelected, isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
                 ) {
                     Text(destination.title)
                         .font(OpenPawTheme.Machine.label)
@@ -346,8 +402,8 @@ public struct RootView: View {
                         .minimumScaleFactor(0.8)
                 }
             }
-            .padding(.bottom, OpenPawTheme.Space.small)
-            .frame(maxWidth: .infinity, minHeight: 52)
+            .padding(.bottom, OpenPawTheme.Space.tight)
+            .frame(maxWidth: .infinity, minHeight: 44)
             .foregroundStyle(isSelected ? OpenPawTheme.textPrimary : OpenPawTheme.textSecondary)
             .contentShape(Rectangle())
         }

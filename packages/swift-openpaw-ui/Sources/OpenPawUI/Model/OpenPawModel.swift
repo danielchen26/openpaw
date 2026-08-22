@@ -30,6 +30,11 @@ public final class OpenPawModel {
     public private(set) var terminal: (any TerminalBackend)?
     public private(set) var structuredBackendReady = false
     public var dictation: (any DictationEngine)?
+    /// The last thing the user said while holding the screen, staged for whichever screen is on top.
+    ///
+    /// Staged rather than executed on purpose. Speech recognition is wrong often enough that running what it
+    /// heard on a remote machine is not a risk worth taking, so this is a draft the user confirms.
+    public var dictatedText: String?
 
     // MARK: - Hosts and connection
 

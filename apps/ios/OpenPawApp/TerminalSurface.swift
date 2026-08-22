@@ -41,6 +41,7 @@ struct TerminalSurface: UIViewRepresentable {
         view.applyOpenPawPalette()
         view.configureTextInput()
         view.installPinchZoom()
+        view.releaseLongPressForDictation()
         view.apply(fontSize: fontSize)
         context.coordinator.apply(callbacks: self)
         context.coordinator.attach(view: view)
@@ -390,6 +391,27 @@ final class OpenPawTerminalView: TerminalView {
             coordinator?.changeFontSize(to: (pinchBaseFontSize * gesture.scale).rounded())
         default:
             break
+        }
+    }
+
+    // MARK: Gestures
+
+    /// Gives the long press back to dictation.
+    ///
+    /// `TerminalView` installs its own 0.7s long press that raises the UIKit edit menu (Paste / Select / Select
+    /// All). That menu answered the hold before the speech ring could appear, so "hold anywhere to talk" did
+    /// nothing on the one screen where it matters most. Selection is still reachable from the rail's search
+    /// control, which is where this app's own copy path already lives.
+    ///
+    /// Disabled rather than removed: the recognizer is created in SwiftTerm's initialiser and removing it would
+    /// depend on identifying it by index, which a future version could reorder underneath us.
+    func releaseLongPressForDictation() {
+        for recognizer in gestureRecognizers ?? [] {
+            guard let press = recognizer as? UILongPressGestureRecognizer else { continue }
+            // Ours, installed by this app, is not one to disable — only the view's built-in menu press is.
+            if press.minimumPressDuration >= 0.5, press.numberOfTouchesRequired == 1 {
+                press.isEnabled = false
+            }
         }
     }
 

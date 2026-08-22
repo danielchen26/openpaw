@@ -32,6 +32,42 @@ final class DictationFlowUITests: XCTestCase {
         XCTAssertTrue(mic.isHittable, "the dictation control cannot be tapped")
     }
 
+    /// Holding the terminal must reach dictation rather than a menu.
+    ///
+    /// This is a regression test for a defect found on the device, not in a test: holding the terminal opened a
+    /// select/copy menu, so "hold anywhere to talk" did nothing on the screen it matters most on. Two menus were
+    /// in the way — this app's own confirmation dialog, and the UIKit edit menu `TerminalView` installs itself.
+    /// Both are checked here by name, because either one reappearing silently takes the gesture back.
+    func testHoldingTheTerminalDoesNotRaiseAMenuInsteadOfDictating() throws {
+        let app = launchedApp()
+        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
+        app.buttons["Terminal"].tap()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface to hold")
+        terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).press(forDuration: 1.2)
+
+        // SwiftTerm's own edit menu. It answered a 0.7s press and covered the speech ring.
+        for label in ["Select All", "Paste", "Select"] {
+            XCTAssertFalse(
+                app.menuItems[label].exists || app.buttons[label].exists,
+                "holding the terminal raised the system edit menu, which takes the gesture away from speech"
+            )
+        }
+        // This app's own confirmation dialog, which used to answer a 0.45s press.
+        XCTAssertFalse(
+            app.buttons["Copy all output"].exists && app.buttons["Cancel"].exists,
+            "holding the terminal raised the output menu instead of starting dictation"
+        )
+
+        // What replaced it: copying is still reachable, from the rail rather than from a hold.
+        app.buttons["Show more terminal controls"].tap()
+        XCTAssertTrue(
+            app.buttons["Copy all output"].waitForExistence(timeout: 5),
+            "the long press lost its menu and the rail did not gain it, so copying is unreachable"
+        )
+    }
+
     /// Tapping the microphone has to actually arm dictation. The label flipping to "Stop dictation" is the app's own
     /// claim that the audio graph is live; without it the user is talking to a control that did nothing.
     func testTappingTheMicrophoneStartsAndStopsDictation() throws {
