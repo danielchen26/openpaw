@@ -11,23 +11,66 @@ import SwiftUI
 /// the edge either loses to the system or works only sometimes, which is worse than not existing.
 public struct ControlDeckView<KeysPage: View, DestinationsPage: View, ViewPage: View>: View {
     @Binding private var deck: ControlDeck
+    private let overTerminal: Bool
     private let keys: KeysPage
     private let destinations: DestinationsPage
     private let view: ViewPage
 
     public init(
         deck: Binding<ControlDeck>,
+        overTerminal: Bool = false,
         @ViewBuilder keys: () -> KeysPage,
         @ViewBuilder destinations: () -> DestinationsPage,
         @ViewBuilder view: () -> ViewPage
     ) {
         self._deck = deck
+        self.overTerminal = overTerminal
         self.keys = keys()
         self.destinations = destinations()
         self.view = view()
     }
 
     public var body: some View {
+        if deck.isStowed {
+            edgeHandle
+        } else {
+            strip
+        }
+    }
+
+    /// What is left when the strip has been swiped off the side: a tab against the leading edge.
+    ///
+    /// Deliberately not a full-width bar. A bar spanning the screen is the thing that was just dismissed, and
+    /// leaving one behind would mean the gesture gave back none of the height it was asked for.
+    private var edgeHandle: some View {
+        HStack(spacing: 0) {
+            Button {
+                deck = deck.unstowed()
+            } label: {
+                Capsule()
+                    .fill(OpenPawTheme.textTertiary)
+                    .frame(width: 4, height: 36)
+                    .frame(width: ControlDeck.stowedHandleWidth, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Show controls")
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 44)
+        // Over the content rather than beside it: a stowed strip that still reserved a row would not have given
+        // the screen back, which is the whole of what was asked for.
+        .background(Color.clear)
+        .transition(.move(edge: .leading).combined(with: .opacity))
+        .simultaneousGesture(swipe)
+        .accessibilityElement(children: .contain)
+        .accessibilityAdjustableAction { direction in
+            if direction == .increment { deck = deck.unstowed() }
+        }
+    }
+
+    private var strip: some View {
         VStack(spacing: 0) {
             grip
             if !deck.isCollapsed {
@@ -38,11 +81,11 @@ public struct ControlDeckView<KeysPage: View, DestinationsPage: View, ViewPage: 
             }
         }
         .frame(height: deck.height, alignment: .top)
-        .background(OpenPawTheme.panel)
-        .overlay(alignment: .top) {
-            Rectangle().fill(OpenPawTheme.line).frame(height: OpenPawTheme.hairline)
-        }
+        // Translucent, with the app's content running underneath rather than stopping above. The blur is only
+        // half of it: what makes a surface read as glass is that something is genuinely moving behind it.
+        .glassChrome(overTerminal: overTerminal, edge: .top)
         .contentShape(Rectangle())
+        .transition(.move(edge: .leading))
         .animation(.snappy(duration: 0.24), value: deck)
         // Paging loses to anything inside the strip that wants the drag first, which is what keeps the key bar
         // scrollable sideways while the strip itself also pages sideways.

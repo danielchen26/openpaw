@@ -106,3 +106,74 @@ struct ControlDeckTests {
         #expect(ControlDeck(page: .destinations).voiceLabel == "Go, page 2 of 3")
     }
 }
+
+/// Swiping the strip off the side of the screen entirely.
+///
+/// Asked for directly: fold it all the way to the left and the screen behind it becomes full screen. The strip is
+/// already a horizontal series of pages, so one more step in the direction the user is already swiping costs no
+/// new gesture to learn.
+@Suite("Control deck stowing")
+struct ControlDeckStowingTests {
+
+    @Test("swiping back past the first page stows the strip off the screen")
+    func swipingPastTheFirstPageStows() {
+        let deck = ControlDeck(page: .keys)
+        #expect(deck.paged(.backward).isStowed)
+    }
+
+    /// The whole request: what is left is the screen.
+    @Test("a stowed strip takes no height at all")
+    func stowedTakesNoHeight() {
+        #expect(ControlDeck(page: .keys, isStowed: true).height == 0)
+    }
+
+    /// A gesture that reverses a movement has to reverse it.
+    @Test("swiping forward brings the strip back to the page it left from")
+    func unstowingReturnsToTheSamePage() {
+        let stowed = ControlDeck(page: .keys).paged(.backward)
+        let back = stowed.paged(.forward)
+        #expect(back.isStowed == false)
+        #expect(back.page == .keys)
+    }
+
+    /// Only one end can mean "away" before the direction stops carrying meaning.
+    @Test("the far end still stops rather than stowing or wrapping")
+    func trailingEndStops() {
+        let last = ControlDeck(page: .view)
+        #expect(last.paged(.forward) == last)
+    }
+
+    /// Swiping again while stowed must not do something new.
+    @Test("a stowed strip stays stowed when swiped further in the same direction")
+    func stowedStaysStowed() {
+        let stowed = ControlDeck(page: .keys, isStowed: true)
+        #expect(stowed.paged(.backward) == stowed)
+    }
+
+    /// Navigating somewhere and finding its controls missing would be a defect.
+    @Test("arriving at a screen brings a stowed strip back")
+    func navigationUnstows() {
+        let stowed = ControlDeck(page: .keys, isStowed: true)
+        #expect(stowed.showing(.destinations).isStowed == false)
+    }
+
+    /// Stowed is not a state VoiceOver can see, so it has to be a state VoiceOver is told.
+    @Test("a stowed strip says so rather than reading out a page it is not showing")
+    func stowedSpeaksItsState() {
+        #expect(ControlDeck(page: .keys, isStowed: true).voiceLabel == "Controls hidden")
+    }
+
+    /// A tab against the edge, not a full-width bar: a bar would be the thing that was just dismissed.
+    @Test("what is left behind is a narrow edge handle rather than a row")
+    func handleIsNarrow() {
+        #expect(ControlDeck.stowedHandleWidth < 44)
+        #expect(ControlDeck.stowedHandleWidth > 0)
+    }
+
+    /// Folding and stowing are different states and must not be confused for each other.
+    @Test("folding leaves the grip and stowing does not")
+    func foldingAndStowingDiffer() {
+        #expect(ControlDeck(isCollapsed: true).height == ControlDeck.gripHeight)
+        #expect(ControlDeck(isStowed: true).height == 0)
+    }
+}

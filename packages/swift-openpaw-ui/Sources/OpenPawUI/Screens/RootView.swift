@@ -355,22 +355,41 @@ public struct RootView: View {
     /// The strip is one row that pages sideways rather than a stack of bars. On the terminal there used to be
     /// three of them — a control rail, this tab bar, and the key bar — which a phone screenshot showed piled up
     /// with the last one crushed against the home indicator.
+    ///
+    /// Attached with `safeAreaInset` rather than stacked above the content. The strip is translucent, so content
+    /// has to keep drawing underneath it for there to be anything to see through; a `VStack` would stop the
+    /// content at the strip's top edge and leave the glass blurring a flat colour. The inset also means scroll
+    /// views inset their own content, so nothing scrollable ends up parked underneath the strip permanently.
+    ///
+    /// Stowed, it moves from an inset to an overlay. An inset reserves its height whatever it draws, and a strip
+    /// swiped off the screen that still reserved a row would have given back none of the space it was dismissed
+    /// for.
     private func tabs(width: RootWidth) -> some View {
-        VStack(spacing: 0) {
-            navigated(router.destination, width: width)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            ControlDeckView(deck: $deck) {
-                keysPage(width: width)
-            } destinations: {
-                destinationsPage
-            } view: {
-                viewPage
+        navigated(router.destination, width: width)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if !deck.isStowed { controlDeck(width: width) }
             }
-        }
-        // Arriving somewhere new turns the strip to the page that screen is driven from, because a strip showing
-        // terminal keys over a settings screen is a row of controls that do nothing.
-        .onChange(of: router.destination) { _, destination in
-            deck = deck.showing(ControlDeck.page(arrivingAt: destination))
+            .overlay(alignment: .bottomLeading) {
+                if deck.isStowed { controlDeck(width: width) }
+            }
+            // Arriving somewhere new turns the strip to the page that screen is driven from, because a strip
+            // showing terminal keys over a settings screen is a row of controls that do nothing.
+            .onChange(of: router.destination) { _, destination in
+                deck = deck.showing(ControlDeck.page(arrivingAt: destination))
+            }
+    }
+
+    /// The room the strip takes from the content, and nothing when it has been swiped off the screen.
+    private var deckInset: CGFloat { deck.isStowed ? 0 : deck.height }
+
+    private func controlDeck(width: RootWidth) -> some View {
+        ControlDeckView(deck: $deck, overTerminal: router.destination == .terminal) {
+            keysPage(width: width)
+        } destinations: {
+            destinationsPage
+        } view: {
+            viewPage
         }
     }
 
@@ -511,6 +530,11 @@ public struct RootView: View {
         if destination.pushesDetail {
             NavigationStack {
                 content(destination, width: width)
+                    // A navigation stack does not pass the container's bottom safe-area inset down to what it
+                    // is showing, so the strip's height has to be handed to the content directly. Without this
+                    // the last control on a scrolling screen sits underneath the strip at the end of the scroll
+                    // and cannot be tapped at all — which is what the strip's own inset was meant to prevent.
+                    .safeAreaPadding(.bottom, deckInset)
             }
         } else {
             content(destination, width: width)

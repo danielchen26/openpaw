@@ -91,16 +91,33 @@ public struct ControlDeck: Sendable, Equatable {
     /// terminal with no visible controls is the state that gets reported as "the app lost its buttons".
     public static let collapsedHeight: CGFloat = gripHeight
 
+    /// Height when the strip has been swiped off the side of the screen entirely.
+    ///
+    /// Zero, and the one arrangement where that is safe. Stowing is reached by swiping *past* the first page, so
+    /// the user performed a deliberate horizontal gesture and knows the strip went sideways; the way back is the
+    /// same gesture reversed. That is not true of folding, which can be arrived at by a stray vertical swipe.
+    ///
+    /// The handle it leaves behind is a tab against the leading edge rather than a full-width row, so the screen
+    /// really is given over to content — which is the entire point of asking for it.
+    public static let stowedHeight: CGFloat = 0
+
+    /// The width of the tab left against the screen edge when the strip is stowed.
+    ///
+    /// Narrow, because it is permanently on screen over content. It earns a reliable tap by being tall rather
+    /// than wide, and by not being the only way back: swiping right from the edge unstows the strip too.
+    public static let stowedHandleWidth: CGFloat = 14
+
     /// A rail of 52, a tab bar of 50 and a key bar of 48: what the three stacked rows cost, and the number the
     /// saving is measured against.
     public static let legacyHeight: CGFloat = 150
 
-    public static func height(isCollapsed: Bool) -> CGFloat {
-        isCollapsed ? collapsedHeight : height
+    public static func height(isCollapsed: Bool, isStowed: Bool = false) -> CGFloat {
+        if isStowed { return stowedHeight }
+        return isCollapsed ? collapsedHeight : height
     }
 
-    public static func reclaimedHeight(isCollapsed: Bool) -> CGFloat {
-        legacyHeight - height(isCollapsed: isCollapsed)
+    public static func reclaimedHeight(isCollapsed: Bool, isStowed: Bool = false) -> CGFloat {
+        legacyHeight - height(isCollapsed: isCollapsed, isStowed: isStowed)
     }
 
     /// The page order, left to right, with navigation in the middle so both other pages are one swipe away.
@@ -108,13 +125,16 @@ public struct ControlDeck: Sendable, Equatable {
 
     public let page: Page
     public let isCollapsed: Bool
+    /// Swiped off the leading edge of the screen, leaving content the whole screen.
+    public let isStowed: Bool
 
-    public init(page: Page = .destinations, isCollapsed: Bool = false) {
+    public init(page: Page = .destinations, isCollapsed: Bool = false, isStowed: Bool = false) {
         self.page = page
         self.isCollapsed = isCollapsed
+        self.isStowed = isStowed
     }
 
-    public var height: CGFloat { Self.height(isCollapsed: isCollapsed) }
+    public var height: CGFloat { Self.height(isCollapsed: isCollapsed, isStowed: isStowed) }
 
     public var index: Int { Self.pages.firstIndex(of: page) ?? 0 }
 
@@ -138,28 +158,57 @@ public struct ControlDeck: Sendable, Equatable {
         destination == .terminal ? .keys : .destinations
     }
 
-    /// Paging is bounded rather than wrapping.
+    /// Paging runs off the leading end into stowing, and stops at the trailing end.
     ///
-    /// A wrapping strip means a swipe left from the first page lands on the last, which reads as the gesture
-    /// having gone the wrong way. Stopping at the ends also gives the swipe a floor and a ceiling to feel.
+    /// Swiping back past the first page stows the strip off the side of the screen, which is where the request
+    /// for a full screen is answered: the pages are already a horizontal series, so continuing that series one
+    /// step further is the gesture the user is in the middle of rather than a new one to learn.
+    ///
+    /// The trailing end still stops dead. Wrapping there would mean a swipe left from the last page lands on the
+    /// first, which reads as the gesture having gone the wrong way, and only one end can mean "away" before the
+    /// direction stops carrying meaning.
     public func paged(_ direction: Direction) -> ControlDeck {
+        if isStowed {
+            // Any forward swipe brings it back, since there is nowhere further to go in that direction.
+            return direction == .forward ? unstowed() : self
+        }
         let next = index + (direction == .forward ? 1 : -1)
-        guard Self.pages.indices.contains(next) else { return self }
-        return ControlDeck(page: Self.pages[next], isCollapsed: isCollapsed)
+        guard Self.pages.indices.contains(next) else {
+            return direction == .backward ? stowed() : self
+        }
+        return ControlDeck(page: Self.pages[next], isCollapsed: isCollapsed, isStowed: false)
     }
 
     public enum Direction: Sendable { case forward, backward }
 
-    public func collapsed(_ isCollapsed: Bool) -> ControlDeck {
-        ControlDeck(page: page, isCollapsed: isCollapsed)
+    /// Off the side of the screen entirely.
+    public func stowed() -> ControlDeck {
+        ControlDeck(page: page, isCollapsed: isCollapsed, isStowed: true)
     }
 
+    /// Back on screen, at the page it left from.
+    ///
+    /// Returning to the same page matters: the strip went sideways as one object, so bringing it back somewhere
+    /// else would mean the gesture that reverses a movement does not reverse it.
+    public func unstowed() -> ControlDeck {
+        ControlDeck(page: page, isCollapsed: isCollapsed, isStowed: false)
+    }
+
+    public func collapsed(_ isCollapsed: Bool) -> ControlDeck {
+        ControlDeck(page: page, isCollapsed: isCollapsed, isStowed: isStowed)
+    }
+
+    /// Showing a page implies the strip is on screen.
+    ///
+    /// Arriving at a screen whose controls live on the strip has to bring the strip back; leaving it stowed would
+    /// mean navigating somewhere and finding the controls for it missing.
     public func showing(_ page: Page) -> ControlDeck {
-        ControlDeck(page: page, isCollapsed: isCollapsed)
+        ControlDeck(page: page, isCollapsed: isCollapsed, isStowed: false)
     }
 
     /// Read out when the page changes, so paging is not a silent visual event.
     public var voiceLabel: String {
-        "\(page.title), page \(index + 1) of \(Self.pages.count)"
+        if isStowed { return "Controls hidden" }
+        return "\(page.title), page \(index + 1) of \(Self.pages.count)"
     }
 }

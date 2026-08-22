@@ -135,11 +135,13 @@ public struct TerminalScreenView: View {
         GeometryReader { proxy in
             let width = RootWidth.resolve(width: proxy.size.width, isCompactSizeClass: isCompactSizeClass)
             VStack(spacing: 0) {
-                header
                 terminal
                 footer
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
+            // The header floats on the scrollback rather than sitting in the stack above it. Stacked, it would
+            // be a solid bar with nothing behind it, and the glass would be blurring a flat colour.
+            .safeAreaInset(edge: .top, spacing: 0) { header }
         }
         .background(OpenPawTheme.ink)
         .overlay {
@@ -202,10 +204,9 @@ public struct TerminalScreenView: View {
         .padding(.horizontal, OpenPawTheme.Space.medium)
         .padding(.vertical, OpenPawTheme.Space.small)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(OpenPawTheme.panel)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(OpenPawTheme.line).frame(height: OpenPawTheme.hairline)
-        }
+        // Glass, like the strip at the other end of the screen. Scrollback passing under the header is what says
+        // the terminal is a continuous surface the chrome floats on rather than a pane boxed in by two bars.
+        .glassChrome(overTerminal: true, edge: .bottom)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(headerVoiceLabel(status))
     }

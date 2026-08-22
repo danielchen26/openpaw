@@ -119,6 +119,54 @@ final class ControlDeckUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Escape"].waitForExistence(timeout: 5), "the strip did not come back")
     }
 
+    /// Swiping the strip off the left of the screen gives the whole screen to the content.
+    ///
+    /// Asked for directly: fold the strip all the way to the left and what is behind it is full screen. Stowing
+    /// is one more step in the direction the pages already run, so it costs no new gesture — and unlike folding,
+    /// which a stray vertical swipe can trigger, it is only reachable by deliberately swiping past the first page.
+    func testSwipingTheStripOffTheLeftGivesTheScreenToTheContent() throws {
+        let app = launchedApp()
+        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
+        app.buttons["Terminal"].tap()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface")
+        XCTAssertTrue(app.buttons["Escape"].waitForExistence(timeout: 10), "the keys page never appeared")
+
+        let screen = app.windows.firstMatch.frame
+        let before = screen.maxY - terminal.frame.maxY
+
+        // The keys are the first page, so one more swipe backwards takes the strip off the side.
+        swipeStrip(app, toward: .trailing)
+
+        XCTAssertFalse(
+            app.buttons["Escape"].waitForExistence(timeout: 2),
+            "the strip is still on screen after being swiped off the side"
+        )
+        let after = screen.maxY - terminal.frame.maxY
+        XCTAssertLessThan(
+            after, before,
+            "the terminal did not grow when the strip was stowed: it ends \(Int(after)) points above the bottom "
+                + "of the screen, the same as before, so the strip gave back none of the height it was dismissed "
+                + "for"
+        )
+        XCTAssertLessThan(
+            after, 12,
+            "the terminal still stops \(Int(after)) points short of the bottom with the strip stowed, so this is "
+                + "not the full screen that was asked for"
+        )
+
+        // And back, by the same gesture reversed, to the page it left from.
+        let handle = app.buttons["Show controls"]
+        XCTAssertTrue(handle.exists, "stowing left nothing behind, so there is no way back except a gesture "
+            + "nobody was told about")
+        handle.tap()
+        XCTAssertTrue(
+            app.buttons["Escape"].waitForExistence(timeout: 5),
+            "the strip did not come back to the page it left from"
+        )
+    }
+
     private enum Toward { case leading, trailing }
 
     /// Swipes across the strip itself, which is the bottom row of the screen.
