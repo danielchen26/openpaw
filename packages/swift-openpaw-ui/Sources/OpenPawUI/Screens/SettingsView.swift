@@ -582,6 +582,9 @@ public struct SettingsView: View {
                     Button("Remove") { model.dictationModels.remove(choice) }
                         .buttonStyle(.bordered)
                         .font(OpenPawTheme.Machine.code)
+                case .unsupported:
+                    // No button. The state says why, and every action this row could offer would fail the same way.
+                    EmptyView()
                 }
             }
             .frame(minHeight: 44)
@@ -590,7 +593,7 @@ public struct SettingsView: View {
 
     private func statusColor(_ state: DictationModelState) -> Color {
         switch state {
-        case .failed: OpenPawTheme.warn
+        case .failed, .unsupported: OpenPawTheme.warn
         case .installed: OpenPawTheme.textTertiary
         default: OpenPawTheme.textTertiary
         }
@@ -614,7 +617,11 @@ public struct SettingsView: View {
         )
     }
 
-    /// True when the selected engine simply has not been fetched yet, which is a state the user can leave.
+    /// True when the row above already explains why this engine is not running.
+    ///
+    /// Two cases, both of which the row states plainly: the weights have not been fetched yet, or this device
+    /// cannot run them at all. Adding "no dictation engine is available on this device" underneath either one is a
+    /// second, vaguer sentence about the same fact, and in the download case it is also wrong.
     private var engineAwaitsDownload: Bool {
         let choice = settings.effectiveDictationEngine
         guard choice.requiresDownload else { return false }

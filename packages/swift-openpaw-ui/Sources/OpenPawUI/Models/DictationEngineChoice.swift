@@ -118,6 +118,12 @@ public enum DictationModelState: Sendable, Equatable {
     case installed
     /// The last attempt failed. Carries the reason so the screen can say it.
     case failed(String)
+    /// This device cannot run the engine at all, whatever the user does. Carries the reason.
+    ///
+    /// Distinct from `failed` because the two want opposite buttons. A failure is worth retrying and the row offers
+    /// Download again; this is not, and a Download button here would take 450 MB of somebody's bandwidth to arrive
+    /// at the same wall. The concrete case is a simulator, where MLX cannot allocate a Metal heap.
+    case unsupported(String)
 
     public var isInstalled: Bool { self == .installed }
 
@@ -133,6 +139,13 @@ public enum DictationModelState: Sendable, Equatable {
         case .downloading(let progress, let detail): "\(detail) \(Int(progress * 100))%"
         case .installed: "Ready on this device"
         case .failed(let reason): "Download failed: \(reason)"
+        case .unsupported(let reason): reason
         }
+    }
+
+    /// Whether the user can do anything about this state, which decides if a row offers a button at all.
+    public var isActionable: Bool {
+        if case .unsupported = self { return false }
+        return true
     }
 }

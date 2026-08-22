@@ -59,3 +59,11 @@ The clips are synthesised with `say`, not recorded from a human in a room. Synth
 reality, so these numbers are the best case for both engines; a real microphone in a café would move both of them
 up. What it does establish is the *gap*, measured on identical input, which is the only thing the picker needs to
 justify itself.
+
+This tool runs on a Mac, and that is not a stylistic choice. The MLX engines cannot run on an iOS simulator at
+all: `MTLSimDevice` hands MLX a null `architecture()->name()` which it copies straight into a `std::string` and
+aborts on, and setting `MLX_METAL_GPU_ARCH` past that only reaches the real obstacle, Metal asserting
+`MTLStorageModePrivate is required for heaps` because MLX allocates shared-storage heaps. Both are C++ aborts, so
+no Swift `catch` helps. Measuring on the Mac and running the same code on a phone are the only two options, which
+is why `apps/ios/OpenPawAppTests/LocalDictationAccuracyTests.swift` exists as the on-device half and skips
+anywhere else.

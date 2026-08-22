@@ -159,6 +159,25 @@ struct DictationEngineChoiceTests {
         }
     }
 
+    @Test("a state the user cannot act on says so, and every other one offers a way forward")
+    func unsupportedIsNotOfferedAsRetryable() {
+        // The settings row keys its button off `isActionable`, so this is the difference between a device that
+        // cannot run the model saying so once, and it offering a 450 MB download that ends in the same place.
+        #expect(!DictationModelState.unsupported("no GPU").isActionable)
+        #expect(DictationModelState.absent.isActionable)
+        #expect(DictationModelState.failed("network").isActionable)
+        #expect(DictationModelState.installed.isActionable)
+        #expect(DictationModelState.downloading(progress: 0.2, detail: "Fetching").isActionable)
+
+        // And it is never mistaken for a usable model: `isInstalled` gates the engine factory, so an unsupported
+        // state reading as installed is exactly the bug that crashes the app on a simulator.
+        #expect(!DictationModelState.unsupported("no GPU").isInstalled)
+
+        // The reason reaches the screen verbatim rather than being wrapped in "Download failed", which would be
+        // a false description of a device that never attempted a download.
+        #expect(DictationModelState.unsupported("Needs a real device").statusText == "Needs a real device")
+    }
+
     private static func freshDefaults() -> UserDefaults {
         let suite = "openpaw.tests.dictation.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite) ?? .standard

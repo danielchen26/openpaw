@@ -477,6 +477,20 @@ enum ScreenCatalog {
             },
             unavailableReason: ""
         ),
+        // A simulator, where the local engines cannot run at all. Worth a picture because the row must not offer a
+        // Download button here: the state is not a failure to retry, and 450 MB would buy nothing.
+        Screen(
+            name: "SettingsView-modelUnsupported",
+            build: { model, _ in
+                let settings = OpenPawSettings.preview()
+                settings.dictationEngine = .qwen3Small
+                model.dictationModels = StubDictationModelStore(states: [
+                    .qwen3Small: .unsupported("Needs a real device: the simulator has no GPU this model can run on")
+                ])
+                return AnyView(SettingsView(model: model, settings: settings))
+            },
+            unavailableReason: ""
+        ),
         // Chinese selected while the stored engine is the one that cannot speak it. The screen has to say why the
         // recogniser it is using is not the one that was picked, and this is the only place that sentence renders.
         Screen(

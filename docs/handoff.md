@@ -70,6 +70,19 @@ The Milestone 1 app was built, installed and launched on an **iPhone 16 Pro simu
    until a test credential is deliberately imported.
 3. **On-device security and audio.** Face ID / Touch ID, Keychain access control, background re-gating, microphone
    permission and Apple Speech recognition require physical hardware.
+   The local dictation engines are the sharpest edge here. `tools/dictation-cer` proves the *models* are right —
+   Apple 21.6% mean CER against Qwen3-ASR 0.6B's 2.3% on the same clips — and the settings screen is verified
+   through the snapshot catalogue in all five of its states. What has never run is the path between them: a real
+   finger held on a real phone, `AVAudioEngine` capturing at 16 kHz, weights loading over a real network, and the
+   transcript landing in the composer. Every piece has been exercised in isolation and none of them together.
+   **A simulator cannot close this gap, and that is now settled rather than suspected.** MLX fails there twice
+   over: `MTLSimDevice` returns a null `architecture()->name()` which MLX copies into a `std::string` and aborts
+   on, and past that (`MLX_METAL_GPU_ARCH` sets the name by hand) Metal asserts `MTLStorageModePrivate is required
+   for heaps`, because MLX allocates shared-storage heaps on the premise of unified memory. Both are aborts inside
+   C++, not Swift errors, so nothing can catch them. The app therefore reports the local engines as
+   `.unsupported` on a simulator and refuses to build, download or load one; `LocalDictationAccuracyTests` is
+   written and registered against the app target and skips there with that reason, so a cable is the only thing
+   between this repository and a measured on-device answer.
 4. **Terminal input and media.** Real PTY bytes, rotation resize, hardware keyboard chords, bracketed paste, OSC 8,
    OSC 52 pasteboard handoff, pinch zoom, Pinyin composition and image upload still need a credentialed live session.
 5. **Resilient transport and ecosystem claims.** Production terminal transport is SSH. Native Mosh is not implemented

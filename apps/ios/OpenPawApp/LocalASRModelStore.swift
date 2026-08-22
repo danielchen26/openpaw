@@ -36,6 +36,13 @@ final class LocalASRModelStore: DictationModelInstalling {
 
     func install(_ choice: DictationEngineChoice) {
         guard choice.requiresDownload, installs[choice] == nil else { return }
+        // Refused rather than attempted on a simulator. Downloading is loading here — `fromPretrained` builds the
+        // MLX device on its way to the weights — and that construction aborts the process on a simulator instead
+        // of throwing. A developer who taps Download would lose the app rather than see a message.
+        guard !LocalASREngineFactory.isSimulator else {
+            states[choice] = .unsupported(Self.simulatorReason)
+            return
+        }
         states[choice] = .downloading(progress: 0, detail: "Starting")
         // Progress arrives on whatever thread the downloader is using, so it is bounced back to the main actor.
         // Captured as its own closure rather than reaching for `self` inside the loading task, because that task
@@ -91,6 +98,12 @@ final class LocalASRModelStore: DictationModelInstalling {
     func loadedModel(for choice: DictationEngineChoice) async throws -> LoadedASRModel {
         if let model = loaded[choice] { return model }
         if let existing = loads[choice] { return try await existing.value }
+        // The last gate before MLX. `state(of:)` already reports failure on a simulator, but this method is also
+        // reachable directly from tests and from any future caller, and the cost of missing it is not an
+        // exception — it is the process aborting inside Metal with no Swift frame to catch.
+        guard !LocalASREngineFactory.isSimulator else {
+            throw LocalASRError.simulatorUnsupported
+        }
         guard state(of: choice).isInstalled else {
             throw LocalASRError.notDownloaded(choice.displayName)
         }
@@ -158,6 +171,12 @@ final class LocalASRModelStore: DictationModelInstalling {
 
     /// Whether this engine's weights are already on disk, asked of the same cache the loader will use.
     private static func diskState(of choice: DictationEngineChoice) -> DictationModelState {
+        // Weights present on a simulator are still unusable, and reporting them as installed is what turns a
+        // hold into a `SIGABRT` deep inside Metal. Said as a failure with a reason, because "Not downloaded"
+        // would invite the user to fetch 450 MB that could never load.
+        guard !LocalASREngineFactory.isSimulator else {
+            return .unsupported(simulatorReason)
+        }
         guard let modelID = choice.modelID,
             let directory = try? HuggingFaceDownloader.getCacheDirectory(for: modelID)
         else { return .absent }
@@ -165,6 +184,12 @@ final class LocalASRModelStore: DictationModelInstalling {
         // than as a model that loads with random weights.
         return HuggingFaceDownloader.weightsExist(in: directory) ? .installed : .absent
     }
+
+    /// The one sentence a settings row shows when the local engines cannot run here at all.
+    ///
+    /// Names the constraint rather than the symptom: "no usable GPU" is something a developer can act on, whereas
+    /// the underlying `MTLStorageModePrivate is required for heaps` assertion is not a sentence for a settings row.
+    static let simulatorReason = "Needs a real device: the simulator has no GPU this model can run on"
 
     /// One line a settings row can hold, rather than a CoreML stack trace.
     private static func shortReason(_ error: any Error) -> String {
@@ -196,6 +221,12 @@ final class LocalASREngineFactory: DictationEngineMaking {
         case .appleSpeech:
             return apple
         case .qwen3Small, .qwen3Large, .parakeet:
+            // Never on a simulator, whatever the settings say. MLX asks Metal for a shared-storage heap and the
+            // simulator's renderer refuses with `MTLStorageModePrivate is required for heaps`, which is a failed
+            // assertion inside Metal rather than a Swift error: it takes the whole process down. Returning nil
+            // turns "the app dies when a developer holds the dictation button" into "the hold says the engine is
+            // unavailable", which is both true and survivable.
+            guard !Self.isSimulator else { return nil }
             // An engine whose weights are absent is not returned at all. Returning one would arm the ring, record
             // the user's sentence, and then throw — the words would be gone and the reason invisible.
             guard store.state(of: choice).isInstalled else { return nil }
@@ -204,5 +235,14 @@ final class LocalASREngineFactory: DictationEngineMaking {
             localEngines[choice] = engine
             return engine
         }
+    }
+
+    /// Whether this build is running against a simulator, where the local engines cannot run at all.
+    static var isSimulator: Bool {
+        #if targetEnvironment(simulator)
+            return true
+        #else
+            return false
+        #endif
     }
 }

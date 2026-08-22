@@ -23,6 +23,7 @@
 		1A2B3C00000000000000D100 /* LiveDictationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D101 /* LiveDictationTests.swift */; };
 
 		1A2B3C00000000000000D261 /* DictationAccuracyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D260 /* DictationAccuracyTests.swift */; };
+		1A2B3C00000000000000D263 /* LocalDictationAccuracyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D262 /* LocalDictationAccuracyTests.swift */; };
 		1A2B3C0000000000000000D1 /* TerminalFontTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000D0 /* TerminalFontTests.swift */; };
 		1A2B3C0000000000000000C0 /* HomeInteractionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000C1 /* HomeInteractionUITests.swift */; };
 		1A2B3C000000000000000045 /* RedactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000002C /* RedactionTests.swift */; };
@@ -87,6 +88,7 @@
 		1A2B3C00000000000000D101 /* LiveDictationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveDictationTests.swift; sourceTree = "<group>"; };
 
 		1A2B3C00000000000000D260 /* DictationAccuracyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationAccuracyTests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000D262 /* LocalDictationAccuracyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalDictationAccuracyTests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000D0 /* TerminalFontTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFontTests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000C1 /* HomeInteractionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeInteractionUITests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002C /* RedactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedactionTests.swift; sourceTree = "<group>"; };
@@ -189,6 +191,7 @@
 				1A2B3C00000000000000D101 /* LiveDictationTests.swift */,
 
 				1A2B3C00000000000000D260 /* DictationAccuracyTests.swift */,
+				1A2B3C00000000000000D262 /* LocalDictationAccuracyTests.swift */,
 				1A2B3C00000000000000002C /* RedactionTests.swift */,
 				1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */,
 				1A2B3C00000000000000002D /* SSHTerminalBackendTests.swift */,
@@ -370,6 +373,7 @@
 				1A2B3C00000000000000D100 /* LiveDictationTests.swift in Sources */,
 
 				1A2B3C00000000000000D261 /* DictationAccuracyTests.swift in Sources */,
+				1A2B3C00000000000000D263 /* LocalDictationAccuracyTests.swift in Sources */,
 				1A2B3C000000000000000045 /* RedactionTests.swift in Sources */,
 				1A2B3C0000000000000000A0 /* LiveSSHConnectionTests.swift in Sources */,
 				1A2B3C000000000000000046 /* SSHTerminalBackendTests.swift in Sources */,

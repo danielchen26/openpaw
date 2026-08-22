@@ -74,6 +74,7 @@ final class LocalASRDictation: DictationEngine {
 
 enum LocalASRError: LocalizedError {
     case notDownloaded(String)
+    case simulatorUnsupported
     case microphoneDenied
     case audioSessionFailed(String)
     case audioEngineFailed(String)
@@ -82,6 +83,9 @@ enum LocalASRError: LocalizedError {
         switch self {
         case .notDownloaded(let name):
             "\(name) has not been downloaded yet. Download it in Settings › Dictation, or switch back to Apple."
+        case .simulatorUnsupported:
+            "Local speech models need a real device. The simulator has no GPU they can run on, so use Apple's "
+                + "recogniser here and test the local ones on a phone."
         case .microphoneDenied:
             "OpenPaw cannot use the microphone. Turn it on in Settings › Privacy & Security › Microphone."
         case .audioSessionFailed(let detail):
