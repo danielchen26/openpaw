@@ -31,6 +31,7 @@
 		1A2B3C000000000000000073 /* OpenPawUI in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000063 /* OpenPawUI */; };
 		1A2B3C000000000000000074 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 1A2B3C000000000000000064 /* SwiftTerm */; };
 		1A2B3C00000000000000D200 /* DictationFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D201 /* DictationFlowUITests.swift */; };
+		1A2B3C00000000000000D210 /* ControlDeckUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000D211 /* ControlDeckUITests.swift */; };
 		1A2B3C00000000000000CB01 /* SessionCreationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000CB02 /* SessionCreationUITests.swift */; };
 		1A2B3C0000000000000000B0 /* ConnectFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */; };
 		1A2B3C00000000000000F000 /* SymbolsNerdFontMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F001 /* SymbolsNerdFontMono-Regular.ttf */; };
@@ -76,6 +77,7 @@
 		1A2B3C0000000000000000A1 /* LiveSSHConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSSHConnectionTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000002E /* HostAPIBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAPIBackendTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000D201 /* DictationFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationFlowUITests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000D211 /* ControlDeckUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlDeckUITests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000CB02 /* SessionCreationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCreationUITests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectFlowUITests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F001 /* SymbolsNerdFontMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "SymbolsNerdFontMono-Regular.ttf"; path = "Resources/Fonts/SymbolsNerdFontMono-Regular.ttf"; sourceTree = "<group>"; };
@@ -170,6 +172,7 @@
 			children = (
 				1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */,
 				1A2B3C00000000000000D201 /* DictationFlowUITests.swift */,
+				1A2B3C00000000000000D211 /* ControlDeckUITests.swift */,
 				1A2B3C00000000000000CB02 /* SessionCreationUITests.swift */,
 				1A2B3C0000000000000000C1 /* HomeInteractionUITests.swift */,
 			);
@@ -336,6 +339,7 @@
 			files = (
 				1A2B3C0000000000000000B0 /* ConnectFlowUITests.swift in Sources */,
 				1A2B3C00000000000000D200 /* DictationFlowUITests.swift in Sources */,
+				1A2B3C00000000000000D210 /* ControlDeckUITests.swift in Sources */,
 				1A2B3C00000000000000CB01 /* SessionCreationUITests.swift in Sources */,
 				1A2B3C0000000000000000C0 /* HomeInteractionUITests.swift in Sources */,
 			);

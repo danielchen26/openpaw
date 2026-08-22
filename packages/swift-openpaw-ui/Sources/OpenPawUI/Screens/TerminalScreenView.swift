@@ -85,6 +85,7 @@ public struct TerminalScreenView: View {
     private let model: OpenPawModel
     private let settings: OpenPawSettings
     private let scrollback: ScrollbackStore
+    private let controls: TerminalControlBus
     private let surface: () -> AnyView
     private let onFontSizeChange: (CGFloat) -> Void
 
@@ -95,8 +96,6 @@ public struct TerminalScreenView: View {
     @State private var focused: ScrollbackMatch?
     @State private var lineCount = 0
     @State private var pinchBase: CGFloat?
-    /// Collapsed by default: the rail exists because the expanded arrangement was taking a quarter of the screen.
-    @State private var isRailExpanded = false
     @State private var voice = VoiceComposition(destination: .terminal)
     @State private var dictationTask: Task<Void, Never>?
     @State private var dictationTurnID: VoiceTurnID?
@@ -109,12 +108,14 @@ public struct TerminalScreenView: View {
         model: OpenPawModel,
         settings: OpenPawSettings,
         scrollback: ScrollbackStore,
+        controls: TerminalControlBus = TerminalControlBus(),
         surface: @escaping () -> AnyView,
         onFontSizeChange: @escaping (CGFloat) -> Void
     ) {
         self.model = model
         self.settings = settings
         self.scrollback = scrollback
+        self.controls = controls
         self.surface = surface
         self.onFontSizeChange = onFontSizeChange
     }
@@ -136,7 +137,7 @@ public struct TerminalScreenView: View {
             VStack(spacing: 0) {
                 header
                 terminal
-                footer(width: width)
+                footer
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
@@ -150,7 +151,18 @@ public struct TerminalScreenView: View {
         .onChange(of: model.dictatedText) { _, text in claimDictatedText(text) }
         // Also on appear, not only on change: a sentence spoken on another screen is waiting to be claimed by
         // whichever screen can hold a draft, and arriving here is the moment this one can.
-        .onAppear { claimDictatedText(model.dictatedText) }
+        .onAppear {
+            claimDictatedText(model.dictatedText)
+            // The strip at the bottom of the app owns these buttons now, but the state they act on is here.
+            controls.onDictate = { toggleDictation() }
+            controls.onSearch = { isSearching = true }
+            controls.onCopyAll = { Task { await copyAllOutput() } }
+        }
+        // Released on the way out so a tap on the strip from another screen does not reach a terminal the user is
+        // no longer looking at.
+        .onDisappear { controls.release() }
+        // The strip draws the microphone, so it has to be told what the microphone is doing.
+        .onChange(of: voice.isActive) { _, isActive in controls.report(isDictating: isActive) }
     }
 
     // MARK: Header
@@ -277,155 +289,16 @@ public struct TerminalScreenView: View {
 
     // MARK: Footer
 
-    private func footer(width: RootWidth) -> some View {
-        VStack(spacing: 0) {
-            if voice.isActive || !voice.draft.isEmpty {
-                dictationDraftRow
-            }
-            if settings.isShortcutBarVisible {
-                ShortcutBarView(
-                    shortcuts: shortcutsBinding,
-                    latched: $latched,
-                    rows: width == .compact ? 1 : 2,
-                    onChord: send(chord:),
-                    onText: send(text:)
-                )
-            }
-            controls
-        }
-    }
-
-    /// One rail instead of two stacked bars.
+    /// All that is left at the bottom of this screen: the dictation draft, when there is one.
     ///
-    /// The controls the user reaches for constantly stay out; font size and scrollback search fold behind a
-    /// disclosure. See ``CompactChrome`` for the height this is allowed to cost and why.
-    private var controls: some View {
-        let rail = TerminalRailPresentation(isExpanded: isRailExpanded)
-        return VStack(spacing: 0) {
-            HStack(spacing: OpenPawTheme.Space.small) {
-                dictationButton
-                keyboardButton
-                if rail.controls.contains(.search) { searchButton }
-                if rail.controls.contains(.copyAll) { copyAllButton }
-                Spacer(minLength: 0)
-                if rail.controls.contains(.fontSize) { fontStepper }
-                expandButton(rail)
-            }
-            .padding(.horizontal, OpenPawTheme.Space.medium)
-        }
-        .frame(height: rail.height)
-        .background(OpenPawTheme.panel)
-        .overlay(alignment: .top) {
-            Rectangle().fill(OpenPawTheme.line).frame(height: OpenPawTheme.hairline)
-        }
-        .animation(.snappy(duration: 0.22), value: isRailExpanded)
-    }
-
-    private var keyboardButton: some View {
-        Button {
-            settings.isShortcutBarVisible.toggle()
-        } label: {
-            Image(systemName: settings.isShortcutBarVisible ? "keyboard.chevron.compact.down" : "keyboard")
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(OpenPawTheme.textSecondary)
-        .accessibilityLabel(settings.isShortcutBarVisible ? "Hide terminal keys" : "Show terminal keys")
-        #if os(macOS)
-            .keyboardShortcut("k", modifiers: .command)
-        #endif
-    }
-
-    private var searchButton: some View {
-        Button {
-            isSearching = true
-        } label: {
-            Image(systemName: "magnifyingglass")
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(OpenPawTheme.textSecondary)
-        .accessibilityLabel("Search scrollback")
-    }
-
-    /// The scrollback's copy action, which used to live behind a long press on the terminal.
-    private var copyAllButton: some View {
-        Button {
-            Task { await copyAllOutput() }
-        } label: {
-            Image(systemName: "doc.on.doc")
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(OpenPawTheme.textSecondary)
-        .accessibilityLabel("Copy all output")
-    }
-
-    private func expandButton(_ rail: TerminalRailPresentation) -> some View {
-        Button {
-            isRailExpanded.toggle()
-        } label: {
-            Image(systemName: rail.expandGlyph)
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(OpenPawTheme.textSecondary)
-        .accessibilityLabel(rail.expandLabel)
-    }
-
-    private var fontStepper: some View {
-        HStack(spacing: 0) {
-            Button {
-                apply(fontSize: settings.terminalFontSize - 1)
-            } label: {
-                Image(systemName: "minus")
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Smaller terminal text")
-
-            Text("\(Int(settings.terminalFontSize))")
-                .font(OpenPawTheme.Machine.codeSmall)
-                .foregroundStyle(OpenPawTheme.textSecondary)
-                .frame(minWidth: 24)
-                .accessibilityLabel("Terminal cell size \(Int(settings.terminalFontSize)) points")
-
-            Button {
-                apply(fontSize: settings.terminalFontSize + 1)
-            } label: {
-                Image(systemName: "plus")
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Larger terminal text")
-        }
-        .foregroundStyle(OpenPawTheme.textSecondary)
-    }
-
+    /// The key bar and the control rail moved to the app-wide strip below. Three stacked rows was the defect —
+    /// this screen owned two of them and the shell owned the third, so nothing was in a position to see that
+    /// together they took a fifth of the screen.
     @ViewBuilder
-    private var dictationButton: some View {
-        let available = model.dictation?.isAvailable ?? false
-        Button(action: toggleDictation) {
-            Image(systemName: voice.isActive ? "mic.fill" : "mic")
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
+    private var footer: some View {
+        if voice.isActive || !voice.draft.isEmpty {
+            dictationDraftRow
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(voice.isActive ? OpenPawTheme.textPrimary : OpenPawTheme.textSecondary)
-        .disabled(!available)
-        .accessibilityLabel(dictationVoiceLabel(available: available))
-    }
-
-    private func dictationVoiceLabel(available: Bool) -> String {
-        guard available else { return "Dictation unavailable on this device" }
-        if voice.isActive { return "Stop dictation" }
-        return "Dictate into a terminal draft"
     }
 
     private var dictationDraftRow: some View {

@@ -49,6 +49,14 @@ public final class OpenPawSettings {
     /// measure that the user sets directly with the stepper or a pinch, and scaling it with the content size
     /// category would reflow the remote program's own layout.
     public static let fontSizeRange: ClosedRange<CGFloat> = 9...28
+    /// Keeps a requested cell size inside the range the terminal can actually render.
+    ///
+    /// Rounded as well as clamped: the pinch gesture produces fractional sizes, and a cell grid drawn at 13.4
+    /// points does not line up with itself.
+    public static func clamp(fontSize: CGFloat) -> CGFloat {
+        min(max(fontSize.rounded(), fontSizeRange.lowerBound), fontSizeRange.upperBound)
+    }
+
     public static let scrollbackChoices = [1_000, 5_000, 10_000, 25_000, 50_000]
     public static let eventBudgetChoices = [500, 2_000, 5_000, 10_000]
 

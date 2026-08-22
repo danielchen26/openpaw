@@ -8,6 +8,26 @@ import XCTest
 /// and stopping puts it back — which is exactly the part that would break without anyone noticing.
 final class DictationFlowUITests: XCTestCase {
 
+    /// Swipes the bottom strip to the page a control is on and returns it.
+    ///
+    /// The controls used to be on a permanent rail. They are now on one paged strip, so a test that only looks
+    /// for a button by name would fail for a reason that has nothing to do with what it is testing.
+    private func control(_ label: String, in app: XCUIApplication) -> XCUIElement {
+        let button = app.buttons[label]
+        guard !button.exists else { return button }
+        let strip = app.otherElements["Terminal keys"].exists
+            ? app.otherElements["Terminal keys"] : app.windows.firstMatch
+        for _ in 0..<ControlDeckPages {
+            guard !button.exists else { return button }
+            strip.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.94))
+                .press(forDuration: 0.05, thenDragTo: strip.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.94)))
+        }
+        return button
+    }
+
+    /// How many pages the strip has, and so how many swipes can be needed to reach one.
+    private let ControlDeckPages = 3
+
     private func launchedApp() -> XCUIApplication {
         let app = XCUIApplication()
         // The gate would otherwise sit on a biometric prompt no automation can answer. The seeded key lets the
@@ -27,10 +47,13 @@ final class DictationFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
         app.buttons["Terminal"].tap()
 
-        let mic = app.buttons["Dictate into a terminal draft"]
+        // On the strip's view page rather than always on screen: holding anywhere is the everyday route to
+        // speech, so a permanent microphone icon was spending width on a job a gesture already does. It still has
+        // to exist, because a press held for a third of a second is not a gesture VoiceOver can perform.
+        let mic = control("Dictate into a terminal draft", in: app)
         XCTAssertTrue(
             mic.waitForExistence(timeout: 10),
-            "no dictation control in the terminal. On screen:\n\(app.debugDescription)"
+            "no dictation control anywhere on the strip. On screen:\n\(app.debugDescription)"
         )
         XCTAssertTrue(mic.isEnabled, "the dictation control is present but disabled, so speech cannot start")
         XCTAssertTrue(mic.isHittable, "the dictation control cannot be tapped")
@@ -64,11 +87,10 @@ final class DictationFlowUITests: XCTestCase {
             "holding the terminal raised the output menu instead of starting dictation"
         )
 
-        // What replaced it: copying is still reachable, from the rail rather than from a hold.
-        app.buttons["Show more terminal controls"].tap()
+        // What replaced it: copying is still reachable, from the strip's view page rather than from a hold.
         XCTAssertTrue(
-            app.buttons["Copy all output"].waitForExistence(timeout: 5),
-            "the long press lost its menu and the rail did not gain it, so copying is unreachable"
+            control("Copy all output", in: app).waitForExistence(timeout: 5),
+            "the long press lost its menu and the strip did not gain it, so copying is unreachable"
         )
     }
 
@@ -117,8 +139,8 @@ final class DictationFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
         app.buttons["Terminal"].tap()
 
-        let mic = app.buttons["Dictate into a terminal draft"]
-        XCTAssertTrue(mic.waitForExistence(timeout: 10), "no dictation control in the terminal")
+        let mic = control("Dictate into a terminal draft", in: app)
+        XCTAssertTrue(mic.waitForExistence(timeout: 10), "no dictation control on the strip")
         mic.tap()
 
         // The microphone permission dialog appears on a machine that has not answered it yet. Allowing it is part of
@@ -148,8 +170,8 @@ final class DictationFlowUITests: XCTestCase {
 
         // The draft strip only exists while there is something to draft, so dictation has to be armed first. That is
         // the design: no speech in progress and nothing dictated means no half-open command sitting on screen.
-        let mic = app.buttons["Dictate into a terminal draft"]
-        XCTAssertTrue(mic.waitForExistence(timeout: 10), "no dictation control in the terminal")
+        let mic = control("Dictate into a terminal draft", in: app)
+        XCTAssertTrue(mic.waitForExistence(timeout: 10), "no dictation control on the strip")
         mic.tap()
         let allow = app.alerts.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'Allow' OR label CONTAINS[c] 'OK'")).firstMatch
         if allow.waitForExistence(timeout: 5) { allow.tap() }

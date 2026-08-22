@@ -171,6 +171,13 @@ public struct RootView: View {
     /// Hold-anywhere dictation. Owned here so the gesture and its ring exist on every destination rather than
     /// being reimplemented per screen.
     @State private var pushToTalk = PushToTalkController()
+    /// The bottom strip: which page it is showing and whether it is folded away.
+    @State private var deck = ControlDeck()
+    /// Modifiers the key bar is holding down. Owned here because the key bar moved out of the terminal screen and
+    /// onto the strip, and a latched `ctrl` has to survive the user swiping to another page.
+    @State private var latchedModifiers: KeyModifiers = []
+    /// Terminal actions the strip's view page triggers on the terminal screen.
+    @State private var terminalControls = TerminalControlBus()
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     #if os(iOS)
@@ -339,46 +346,64 @@ public struct RootView: View {
 
     // MARK: Compact
 
-    /// Content above, tab bar below, both ours.
+    /// Content above, one paged strip below, both ours.
     ///
     /// Not a `TabView`, for the same reason the sidebar is not a `List`: the platform control brings a surface we
     /// cannot reach and, on macOS, places its strip at the top with labels that do not draw — so the compact
-    /// layout could not be verified on the only machine this project renders on. Five fixed destinations need a
-    /// row of five buttons, and that is a thing we can own completely and check.
+    /// layout could not be verified on the only machine this project renders on.
+    ///
+    /// The strip is one row that pages sideways rather than a stack of bars. On the terminal there used to be
+    /// three of them — a control rail, this tab bar, and the key bar — which a phone screenshot showed piled up
+    /// with the last one crushed against the home indicator.
     private func tabs(width: RootWidth) -> some View {
         VStack(spacing: 0) {
             navigated(router.destination, width: width)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            tabBar
-        }
-    }
-
-    private var tabBar: some View {
-        HStack(spacing: 0) {
-            ForEach(ShellDestination.allCases) { destination in
-                tabItem(destination)
+            ControlDeckView(deck: $deck) {
+                keysPage(width: width)
+            } destinations: {
+                destinationsPage
+            } view: {
+                viewPage
             }
         }
-        .frame(
-            height: CompactChrome.tabBarHeight(isAccessibilitySize: dynamicTypeSize.isAccessibilitySize),
-            alignment: .center
-        )
-        .background(OpenPawTheme.panel)
-        .overlay(alignment: .top) {
-            Rectangle().fill(OpenPawTheme.line).frame(height: OpenPawTheme.hairline)
+        // Arriving somewhere new turns the strip to the page that screen is driven from, because a strip showing
+        // terminal keys over a settings screen is a row of controls that do nothing.
+        .onChange(of: router.destination) { _, destination in
+            deck = deck.showing(ControlDeck.page(arrivingAt: destination))
         }
     }
 
-    private func tabItem(_ destination: ShellDestination) -> some View {
+    /// The key bar, at the very bottom of the screen and scrolling sideways.
+    ///
+    /// It used to sit above the tab bar, which put the keys a terminal is driven with in the middle of the chrome
+    /// and the app's navigation under the user's thumb. The keys are what gets used constantly, so they get the
+    /// bottom of the screen and the navigation is a swipe away.
+    private func keysPage(width: RootWidth) -> some View {
+        ShortcutBarView(
+            shortcuts: Binding(get: { settings.shortcuts }, set: { settings.shortcuts = $0 }),
+            latched: $latchedModifiers,
+            rows: 1,
+            onChord: sendChord,
+            onText: sendText
+        )
+    }
+
+    private var destinationsPage: some View {
+        HStack(spacing: 0) {
+            ForEach(ShellDestination.allCases) { destination in
+                destinationItem(destination)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func destinationItem(_ destination: ShellDestination) -> some View {
         let isSelected = router.destination == destination
         return Button {
             router.destination = destination
         } label: {
             VStack(spacing: OpenPawTheme.Space.hair) {
-                // The selected tab is marked by a rule along the edge it touches, mirroring the sidebar.
-                Rectangle()
-                    .fill(isSelected ? OpenPawTheme.textPrimary : Color.clear)
-                    .frame(height: 2)
                 Image(systemName: destination.glyph)
                     .font(.system(size: 20, weight: .medium, design: .monospaced))
                     .overlay(alignment: .topTrailing) {
@@ -393,7 +418,7 @@ public struct RootView: View {
                                 .alignmentGuide(.trailing) { $0[.leading] }
                         }
                     }
-                if CompactChrome.showsTabTitle(
+                if ControlDeck.showsDestinationTitle(
                     isSelected: isSelected, isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
                 ) {
                     Text(destination.title)
@@ -402,14 +427,79 @@ public struct RootView: View {
                         .minimumScaleFactor(0.8)
                 }
             }
-            .padding(.bottom, OpenPawTheme.Space.tight)
-            .frame(maxWidth: .infinity, minHeight: 44)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .foregroundStyle(isSelected ? OpenPawTheme.textPrimary : OpenPawTheme.textSecondary)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(sidebarVoiceLabel(destination))
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// Adjustments to the terminal, which is the only screen they apply to.
+    ///
+    /// Dictation keeps a button here even though holding anywhere is the everyday route to it: a press held for a
+    /// third of a second is not a gesture a VoiceOver user can perform, so deleting the only button would take
+    /// speech away from the people who most need it.
+    private var viewPage: some View {
+        HStack(spacing: OpenPawTheme.Space.small) {
+            deckButton(terminalControls.dictationGlyph, label: terminalControls.dictationLabel) {
+                terminalControls.dictate()
+            }
+            deckButton("magnifyingglass", label: "Search scrollback") {
+                terminalControls.search()
+            }
+            deckButton("doc.on.doc", label: "Copy all output") {
+                terminalControls.copyAll()
+            }
+            Spacer(minLength: 0)
+            deckButton("minus", label: "Smaller terminal text") {
+                settings.terminalFontSize = OpenPawSettings.clamp(fontSize: settings.terminalFontSize - 1)
+            }
+            Text("\(Int(settings.terminalFontSize))")
+                .font(OpenPawTheme.Machine.codeSmall)
+                .foregroundStyle(OpenPawTheme.textSecondary)
+                .frame(minWidth: 24)
+                .accessibilityLabel("Terminal cell size \(Int(settings.terminalFontSize)) points")
+            deckButton("plus", label: "Larger terminal text") {
+                settings.terminalFontSize = OpenPawSettings.clamp(fontSize: settings.terminalFontSize + 1)
+            }
+        }
+        .padding(.horizontal, OpenPawTheme.Space.medium)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func deckButton(_ glyph: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: glyph)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(OpenPawTheme.textSecondary)
+        .accessibilityLabel(label)
+    }
+
+    private func sendChord(_ chord: KeyChord) {
+        guard let terminal = model.terminal else { return }
+        Task {
+            do {
+                try await terminal.send(chord: chord, applicationCursorKeys: settings.applicationCursorKeys)
+            } catch {
+                model.present(error, while: "sending a key to the terminal")
+            }
+        }
+    }
+
+    private func sendText(_ text: String) {
+        guard let terminal = model.terminal else { return }
+        Task {
+            do {
+                try await terminal.send(text: text)
+            } catch {
+                model.present(error, while: "sending text to the terminal")
+            }
+        }
     }
 
     /// Wraps a destination in a `NavigationStack` only when it has somewhere to push.
@@ -568,6 +658,7 @@ public struct RootView: View {
                 model: model,
                 settings: settings,
                 scrollback: scrollback,
+                controls: terminalControls,
                 surface: terminalSurface,
                 onFontSizeChange: { _ in }
             )
