@@ -488,8 +488,16 @@ private final class RecordingTerminalBackend: TerminalBackend, @unchecked Sendab
         stateStream = AsyncStream { cont = $0 }
         continuation = cont
     }
+    /// When set, `connect` reports the failure through the state stream and then throws *that same error*, the way
+    /// `SSHTerminalBackend` does. Throwing a different error would let a test pass while the real app still raised
+    /// an alert for the thrown one.
+    var failConnectWith: TransportError?
     func connect(host: HostRecord) async throws {
         connectedHosts.append(host.id)
+        if let failConnectWith {
+            continuation.yield(.failed(failConnectWith))
+            throw failConnectWith
+        }
         if failConnect { throw RecordingBackendError.unexpectedCall }
         continuation.yield(.connected(.ssh))
     }
@@ -1187,5 +1195,57 @@ struct AddDeviceFlowTests {
     @Test("Candidate accessibility label includes exact safety semantics")
     func candidateAccessibilityLabelIncludesSafetySemantics() {
         #expect(Self.candidate.accessibilityLabel == "Studio, studio.tail123.ts.net, Tailscale discovery candidate, not trusted or saved")
+    }
+}
+
+@Suite("A connection that fails before it is ever established")
+struct FailedFirstConnectionTests {
+
+    /// The defect a user sees as a card stuck on "Connecting" with a spinner that never stops: an unknown host key
+    /// fails the attempt immediately, but the failure never reaches `connection`, so the UI keeps claiming the
+    /// connection is still in progress and offers nothing to act on.
+    @MainActor
+    @Test("a failure on the first attempt is shown instead of leaving the card spinning")
+    func firstAttemptFailureReachesTheUI() async {
+        let host = HostRecord(nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: nil, terminal: terminal)
+        let failure = TransportError.hostKeyUnknown(fingerprint: "SHA256:whatever")
+        terminal.failConnectWith = failure
+
+        await model.connectSelectedHost()
+        // The state task drains `stateStream` independently, so a single yield is not enough to guarantee it ran
+        // under parallel test load. A bounded wait still catches the defect: without the fix the state is dropped
+        // and the connection never becomes terminal no matter how long the wait.
+        for _ in 0..<100 where !model.connection.isTerminal {
+            await Task.yield()
+        }
+
+        #expect(
+            model.connection.isTerminal,
+            "the card is still showing \(model.connection), so the spinner never resolves"
+        )
+    }
+
+    /// An unknown host key is a decision the trust sheet exists to take, not a failure to report. Raising an error
+    /// alert for it too puts two presentations on screen at once, and the alert wins: SwiftUI dismisses the sheet
+    /// by writing `nil` back through its binding, so the user never sees the fingerprint and can never connect.
+    @MainActor
+    @Test("an unknown host key does not also raise an error alert that would displace the trust sheet")
+    func unknownHostKeyDoesNotRaiseAnAlert() async {
+        let host = HostRecord(nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: nil, terminal: terminal)
+        terminal.failConnectWith = .hostKeyUnknown(fingerprint: "SHA256:whatever")
+
+        await model.connectSelectedHost()
+        for _ in 0..<100 where !model.connection.isTerminal {
+            await Task.yield()
+        }
+
+        #expect(
+            model.lastError == nil,
+            "an alert (\(String(describing: model.lastError?.title))) would displace the host key sheet"
+        )
     }
 }

@@ -483,7 +483,11 @@ public final class OpenPawModel {
                     sawConnectedStateForAttempt = true
                     acknowledgeTerminalConnected()
                 }
-                if !sawConnectedStateForAttempt, state.isTerminal { continue }
+                // A `.disconnected` before this attempt ever connected belongs to the previous connection's
+                // teardown, not to this one, so it must not overwrite the live status. A `.failed` is this attempt
+                // reporting why it could not connect: dropping it left the card claiming "Connecting" forever with
+                // no error and nothing to retry, which is exactly what an unknown host key produced.
+                if !sawConnectedStateForAttempt, case .disconnected = state { continue }
                 self.connection = state
                 if state.isTerminal, let lifecycle = self.backend as? any StructuredBackendLifecycle {
                     self.structuredBackendReady = false
@@ -587,6 +591,10 @@ public final class OpenPawModel {
 
     /// Errors state what happened and what to do about it. They do not apologise and they are never vague.
     public func present(_ error: any Error, while activity: String) {
+        // A host key verdict is a decision the trust sheet takes, not a failure to report. Raising an alert as well
+        // would put two presentations on screen at once, and the alert wins: SwiftUI dismisses the sheet through its
+        // binding, leaving the user unable to see the fingerprint or ever connect.
+        if error.isHostKeyDecision { return }
         if let clientError = error as? HostClientError {
             lastError = switch clientError {
             case .unauthorized:
@@ -633,6 +641,17 @@ public final class OpenPawModel {
                 detail: String(describing: error),
                 isRecoverable: true
             )
+        }
+    }
+}
+
+extension Error {
+    /// Whether this is a host key verdict awaiting the user's trust decision rather than a failure to report.
+    fileprivate var isHostKeyDecision: Bool {
+        guard let transport = self as? TransportError else { return false }
+        switch transport {
+        case .hostKeyUnknown, .hostKeyChanged: return true
+        default: return false
         }
     }
 }
