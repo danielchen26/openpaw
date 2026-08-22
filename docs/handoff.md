@@ -98,6 +98,14 @@ The Milestone 1 app was built, installed and launched on an **iPhone 16 Pro simu
    machine, so a failure on hardware points at the model or the wrapper rather than at the test. Note that the
    0.15 threshold does not catch a leaked `<|zh|>` on a sentence of ordinary length — that costs 0.146 — which is
    why `testTranscriptsArriveWithoutModelTags` is a separate test and must not be folded into the accuracy one.
+   One honest gap in the UI coverage. `testHoldingDictationAfterChoosingALocalModelDoesNotKillTheApp` currently
+   **skips**, and that is not a bug to be silenced. The microphone lives in `ComposerView`, reachable only through
+   `ChatView` -> `transcript(sessionID)`, so it needs a real agent session and therefore a live daemon; with no
+   host, both Chat and Terminal render empty states. An earlier version of that test pressed a coordinate on the
+   terminal text view and passed while touching nothing, which is worse than the skip. Guard removal is still
+   caught, by `testChoosingALocalModelOnASimulatorExplainsItselfAndOffersNoDownload` on the settings screen,
+   because selecting the engine is already enough to reach MLX. Point that test at a running daemon and it becomes
+   the genuine end-to-end crash check.
    Being stuck there is worth something anyway: reading the wrapper instead of running it turned up a defect the
    models could never have exposed. The transcript cleaner stripped everything between angle brackets, so a
    dictated `cat < in.txt > out.txt` reached the draft as `cat  out.txt` — a different command, still valid,
