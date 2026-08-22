@@ -224,7 +224,8 @@ public struct ShortcutBarView: View {
             }
         }
         .background(OpenPawTheme.well)
-        .overlay(Rectangle().stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
+        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Arrow keys")
     }
@@ -242,9 +243,12 @@ public struct ShortcutBarView: View {
                 .frame(minWidth: 44, minHeight: 44)
                 .foregroundStyle(engaged ? OpenPawTheme.ink : OpenPawTheme.textPrimary)
                 .background(background(engaged: engaged, isGrouped: isGrouped))
+                // Clipped as well as stroked: a latched key fills its background, and an unclipped fill under a
+                // rounded border shows square corners poking past the curve.
+                .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
                 .overlay {
                     if !isGrouped {
-                        Rectangle().stroke(
+                        RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(
                             engaged ? OpenPawTheme.textPrimary : OpenPawTheme.line,
                             lineWidth: OpenPawTheme.hairline)
                     }
@@ -381,7 +385,7 @@ struct ShortcutEditorView: View {
                                     .foregroundStyle(OpenPawTheme.textSecondary)
                                     .background(OpenPawTheme.well)
                                     .overlay(
-                                        Rectangle().stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
+                                        RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
                             }
                         }
                         if missingBuiltIns.isEmpty {
@@ -451,7 +455,8 @@ struct ShortcutEditorView: View {
         }
         .padding(OpenPawTheme.Space.medium)
         .background(OpenPawTheme.well)
-        .overlay(Rectangle().stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
+        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
     }
 
     private func labelBinding(_ id: String) -> Binding<String> {

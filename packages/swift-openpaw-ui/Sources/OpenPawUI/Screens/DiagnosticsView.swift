@@ -262,7 +262,8 @@ public struct DiagnosticsView: View {
         }
         .padding(OpenPawTheme.Space.medium)
         .background(OpenPawTheme.well)
-        .overlay(Rectangle().stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
+        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
     }
 
     // MARK: Sessions
@@ -311,7 +312,8 @@ public struct DiagnosticsView: View {
         }
         .padding(OpenPawTheme.Space.medium)
         .background(OpenPawTheme.well)
-        .overlay(Rectangle().stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
+        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
     }
 
     private func labelled(_ label: String, _ value: String) -> some View {
@@ -393,7 +395,8 @@ public struct DiagnosticsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(OpenPawTheme.Space.small)
                     .background(OpenPawTheme.well)
-                    .overlay(Rectangle().stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
+                    .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
             }
         }
     }

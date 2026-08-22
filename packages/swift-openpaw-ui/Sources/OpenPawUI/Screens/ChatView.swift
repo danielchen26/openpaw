@@ -327,7 +327,7 @@ struct StopButton: View {
         }
         .buttonStyle(.plain)
         .overlay(
-            Rectangle()
+            RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous)
                 .strokeBorder(OpenPawTheme.bad.opacity(0.6), lineWidth: OpenPawTheme.hairline * 3)
         )
         .accessibilityLabel("Stop the agent")

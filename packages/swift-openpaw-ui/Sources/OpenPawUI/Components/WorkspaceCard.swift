@@ -48,8 +48,14 @@ public struct WorkspaceCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(OpenPawTheme.Space.small)
                     .background(OpenPawTheme.void)
+                    // The machine radius rather than a card's: these tiles are small, and a card-sized corner on
+                    // a 60-point tile eats the label. Square, though, was the thing that made this card look like
+                    // two different apps stacked on top of each other.
+                    .clipShape(
+                        RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous)
+                    )
                     .overlay(
-                        Rectangle()
+                        RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous)
                             .stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline)
                     )
                 }

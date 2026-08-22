@@ -498,7 +498,8 @@ public struct SettingsView: View {
                         .padding(OpenPawTheme.Space.small)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(settings.terminalTheme.background)
-                        .overlay(Rectangle().stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
+                        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
                         .accessibilityLabel("Sample of the \(settings.terminalTheme.displayName) ground")
                 }
 

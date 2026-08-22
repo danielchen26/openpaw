@@ -662,7 +662,8 @@ public struct HostEditorView: View {
         }
         .padding(OpenPawTheme.Space.medium)
         .background(OpenPawTheme.well)
-        .overlay(Rectangle().stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
+        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
     }
 
     private var session: some View {
@@ -822,7 +823,7 @@ struct ShellField: View {
                 .frame(minHeight: 44)
                 .background(OpenPawTheme.well)
                 .overlay(
-                    Rectangle().stroke(
+                    RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(
                         issue == nil ? OpenPawTheme.line : OpenPawTheme.bad, lineWidth: OpenPawTheme.hairline))
                 .autocorrectionDisabled()
                 #if os(iOS)
@@ -854,7 +855,7 @@ struct ShellNumberField: View {
                 .frame(minHeight: 44)
                 .background(OpenPawTheme.well)
                 .overlay(
-                    Rectangle().stroke(
+                    RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(
                         issue == nil ? OpenPawTheme.line : OpenPawTheme.bad, lineWidth: OpenPawTheme.hairline))
                 #if os(iOS)
                     .keyboardType(.numberPad)

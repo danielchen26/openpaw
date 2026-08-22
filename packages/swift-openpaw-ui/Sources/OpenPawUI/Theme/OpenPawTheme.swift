@@ -187,11 +187,33 @@ public enum OpenPawTheme {
     }
 
     public enum Radius {
-        /// Machine surfaces are square. A terminal pane with rounded corners is a costume.
-        public static let machine: CGFloat = 0
-        public static let card: CGFloat = 6
-        public static let sheet: CGFloat = 14
+        /// The live terminal, which is the one surface that genuinely must not be rounded: a PTY is a grid of
+        /// cells the host is drawing into, and a rounded corner clips the cells in it.
+        public static let terminal: CGFloat = 0
+        /// Machine surfaces — panels holding a command, a path, a sequence number.
+        ///
+        /// These were square, to mark machine output as machine output. On a phone that distinction lost its
+        /// argument: a square-cornered panel sitting inside a rounded card reads as a container someone forgot
+        /// to style, not as a different register. The distinction survives as a tighter radius than a card
+        /// rather than as no radius at all.
+        public static let machine: CGFloat = 8
+        /// Cards and session rows. Generous enough to read as a soft physical object rather than a table row,
+        /// which is the difference between a phone app and a terminal emulator wearing one.
+        public static let card: CGFloat = 14
+        /// Sheets and the containers that hold cards. Larger than a card so a card inside one is visibly nested
+        /// rather than fighting it for the same corner.
+        public static let sheet: CGFloat = 22
         public static let chip: CGFloat = 999
+
+        /// A radius that stays proportionate as a container grows.
+        ///
+        /// A fixed radius on a large surface looks like a mistake and on a small one swallows the content, so
+        /// containers derive theirs from their own height instead of picking a constant and hoping.
+        public static func nested(in outer: CGFloat, inset: CGFloat) -> CGFloat {
+            // Concentric corners: the inner radius is the outer minus the gap between them, which is what keeps
+            // the curves parallel instead of pinching at the corner.
+            max(card, outer - inset)
+        }
     }
 
     public static let hairline: CGFloat = 1 / 3

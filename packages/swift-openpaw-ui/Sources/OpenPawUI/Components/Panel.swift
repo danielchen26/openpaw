@@ -2,12 +2,13 @@ import SwiftUI
 
 // MARK: - Machine register
 
-/// The machine-register container: cool surface, square corners, one hairline.
+/// The machine-register container: cool surface, a tight corner, one hairline.
 ///
-/// Square corners are the whole argument. Everything in this container is something the host or the agent *did* —
-/// a command, a path, a sequence number — and rounding those corners would file the edge off the distinction the
-/// rest of the design leans on. The optional micro-label header is the eyebrow that names the field; the accessory
-/// slot beside it is where a count, a timestamp or a single control goes.
+/// Everything in this container is something the host or the agent *did* — a command, a path, a sequence number.
+/// That used to be marked with square corners, but a square panel nested inside a rounded card reads as an
+/// unstyled container rather than as a different register, so the mark is now a corner tighter than a card's
+/// instead of no corner at all. See ``OpenPawTheme/Radius``. The optional micro-label header is the eyebrow that
+/// names the field; the accessory slot beside it is where a count, a timestamp or a single control goes.
 public struct PanelModifier: ViewModifier {
     let label: String?
     let padding: CGFloat
@@ -27,11 +28,13 @@ public struct PanelModifier: ViewModifier {
         .padding(padding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(OpenPawTheme.panel)
+        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
+        // Stroked after the clip and along the same shape. A `Rectangle` border over a rounded clip draws square
+        // corners on a rounded panel, and a border clipped by its own shape loses its outer half.
         .overlay(
-            Rectangle()
+            RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous)
                 .strokeBorder(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline * 3)
         )
-        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
     }
 }
 
@@ -108,11 +111,13 @@ public struct Panel<Content: View, Accessory: View>: View {
         .padding(padding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(OpenPawTheme.panel)
+        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
+        // Stroked after the clip and along the same shape. A `Rectangle` border over a rounded clip draws square
+        // corners on a rounded panel, and a border clipped by its own shape loses its outer half.
         .overlay(
-            Rectangle()
+            RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous)
                 .strokeBorder(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline * 3)
         )
-        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
     }
 }
 
