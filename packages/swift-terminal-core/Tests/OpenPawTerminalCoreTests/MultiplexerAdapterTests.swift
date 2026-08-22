@@ -230,104 +230,111 @@ final class MultiplexerAdapterTests: XCTestCase {
 
     // MARK: Herdr
 
-    func testHerdrParsesJSONListing() async throws {
-        let json = """
-            {"sessions":[
-              {"id":"hd_01","name":"api","attached":true,"windows":2,
-               "created_at":"2026-08-20T14:00:00Z","last_activity_at":"2026-08-20T14:29:00Z",
-               "cwd":"/srv/api","alive":true},
-              {"id":"hd_02","name":"worker","attached":false,"windows":1,"alive":false}
-            ]}
-            """
-        let runner = StubRunner([("herdr list --json", .output(json))])
-        let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
 
-        XCTAssertEqual(sessions.map(\.id), ["hd_01", "hd_02"])
-        XCTAssertEqual(sessions.map(\.name), ["api", "worker"])
-        XCTAssertEqual(sessions.map(\.isAttached), [true, false])
-        XCTAssertEqual(sessions.map(\.isAlive), [true, false])
-        XCTAssertEqual(sessions[0].windowCount, 2)
-        XCTAssertEqual(sessions[0].workingDirectory, "/srv/api")
-        XCTAssertEqual(
-            sessions[0].createdAt,
-            ISO8601DateFormatter().date(from: "2026-08-20T14:00:00Z"))
-        XCTAssertNil(sessions[1].createdAt)
-    }
 
-    func testHerdrDegradesToEmptyOnUnknownSubcommand() async throws {
-        let runner = StubRunner([
-            ("herdr list --json", .failing("error: unrecognized subcommand 'list'", exitCode: 2))
-        ])
-        let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
-        XCTAssertTrue(sessions.isEmpty)
-    }
 
-    func testHerdrParsesBareArrayListing() async throws {
-        let json = """
-            [{"id":"hd_01","name":"api","attached":false,"windows":1,"alive":true}]
-            """
-        let sessions = try HerdrAdapter().parseSessions(json)
-        XCTAssertEqual(sessions.map(\.id), ["hd_01"])
-        XCTAssertEqual(sessions[0].kind, .herdr)
-    }
 
-    func testHerdrParsesBareArrayWindows() throws {
-        let json = """
-            [{"id":"w2","index":2,"name":"logs","active":false,"panes":1}]
-            """
-        let windows = try HerdrAdapter().parseWindows(json, sessionID: "hd_01")
-        XCTAssertEqual(windows.map(\.id), ["w2"])
-        XCTAssertEqual(windows[0].sessionID, "hd_01")
-        XCTAssertEqual(windows[0].name, "logs")
-    }
 
-    func testHerdrMissingOldHerdrFallsBackToEmpty() async throws {
-        let runner = StubRunner([
-            ("herdr list --json", .failing("herdr: command not found", exitCode: 127))
-        ])
-        let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
-        XCTAssertTrue(sessions.isEmpty)
-    }
-
-    func testHerdrWindowsAndCommandStrings() async throws {
-        let json = """
-            {"windows":[{"id":"w1","index":0,"name":"api","active":true,"panes":2,
-                         "command":"cargo","cwd":"/srv/api"}]}
-            """
-        let runner = StubRunner([("herdr windows", .output(json))])
-        let adapter = HerdrAdapter()
-        let session = RemoteSession.target("hd_01", kind: .herdr)
-        let windows = try await adapter.listWindows(session: session, runner: runner)
-        XCTAssertEqual(windows.count, 1)
-        XCTAssertEqual(windows[0].currentCommand, "cargo")
-        XCTAssertTrue(windows[0].isActive)
-
-        XCTAssertEqual(adapter.attach(session), "herdr attach hd_01")
-        XCTAssertEqual(adapter.create(name: "api", directory: "/srv/a b"), "herdr new --name api --cwd '/srv/a b'")
-        XCTAssertEqual(adapter.create(name: "api", directory: nil), "herdr new --name api")
-        XCTAssertEqual(adapter.kill(session), "herdr kill hd_01")
-        XCTAssertEqual(adapter.rename(session, to: "api 2"), "herdr rename hd_01 'api 2'")
-        XCTAssertEqual(
-            adapter.focus(window: windows[0]), "herdr focus --session hd_01 --window w1")
-    }
 
     func testHerdrRejectsNonJSON() {
         XCTAssertThrowsError(try HerdrAdapter().parseSessions("<html>nope</html>"))
     }
 
-    func testHerdrMalformedSessionsAndWindowsAreHardErrors() {
-        XCTAssertThrowsError(try HerdrAdapter().parseSessions("{\"items\":[]}")) { error in
+
+    // MARK: Herdr — against the real CLI
+
+    /// Verbatim `herdr agent list` output from a real host. The app previously invoked `herdr list --json`, a
+    /// subcommand that does not exist, so every agent on the host was invisible in Chat.
+    private static let realAgentListJSON = """
+        {"id":"cli:agent:list","result":{"agents":[\
+        {"agent":"pi","agent_session":{"agent":"pi","kind":"path","source":"herdr:pi",\
+        "value":"/Users/tianchichen/.pi/agent/sessions/x.jsonl"},"agent_status":"idle",\
+        "cwd":"/Users/tianchichen","focused":false,"foreground_cwd":"/Users/tianchichen",\
+        "pane_id":"w3:p1","revision":1,"screen_detection_skipped":true,"state_change_seq":137,\
+        "tab_id":"w3:t1","terminal_id":"term_65909b7e01df01","terminal_title":"π - tianchichen",\
+        "terminal_title_stripped":"π - tianchichen","workspace_id":"w3"},\
+        {"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude",\
+        "value":"51d4bacb-b04e-484d-9a90-eabb22cd488e"},"agent_status":"working",\
+        "cwd":"/Users/tianchichen","focused":true,"foreground_cwd":"/Users/tianchichen",\
+        "pane_id":"w3:p9","revision":1149,"state_change_seq":145,"tab_id":"w3:t1",\
+        "terminal_id":"term_65909b7e020c13","terminal_title":"✳ 修复Codex和Claude不可用的问题",\
+        "terminal_title_stripped":"修复Codex和Claude不可用的问题","workspace_id":"w3"}],\
+        "type":"agent_list"}}
+        """
+
+    func testHerdrDiscoversAgentsFromTheRealCLI() async throws {
+        let runner = StubRunner([("herdr agent list", .output(Self.realAgentListJSON))])
+        let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
+
+        XCTAssertEqual(sessions.map(\.id), ["w3:p1", "w3:p9"])
+        // The pane title is what the user recognises the agent by, not the agent binary name.
+        XCTAssertEqual(sessions.map(\.name), ["π - tianchichen", "修复Codex和Claude不可用的问题"])
+        XCTAssertEqual(sessions.map(\.isAttached), [false, true])
+        XCTAssertEqual(sessions.allSatisfy { $0.kind == .herdr }, true)
+        XCTAssertEqual(sessions.first?.workingDirectory, "/Users/tianchichen")
+    }
+
+    func testHerdrUsesTheSubcommandsTheCLIActuallyHas() async throws {
+        let runner = StubRunner([("herdr agent list", .output(Self.realAgentListJSON))])
+        let adapter = HerdrAdapter()
+        _ = try await adapter.discoverSessions(runner: runner)
+        // `herdr list` does not exist; the real listing subcommand is `herdr agent list`.
+        let executed = await runner.commands()
+        XCTAssertEqual(executed, ["herdr agent list"])
+
+        let session = RemoteSession.target("w3:p9", kind: .herdr)
+        XCTAssertEqual(adapter.attach(session), "herdr agent attach w3:p9")
+        XCTAssertEqual(adapter.kill(session), "herdr pane close w3:p9")
+        XCTAssertEqual(adapter.rename(session, to: "api 2"), "herdr agent rename w3:p9 'api 2'")
+        XCTAssertEqual(adapter.create(name: "api", directory: "/srv/a b"), "herdr tab create --cwd '/srv/a b' --label api --focus")
+        XCTAssertEqual(adapter.create(name: "api", directory: nil), "herdr tab create --label api --focus")
+    }
+
+    func testHerdrWithNoServerRunningIsAnEmptyListNotAnError() async throws {
+        // A host where Herdr is installed but not started must not raise a banner over Chat.
+        for message in [
+            "error: could not connect to server",
+            "herdr: command not found",
+            "unknown command: list",
+            "usage: herdr agent list",
+        ] {
+            let failing = StubRunner([("herdr agent list", .failing(message, exitCode: 1))])
+            let viaFailure = try await HerdrAdapter().discoverSessions(runner: failing)
+            XCTAssertTrue(viaFailure.isEmpty, "failed \(message)")
+
+            // Herdr reports most of these on stdout with exit 0, so the success path needs the same handling.
+            let succeeding = StubRunner([("herdr agent list", .output(message))])
+            let viaOutput = try await HerdrAdapter().discoverSessions(runner: succeeding)
+            XCTAssertTrue(viaOutput.isEmpty, "output \(message)")
+        }
+    }
+
+    func testHerdrReportsTheSocketAPIErrorEnvelopeAsMalformed() {
+        // `{"error":{...}}` carries no agents; decoding it as a listing would silently show an empty Chat.
+        let json = #"{"error":{"code":"agent_not_found","message":"nope"},"id":"cli:agent:list"}"#
+        XCTAssertThrowsError(try HerdrAdapter().parseSessions(json)) { error in
             guard case MultiplexerError.malformedOutput(let kind, _) = error else {
                 return XCTFail("unexpected error \(error)")
             }
             XCTAssertEqual(kind, .herdr)
         }
-        XCTAssertThrowsError(try HerdrAdapter().parseWindows("{\"items\":[]}", sessionID: "hd")) { error in
-            guard case MultiplexerError.malformedOutput(let kind, _) = error else {
-                return XCTFail("unexpected error \(error)")
-            }
-            XCTAssertEqual(kind, .herdr)
-        }
+    }
+
+    func testHerdrFallsBackToTheAgentNameWhenThePaneHasNoTitle() throws {
+        let json = #"{"result":{"agents":[{"pane_id":"w1:p1","agent":"codex","terminal_title_stripped":"  "}]}}"#
+        let sessions = try HerdrAdapter().parseSessions(json)
+        XCTAssertEqual(sessions.map(\.name), ["codex"])
+    }
+
+    func testHerdrTreatsAnAgentPaneAsItsOwnSingleWindow() async throws {
+        let runner = StubRunner([("herdr agent list", .output(Self.realAgentListJSON))])
+        let adapter = HerdrAdapter()
+        let sessions = try await adapter.discoverSessions(runner: runner)
+        let claude = try XCTUnwrap(sessions.first { $0.id == "w3:p9" })
+        let windows = try await adapter.listWindows(session: claude, runner: runner)
+        XCTAssertEqual(windows.map(\.id), ["w3:p9"])
+        XCTAssertEqual(windows.first?.name, "修复Codex和Claude不可用的问题")
+        XCTAssertEqual(windows.first.map(adapter.focus(window:)), "herdr agent focus w3:p9")
     }
 
     // MARK: factory

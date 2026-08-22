@@ -38,7 +38,7 @@ final class SessionRestorationTests: XCTestCase {
             ["screen -x 31183.agent-main"])
         XCTAssertEqual(
             plan(multiplexer: .herdr, target: "hd_01").commands(),
-            ["herdr attach hd_01"])
+            ["herdr agent attach hd_01"])
     }
 
     func testCreatesASessionWhenThereIsNoTarget() {

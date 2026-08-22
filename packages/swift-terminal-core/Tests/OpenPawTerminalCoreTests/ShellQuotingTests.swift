@@ -46,6 +46,6 @@ final class ShellQuotingTests: XCTestCase {
             "screen -x '1.a b'")
         XCTAssertEqual(
             HerdrAdapter().create(name: "api", directory: "/srv/a b"),
-            "herdr new --name api --cwd '/srv/a b'")
+            "herdr tab create --cwd '/srv/a b' --label api --focus")
     }
 }

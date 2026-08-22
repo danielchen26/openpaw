@@ -662,40 +662,51 @@ public struct ScreenAdapter: MultiplexerAdapter {
 
 // MARK: - Herdr
 
+/// Herdr is not a session multiplexer in the tmux sense: its "sessions" are long-lived server daemons (usually exactly
+/// one, named `default`), and the things a user actually works in are *agent panes* inside it. Chat therefore lists
+/// agents, addressed by `pane_id`, which is the target every `herdr agent` subcommand accepts.
 public struct HerdrAdapter: MultiplexerAdapter {
     public let kind = MultiplexerKind.herdr
 
     public init() {}
 
-    public var discoverCommand: String { "herdr list --json" }
+    public var discoverCommand: String { "herdr agent list" }
 
-    private struct SessionDTO: Decodable {
-        var id: String
-        var name: String?
-        var attached: Bool?
-        var alive: Bool?
-        var windows: Int?
-        var created_at: Date?
-        var last_activity_at: Date?
+    /// Herdr wraps every socket-API reply in `{"id":…, "result":…}`, and reports failures as a JSON `error` object
+    /// rather than a non-zero exit, so the envelope has to be unwrapped before anything can be decoded.
+    private struct Envelope<T: Decodable>: Decodable {
+        var result: T?
+        var error: ErrorBody?
+
+        struct ErrorBody: Decodable {
+            var code: String?
+            var message: String?
+        }
+    }
+
+    private struct AgentList: Decodable {
+        var agents: [AgentDTO]
+    }
+
+    private struct AgentDTO: Decodable {
+        var pane_id: String
+        var agent: String?
+        var agent_status: String?
         var cwd: String?
-    }
+        var focused: Bool?
+        var tab_id: String?
+        var terminal_title_stripped: String?
+        var terminal_title: String?
+        var workspace_id: String?
 
-    private struct SessionEnvelope: Decodable {
-        var sessions: [SessionDTO]
-    }
-
-    private struct WindowDTO: Decodable {
-        var id: String
-        var index: Int
-        var name: String?
-        var active: Bool?
-        var panes: Int?
-        var command: String?
-        var cwd: String?
-    }
-
-    private struct WindowEnvelope: Decodable {
-        var windows: [WindowDTO]
+        /// What the user recognises the agent by. Herdr already strips the status glyph from the raw title, so the
+        /// stripped form is preferred; the agent binary name is only a fallback for a pane with no title yet.
+        var displayName: String {
+            for candidate in [terminal_title_stripped, terminal_title] {
+                if let candidate, !candidate.trimmingCharacters(in: .whitespaces).isEmpty { return candidate }
+            }
+            return agent ?? pane_id
+        }
     }
 
     private static func decoder() -> JSONDecoder {
@@ -704,8 +715,8 @@ public struct HerdrAdapter: MultiplexerAdapter {
         return decoder
     }
 
-    /// Herdr predates its own `--json` flag on older installs; an unknown
-    /// subcommand or flag means "no Herdr here", not a hard failure.
+    /// Older Herdr builds, and hosts with no Herdr at all, must degrade to "no agents here" rather than surfacing an
+    /// error banner over a host where the user simply uses something else.
     private static func isUnknownCommand(_ text: String) -> Bool {
         let lowered = text.lowercased()
         return lowered.contains("unknown subcommand")
@@ -714,8 +725,19 @@ public struct HerdrAdapter: MultiplexerAdapter {
             || lowered.contains("unknown command")
             || lowered.contains("unexpected argument")
             || lowered.contains("unknown flag")
+            || lowered.contains("unknown option")
             || lowered.contains("command not found")
             || lowered.contains("no such subcommand")
+            || lowered.contains("usage: herdr")
+    }
+
+    /// True when Herdr is installed but has no server running, which is an empty list rather than a failure.
+    private static func isServerDown(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        return lowered.contains("no such file or directory")
+            || lowered.contains("connection refused")
+            || lowered.contains("server not running")
+            || lowered.contains("could not connect")
     }
 
     public func discoverSessions(runner: any CommandRunner) async throws -> [RemoteSession] {
@@ -723,12 +745,16 @@ public struct HerdrAdapter: MultiplexerAdapter {
         do {
             output = try await runner.run(discoverCommand)
         } catch let failure as CommandFailure {
-            if Self.isUnknownCommand(failure.output) || isBenignEmptyOutput(failure.output) {
+            if Self.isUnknownCommand(failure.output) || Self.isServerDown(failure.output)
+                || isBenignEmptyOutput(failure.output)
+            {
                 return []
             }
             throw failure
         }
-        if Self.isUnknownCommand(output) || output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if Self.isUnknownCommand(output) || Self.isServerDown(output)
+            || output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
             return []
         }
         return try parseSessions(output)
@@ -739,24 +765,27 @@ public struct HerdrAdapter: MultiplexerAdapter {
             throw MultiplexerError.malformedOutput(kind: .herdr, detail: "output is not UTF-8")
         }
         let decoder = Self.decoder()
-        let dtos: [SessionDTO]
-        if let envelope = try? decoder.decode(SessionEnvelope.self, from: data) {
-            dtos = envelope.sessions
-        } else if let bare = try? decoder.decode([SessionDTO].self, from: data) {
+        let dtos: [AgentDTO]
+        if let envelope = try? decoder.decode(Envelope<AgentList>.self, from: data), let result = envelope.result {
+            dtos = result.agents
+        } else if let bare = try? decoder.decode(AgentList.self, from: data) {
+            dtos = bare.agents
+        } else if let bare = try? decoder.decode([AgentDTO].self, from: data) {
             dtos = bare
         } else {
             throw MultiplexerError.malformedOutput(kind: .herdr, detail: json)
         }
         return dtos.map { dto in
             RemoteSession(
-                id: dto.id,
-                name: dto.name ?? dto.id,
+                id: dto.pane_id,
+                name: dto.displayName,
                 kind: .herdr,
-                isAttached: dto.attached ?? false,
-                isAlive: dto.alive ?? true,
-                windowCount: dto.windows ?? 0,
-                createdAt: dto.created_at,
-                lastActivityAt: dto.last_activity_at,
+                // Herdr has no "attached" concept; the focused pane is the one the user is looking at.
+                isAttached: dto.focused ?? false,
+                isAlive: true,
+                windowCount: 1,
+                createdAt: nil,
+                lastActivityAt: nil,
                 uptime: nil,
                 workingDirectory: dto.cwd
             )
@@ -766,70 +795,46 @@ public struct HerdrAdapter: MultiplexerAdapter {
     public func listWindows(session: RemoteSession, runner: any CommandRunner) async throws
         -> [RemoteWindow]
     {
-        let command = "herdr windows --session \(shellQuoted(session.id)) --json"
-        let output: String
-        do {
-            output = try await runner.run(command)
-        } catch let failure as CommandFailure {
-            if Self.isUnknownCommand(failure.output) || isBenignEmptyOutput(failure.output) {
-                return []
-            }
-            throw failure
-        }
-        if Self.isUnknownCommand(output) || output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return []
-        }
-        return try parseWindows(output, sessionID: session.id)
-    }
-
-    public func parseWindows(_ json: String, sessionID: String) throws -> [RemoteWindow] {
-        guard let data = json.data(using: .utf8) else {
-            throw MultiplexerError.malformedOutput(kind: .herdr, detail: "output is not UTF-8")
-        }
-        let decoder = Self.decoder()
-        let dtos: [WindowDTO]
-        if let envelope = try? decoder.decode(WindowEnvelope.self, from: data) {
-            dtos = envelope.windows
-        } else if let bare = try? decoder.decode([WindowDTO].self, from: data) {
-            dtos = bare
-        } else {
-            throw MultiplexerError.malformedOutput(kind: .herdr, detail: json)
-        }
-        return dtos.map { dto in
+        // An agent pane is a leaf: it has no windows of its own, and Herdr's tabs live above agents rather than
+        // below them. Reporting the pane itself keeps callers that expect one window per session working.
+        [
             RemoteWindow(
-                id: dto.id,
-                sessionID: sessionID,
-                index: dto.index,
-                name: dto.name ?? "\(dto.index)",
-                isActive: dto.active ?? false,
-                paneCount: dto.panes ?? 1,
-                currentCommand: dto.command,
-                currentPath: dto.cwd
+                id: session.id,
+                sessionID: session.id,
+                index: 0,
+                name: session.name,
+                isActive: session.isAttached,
+                paneCount: 1,
+                currentCommand: nil,
+                currentPath: session.workingDirectory
             )
-        }
+        ]
     }
 
     public func attach(_ session: RemoteSession) -> String {
-        "herdr attach \(shellQuoted(session.id))"
+        "herdr agent attach \(shellQuoted(session.id))"
     }
 
+    /// Herdr has no "new session" command that a phone should invoke: a session is a server daemon. Creating work
+    /// means creating a tab, which is where an agent is then started.
     public func create(name: String, directory: String?) -> String {
-        var command = "herdr new --name \(shellQuoted(name))"
+        var command = "herdr tab create"
         if let directory, !directory.isEmpty {
             command += " --cwd \(shellQuoted(directory))"
         }
+        command += " --label \(shellQuoted(name)) --focus"
         return command
     }
 
     public func focus(window: RemoteWindow) -> String {
-        "herdr focus --session \(shellQuoted(window.sessionID)) --window \(shellQuoted(window.id))"
+        "herdr agent focus \(shellQuoted(window.sessionID))"
     }
 
     public func kill(_ session: RemoteSession) -> String {
-        "herdr kill \(shellQuoted(session.id))"
+        "herdr pane close \(shellQuoted(session.id))"
     }
 
     public func rename(_ session: RemoteSession, to newName: String) -> String {
-        "herdr rename \(shellQuoted(session.id)) \(shellQuoted(newName))"
+        "herdr agent rename \(shellQuoted(session.id)) \(shellQuoted(newName))"
     }
 }
