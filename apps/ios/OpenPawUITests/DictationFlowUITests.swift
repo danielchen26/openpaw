@@ -10,8 +10,12 @@ final class DictationFlowUITests: XCTestCase {
 
     private func launchedApp() -> XCUIApplication {
         let app = XCUIApplication()
-        // The gate would otherwise sit on a biometric prompt no automation can answer.
-        app.launchArguments = ["-openpaw.settings.biometricGate", "<false/>"]
+        // The gate would otherwise sit on a biometric prompt no automation can answer. The seeded key lets the
+        // tests that need a live host connect to one.
+        app.launchArguments = [
+            "-openpaw-debug-seed-key", "/tmp/openpaw-sim-key",
+            "-openpaw.settings.biometricGate", "<false/>",
+        ]
         app.launch()
         return app
     }
@@ -66,6 +70,44 @@ final class DictationFlowUITests: XCTestCase {
             app.buttons["Copy all output"].waitForExistence(timeout: 5),
             "the long press lost its menu and the rail did not gain it, so copying is unreachable"
         )
+    }
+
+    /// Tapping the terminal must not raise the edit menu either.
+    ///
+    /// Reported from the device with a screenshot showing the speech ring and Paste / Select All on screen at
+    /// once. Suppressing the long press was not enough: `TerminalView` also raises the menu from a *single tap*
+    /// near the cursor, so an ordinary tap-to-focus produced a menu nobody asked for, on top of the ring.
+    func testTappingNearTheCursorDoesNotRaiseAnEditMenu() throws {
+        let app = launchedApp()
+        // Connected on purpose. A disconnected terminal has no cursor and no text, so every path to this menu is
+        // unreachable and the test would pass while the defect is fully intact — which it did, twice.
+        let connect = app.buttons["Connect to home"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 15), "no host to connect to")
+        connect.tap()
+        let trust = app.buttons["Trust this host key and continue connecting"]
+        if trust.waitForExistence(timeout: 10) { trust.tap() }
+        XCTAssertTrue(app.buttons["Resume home"].waitForExistence(timeout: 30), "never connected")
+        app.buttons["Terminal"].tap()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface to tap")
+        // Let the shell print its prompt, which is what the cursor and the selection paths need to exist.
+        Thread.sleep(forTimeInterval: 5)
+        // Tapped where a disconnected terminal's cursor sits: the home row of the grid, hard left. `TerminalView`
+        // raises the menu when a tap lands within four columns and two rows of the cursor, which is exactly where
+        // a person taps to focus the thing they want to type into.
+        terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.04)).tap()
+        // Double taps raise it from their own path, and a hold raises it from two more.
+        terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.04)).doubleTap()
+        terminal.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).press(forDuration: 1.2)
+
+        for label in ["Select All", "Paste", "Select", "Copy"] {
+            XCTAssertFalse(
+                app.menuItems[label].exists || app.buttons[label].exists,
+                "tapping the terminal raised the \(label) menu; a tap is how you focus a terminal, not how you "
+                    + "ask for a menu. On screen:\n\(app.debugDescription)"
+            )
+        }
     }
 
     /// Tapping the microphone has to actually arm dictation. The label flipping to "Stop dictation" is the app's own

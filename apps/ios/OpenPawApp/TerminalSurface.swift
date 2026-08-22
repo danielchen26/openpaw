@@ -1,6 +1,7 @@
 import OpenPawTerminalCore
 import OpenPawUI
 import SwiftTerm
+import ObjectiveC
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -396,16 +397,45 @@ final class OpenPawTerminalView: TerminalView {
 
     // MARK: Gestures
 
+    /// Refuses every entry in the UIKit edit menu, which is what stops the menu appearing at all.
+    ///
+    /// Swapped at runtime rather than overridden: `TerminalView.canPerformAction` is `public`, not `open`, so a
+    /// subclass in another module cannot override it. The exchange is done once, on this subclass only, so
+    /// SwiftTerm's own behaviour elsewhere is untouched.
+    ///
+    /// Suppressing the long press was not enough. `TerminalView` raises that menu from four places — the long
+    /// press, a single tap near the cursor, a double or triple tap, and the end of a selection drag — so removing
+    /// one door left three. A user holding to talk still saw Paste / Select / Select All over the speech ring,
+    /// which is precisely the screenshot that was reported.
+    ///
+    /// `UIMenuController` shows nothing when no action is permitted, so refusing them all closes every door at
+    /// once and keeps working if SwiftTerm adds a fifth. Copy and select live on the rail instead, where they do
+    /// not compete with a gesture.
+    @objc func openpawSuppressedCanPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        false
+    }
+
+    /// Installs the suppression above. Idempotent: repeated calls would otherwise swap the methods back.
+    private static let suppressEditMenu: Void = {
+        guard
+            let original = class_getInstanceMethod(
+                OpenPawTerminalView.self, #selector(UIResponder.canPerformAction(_:withSender:))),
+            let replacement = class_getInstanceMethod(
+                OpenPawTerminalView.self,
+                #selector(OpenPawTerminalView.openpawSuppressedCanPerformAction(_:withSender:)))
+        else { return }
+        method_exchangeImplementations(original, replacement)
+    }()
+
     /// Gives the long press back to dictation.
     ///
-    /// `TerminalView` installs its own 0.7s long press that raises the UIKit edit menu (Paste / Select / Select
-    /// All). That menu answered the hold before the speech ring could appear, so "hold anywhere to talk" did
-    /// nothing on the one screen where it matters most. Selection is still reachable from the rail's search
-    /// control, which is where this app's own copy path already lives.
+    /// Belt and braces with `canPerformAction`: this keeps the 0.7s press from swallowing the touch and from
+    /// starting a selection drag, rather than merely from showing an empty menu.
     ///
     /// Disabled rather than removed: the recognizer is created in SwiftTerm's initialiser and removing it would
     /// depend on identifying it by index, which a future version could reorder underneath us.
     func releaseLongPressForDictation() {
+        _ = Self.suppressEditMenu
         for recognizer in gestureRecognizers ?? [] {
             guard let press = recognizer as? UILongPressGestureRecognizer else { continue }
             // Ours, installed by this app, is not one to disable — only the view's built-in menu press is.
