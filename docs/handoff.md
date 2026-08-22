@@ -93,6 +93,11 @@ The Milestone 1 app was built, installed and launched on an **iPhone 16 Pro simu
    `DictationEngineChoiceState.isActionable` is not what draws the button: the row switches over the state
    exhaustively so that a new case cannot be silently absorbed by a boolean. Both are exhaustive, and a test
    asserts they agree.
+   When a phone does arrive, two of the three things that test needs are already known to work. The audio
+   harness (`synthesise`/`readSamples`) and the scorer (`characterErrorRate`) both run and are asserted on this
+   machine, so a failure on hardware points at the model or the wrapper rather than at the test. Note that the
+   0.15 threshold does not catch a leaked `<|zh|>` on a sentence of ordinary length — that costs 0.146 — which is
+   why `testTranscriptsArriveWithoutModelTags` is a separate test and must not be folded into the accuracy one.
    Being stuck there is worth something anyway: reading the wrapper instead of running it turned up a defect the
    models could never have exposed. The transcript cleaner stripped everything between angle brackets, so a
    dictated `cat < in.txt > out.txt` reached the draft as `cat  out.txt` — a different command, still valid,
