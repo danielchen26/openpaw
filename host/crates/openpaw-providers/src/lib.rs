@@ -778,12 +778,7 @@ fn parse_github_repo(v: serde_json::Value) -> Result<Repository, ProviderError> 
     let provider_repo_id = v
         .get("id")
         .and_then(|x| x.as_u64())
-        .map(|id| id.to_string())
-        .or_else(|| {
-            v.get("full_name")
-                .and_then(|x| x.as_str())
-                .map(str::to_string)
-        })
+        .map(|id| format!("github.{id}"))
         .ok_or_else(|| ProviderError::Protocol("malformed GitHub repository id".into()))?;
     let is_private = v
         .get("private")
@@ -871,10 +866,11 @@ fn parse_hf_repo(item: serde_json::Value, kind: &str) -> Result<Repository, Prov
     let is_private = item
         .get("private")
         .and_then(|x| x.as_bool())
-        .or_else(|| item.get("gated").and_then(|x| x.as_bool()))
-        .unwrap_or(false);
+        .ok_or_else(|| {
+            ProviderError::Protocol("malformed Hugging Face repository visibility".into())
+        })?;
     let repo = Repository {
-        provider_repo_id: format!("{stable_kind}:{id}"),
+        provider_repo_id: format!("hf.{stable_kind}.{}", safe_hex(id)),
         owner: owner.into(),
         name: name.into(),
         https_url: format!("https://huggingface.co/{prefix}{id}"),
@@ -884,6 +880,11 @@ fn parse_hf_repo(item: serde_json::Value, kind: &str) -> Result<Repository, Prov
     Ok(repo)
 }
 fn validate_repo(repo: &Repository, kind: ProviderKind) -> Result<(), ProviderError> {
+    if !is_safe_identifier(&repo.provider_repo_id) {
+        return Err(ProviderError::Protocol(
+            "invalid provider repository identifier".into(),
+        ));
+    }
     if repo.owner.is_empty()
         || repo.name.is_empty()
         || repo.owner.contains('/')
@@ -945,6 +946,23 @@ fn validate_repo(repo: &Repository, kind: ProviderKind) -> Result<(), ProviderEr
         ));
     }
     Ok(())
+}
+
+fn is_safe_identifier(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+fn safe_hex(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(value.len() * 2);
+    for byte in value.bytes() {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 async fn revoke(
     client: &reqwest::Client,

@@ -136,8 +136,7 @@ async fn github_repository_metadata_preserves_stable_id_and_private_visibility()
         get(|| async {
             Json(json!([
                 {"id": 123456789, "name":"public.repo", "full_name":"me/public.repo", "private":false, "owner":{"login":"me"}, "clone_url":"https://github.com/me/public.repo.git"},
-                {"id": 987654321, "name":"private.repo", "full_name":"me/private.repo", "private":true, "owner":{"login":"me"}, "clone_url":"https://github.com/me/private.repo.git"},
-                {"name":"fallback", "full_name":"me/fallback", "private":false, "owner":{"login":"me"}, "clone_url":"https://github.com/me/fallback.git"}
+                {"id": 987654321, "name":"private.repo", "full_name":"me/private.repo", "private":true, "owner":{"login":"me"}, "clone_url":"https://github.com/me/private.repo.git"}
             ]))
         }),
     );
@@ -148,14 +147,35 @@ async fn github_repository_metadata_preserves_stable_id_and_private_visibility()
         .await
         .unwrap();
 
-    assert_eq!(repos[0].provider_repo_id, "123456789");
+    assert_eq!(repos[0].provider_repo_id, "github.123456789");
+    assert_safe_identifier(&repos[0].provider_repo_id);
     assert!(!repos[0].is_private);
-    assert_eq!(repos[1].provider_repo_id, "987654321");
+    assert_eq!(repos[1].provider_repo_id, "github.987654321");
+    assert_safe_identifier(&repos[1].provider_repo_id);
     assert!(repos[1].is_private);
-    assert_eq!(repos[2].provider_repo_id, "me/fallback");
     let rendered = format!("{repos:?}");
     assert!(!rendered.contains("gh_secret_private"));
     assert!(!rendered.contains("Authorization"));
+}
+
+#[tokio::test]
+async fn github_missing_numeric_id_is_provider_data_error_not_renameable_fallback() {
+    let app = Router::new().route(
+        "/user/repos",
+        get(|| async {
+            Json(json!([{ "name":"fallback", "full_name":"me/fallback", "private":false, "owner":{"login":"me"}, "clone_url":"https://github.com/me/fallback.git" }]))
+        }),
+    );
+    let base = serve(app).await;
+    let gh = GitHubProvider::new(PublicClientConfig::github_app("client", &base, &base));
+    let err = gh
+        .list_repositories(&SecretToken::new("gh_missing_id_secret".into()))
+        .await
+        .unwrap_err();
+    let rendered = format!("{err:?} {err}");
+    assert!(rendered.contains("GitHub repository id"));
+    assert!(!rendered.contains("gh_missing_id_secret"));
+    assert!(!rendered.contains("me/fallback"));
 }
 
 #[tokio::test]
@@ -281,7 +301,7 @@ async fn hf_repository_metadata_preserves_ids_visibility_and_kind_collisions() {
                         ]),
                         "spaces" => json!([
                             {"id":"me/shared.name", "private":false},
-                            {"id":"me/gated-space", "gated":true}
+                            {"id":"me/private-space", "private":true, "gated":true}
                         ]),
                         _ => json!([
                             {"id":"me/shared.name", "private":false},
@@ -303,31 +323,35 @@ async fn hf_repository_metadata_preserves_ids_visibility_and_kind_collisions() {
         .await
         .unwrap();
 
+    assert!(repos.iter().all(|r| {
+        assert_safe_identifier(&r.provider_repo_id);
+        true
+    }));
     assert!(
         repos
             .iter()
-            .any(|r| r.provider_repo_id == "model:me/shared.name"
+            .any(|r| r.provider_repo_id.starts_with("hf.model.")
                 && !r.is_private
                 && r.https_url == "https://huggingface.co/me/shared.name")
     );
     assert!(
         repos
             .iter()
-            .any(|r| r.provider_repo_id == "dataset:me/shared.name"
+            .any(|r| r.provider_repo_id.starts_with("hf.dataset.")
                 && r.is_private
                 && r.https_url == "https://huggingface.co/datasets/me/shared.name")
     );
     assert!(
         repos
             .iter()
-            .any(|r| r.provider_repo_id == "space:me/shared.name"
+            .any(|r| r.provider_repo_id.starts_with("hf.space.")
                 && !r.is_private
                 && r.https_url == "https://huggingface.co/spaces/me/shared.name")
     );
     assert!(
         repos
             .iter()
-            .any(|r| r.provider_repo_id == "space:me/gated-space" && r.is_private)
+            .any(|r| r.name == "private-space" && r.is_private)
     );
     assert_eq!(
         repos
@@ -341,6 +365,50 @@ async fn hf_repository_metadata_preserves_ids_visibility_and_kind_collisions() {
     let rendered = format!("{repos:?}");
     assert!(!rendered.contains("hf_secret_private"));
     assert!(!rendered.contains("Bearer"));
+}
+
+#[tokio::test]
+async fn hf_missing_or_non_bool_private_is_provider_data_error_not_public_or_gated() {
+    for item in [
+        json!({"id":"me/missing-private"}),
+        json!({"id":"me/string-private", "private":"false"}),
+        json!({"id":"me/gated-only", "gated":true}),
+    ] {
+        let app = Router::new()
+            .route(
+                "/hf/api/whoami-v2",
+                get(|| async { Json(json!({"name":"me"})) }),
+            )
+            .route(
+                "/hf/api/models",
+                get(move || async move { Json(json!([item])) }),
+            )
+            .route("/hf/api/datasets", get(|| async { Json(json!([])) }))
+            .route("/hf/api/spaces", get(|| async { Json(json!([])) }));
+        let base = serve(app).await;
+        let hf = HuggingFaceProvider::new(PublicClientConfig::hugging_face(
+            "client",
+            &base,
+            format!("{base}/hf"),
+        ));
+        let err = hf
+            .list_repositories(&SecretToken::new("hf_privacy_secret".into()))
+            .await
+            .unwrap_err();
+        let rendered = format!("{err:?} {err}");
+        assert!(rendered.contains("Hugging Face repository visibility"));
+        assert!(!rendered.contains("hf_privacy_secret"));
+    }
+}
+
+fn assert_safe_identifier(id: &str) {
+    assert!(!id.is_empty());
+    assert!(
+        id.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+    );
+    assert!(!id.contains('/'));
+    assert!(!id.contains(':'));
 }
 
 #[test]
