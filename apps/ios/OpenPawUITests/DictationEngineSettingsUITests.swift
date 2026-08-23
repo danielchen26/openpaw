@@ -181,14 +181,24 @@ final class DictationEngineSettingsUITests: XCTestCase {
     private func settingsShowingRecogniser(_ app: XCUIApplication) -> XCUIElement {
         clearTunnelAlerts(app)
         app.buttons["Settings"].firstMatch.tap()
-        var picker = recogniserPicker(in: app)
-        if !picker.waitForExistence(timeout: 10) {
+        let voiceCategory = app.buttons["settings.category.voice"].firstMatch
+        if !voiceCategory.waitForExistence(timeout: 10) {
             // The tap can be swallowed whole when it lands during the host-key sheet's dismissal animation, which
             // is exactly when a live-daemon launch arrives here. The screen is then still Home, which also has a
             // scroll view, so waiting on a scroll view cannot tell the difference. One more tap, after the window
             // has settled, is the difference between testing Settings and failing on a transition.
             clearTunnelAlerts(app)
             app.buttons["Settings"].firstMatch.tap()
+        }
+        XCTAssertTrue(
+            voiceCategory.waitForExistence(timeout: 10),
+            "Settings never rendered its Voice & Dictation category. On screen:\n\(app.debugDescription)"
+        )
+        voiceCategory.tap()
+        var picker = recogniserPicker(in: app)
+        if !picker.waitForExistence(timeout: 10) {
+            clearTunnelAlerts(app)
+            if voiceCategory.exists, voiceCategory.isHittable { voiceCategory.tap() }
             picker = recogniserPicker(in: app)
         }
         XCTAssertTrue(
