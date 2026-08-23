@@ -101,10 +101,12 @@ struct DictationEngineChoiceTests {
     func snapshotRoundTripsEngine() throws {
         let settings = OpenPawSettings(defaults: Self.freshDefaults())
         settings.dictationEngine = .qwen3Large
-        let data = try JSONEncoder().encode(settings.snapshot(eventBudget: 2_000))
+        settings.eventBudgetPerSession = 2_000
+        let data = try JSONEncoder().encode(settings.snapshot())
 
         let restored = OpenPawSettings(defaults: Self.freshDefaults())
-        restored.apply(try JSONDecoder().decode(SettingsSnapshot.self, from: data))
+        let proposal = try SettingsImportProposal.parse(data, current: restored)
+        try restored.apply(proposal, confirmSecurityReductions: true)
         #expect(restored.dictationEngine == .qwen3Large)
     }
 
@@ -182,7 +184,7 @@ struct DictationEngineChoiceTests {
 
     private static func freshDefaults() -> UserDefaults {
         let suite = "openpaw.tests.dictation.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite) ?? .standard
+        let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
         return defaults
     }

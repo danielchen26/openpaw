@@ -2196,12 +2196,13 @@ struct SettingsTests {
         source.applicationCursorKeys = true
         source.setProfile(SessionProfile(columns: 132, rows: 43), for: host)
 
-        let data = try JSONEncoder().encode(source.snapshot(eventBudget: 5_000))
-        let decoded = try JSONDecoder().decode(SettingsSnapshot.self, from: data)
+        source.eventBudgetPerSession = 5_000
+        let data = try JSONEncoder().encode(source.snapshot())
 
         let target = OpenPawSettings(defaults: volatileDefaults("import"))
-        let budget = target.apply(decoded)
-        #expect(budget == 5_000)
+        let proposal = try SettingsImportProposal.parse(data, current: target)
+        try target.apply(proposal, confirmSecurityReductions: true)
+        #expect(target.eventBudgetPerSession == 5_000)
         #expect(target.terminalFontSize == 21)
         #expect(target.terminalTheme == .well)
         #expect(target.previewPort == 5_173)
@@ -2211,13 +2212,16 @@ struct SettingsTests {
     }
 
     @MainActor
-    @Test("An import with an absurd cell size is clamped rather than trusted")
-    func importClampsFontSize() {
+    @Test("An import with an absurd cell size is rejected rather than trusted")
+    func importRejectsInvalidFontSize() throws {
         let settings = OpenPawSettings(defaults: volatileDefaults("clamp"))
-        var snapshot = settings.snapshot(eventBudget: 2_000)
+        var snapshot = settings.snapshot()
         snapshot.terminalFontSize = 400
-        settings.apply(snapshot)
-        #expect(settings.terminalFontSize == OpenPawSettings.fontSizeRange.upperBound)
+        let data = try JSONEncoder.openPawSettings.encode(snapshot)
+        #expect(throws: (any Error).self) {
+            try SettingsImportProposal.parse(data, current: settings)
+        }
+        #expect(settings.terminalFontSize == 13)
     }
 }
 

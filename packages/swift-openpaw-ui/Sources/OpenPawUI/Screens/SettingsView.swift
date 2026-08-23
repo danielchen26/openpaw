@@ -47,6 +47,7 @@ public struct SettingsView: View {
     @State private var isImporting = false
     @State private var exportDocument = ShellJSONDocument(data: Data())
     @State private var transferError: String?
+    @State private var pendingImportProposal: SettingsImportProposal?
     @State private var selectedDestination: SettingsDestination?
     @State private var searchText = ""
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -705,11 +706,61 @@ public struct SettingsView: View {
                         .accessibilityIdentifier(SettingsControl.importJSON.accessibilityIdentifier)
                 }
 
+                VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+                    Text("Reset categories")
+                        .microLabel()
+                    Text("Resets only settings owned by this screen. Hosts, host credentials and Keychain material are never deleted here.")
+                        .font(OpenPawTheme.Human.caption)
+                        .foregroundStyle(OpenPawTheme.textSecondary)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: OpenPawTheme.Space.small)], alignment: .leading, spacing: OpenPawTheme.Space.small) {
+                        resetButton("Appearance", .appearanceAndTerminal)
+                        resetButton("Voice", .voice)
+                        resetButton("Connections", .connections)
+                        resetButton("Sessions", .sessionsAndBudgets)
+                        resetButton("Security", .security)
+                        resetButton("All settings", .dataAll)
+                    }
+                }
+
                 if let transferError {
                     ShellIssueText(transferError)
                 }
+
+                if let pendingImportProposal {
+                    importProposalSummary(pendingImportProposal)
+                }
             }
         }
+    }
+
+    private func importProposalSummary(_ proposal: SettingsImportProposal) -> some View {
+        VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+            Text("Pending import")
+                .font(OpenPawTheme.Human.proseTight)
+                .foregroundStyle(OpenPawTheme.textPrimary)
+            Text(importSummaryText(proposal))
+                .font(OpenPawTheme.Machine.codeSmall)
+                .foregroundStyle(OpenPawTheme.textSecondary)
+                .textSelection(.enabled)
+            HStack(spacing: OpenPawTheme.Space.small) {
+                Button("Cancel import", role: .cancel, action: cancelImportProposal)
+                    .buttonStyle(.plain)
+                Button(proposal.securityReductions.isEmpty ? "Apply import" : "Apply security-reducing import") {
+                    applyPendingImport(confirmSecurityReductions: !proposal.securityReductions.isEmpty)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(OpenPawTheme.Space.medium)
+        .background(OpenPawTheme.panel.opacity(0.9), in: RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card))
+        .accessibilityIdentifier("settings.import.proposal")
+    }
+
+    private func resetButton(_ title: String, _ category: SettingsResetCategory) -> some View {
+        Button(title) { stageReset(category) }
+            .buttonStyle(.plain)
+            .frame(minHeight: 44, alignment: .leading)
+            .accessibilityIdentifier("settings.reset.\(category.rawValue)")
     }
 
     private func startExport() {
@@ -717,7 +768,7 @@ public struct SettingsView: View {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         do {
-            let snapshot = settings.snapshot(eventBudget: model.eventBudgetPerSession)
+            let snapshot = settings.snapshot()
             exportDocument = ShellJSONDocument(data: try encoder.encode(snapshot))
             isExporting = true
         } catch {
@@ -733,10 +784,44 @@ public struct SettingsView: View {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             let data = try Data(contentsOf: url)
             let proposal = try SettingsImportProposal.parse(data, current: settings)
-            try settings.apply(proposal, confirmSecurityReductions: true)
+            pendingImportProposal = proposal
         } catch {
             transferError = "That file is not an OpenPaw settings export: \(error)"
         }
+    }
+
+    private func stageReset(_ category: SettingsResetCategory) {
+        transferError = nil
+        do {
+            pendingImportProposal = try SettingsImportProposal.reset(category, current: settings)
+        } catch {
+            transferError = "That reset could not be prepared: \(error)"
+        }
+    }
+
+    private func applyPendingImport(confirmSecurityReductions: Bool) {
+        guard let proposal = pendingImportProposal else { return }
+        transferError = nil
+        do {
+            try settings.apply(proposal, confirmSecurityReductions: confirmSecurityReductions)
+            pendingImportProposal = nil
+        } catch {
+            transferError = "That import could not be applied: \(error)"
+        }
+    }
+
+    private func cancelImportProposal() {
+        pendingImportProposal = nil
+    }
+
+    private func importSummaryText(_ proposal: SettingsImportProposal) -> String {
+        var lines = proposal.changes.map { change in
+            "\(change.category.rawValue).\(change.controlID): \(change.oldDisplayValue) → \(change.newDisplayValue)"
+        }
+        if !proposal.securityReductions.isEmpty {
+            lines.insert("Security reduction requires explicit confirmation: \(proposal.securityReductions.map(\.rawValue).sorted().joined(separator: ", "))", at: 0)
+        }
+        return lines.isEmpty ? "No settings changes detected." : lines.joined(separator: "\n")
     }
 
     private var connection: some View {

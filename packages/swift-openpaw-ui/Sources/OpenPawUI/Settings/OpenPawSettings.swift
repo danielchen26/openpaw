@@ -103,10 +103,7 @@ public final class OpenPawSettings {
         SettingsSnapshot(requiresBiometricGate: requiresBiometricGate, dictationLocaleID: dictationLocaleID, dictationMode: dictationMode, dictationEngine: dictationEngine, terminalFontSize: Double(terminalFontSize), terminalTheme: terminalTheme, scrollbackLines: scrollbackLines, applicationCursorKeys: applicationCursorKeys, previewPort: previewPort, eventBudgetPerSession: eventBudgetPerSession, shortcuts: shortcuts, sessionProfiles: sessionProfiles, isShortcutBarVisible: isShortcutBarVisible, biometricGraceInterval: biometricGraceInterval)
     }
 
-    public func snapshot(eventBudget: Int) -> SettingsSnapshot { eventBudgetPerSession = eventBudget; return snapshot() }
-
-    @discardableResult
-    public func apply(_ snapshot: SettingsSnapshot) -> Int {
+    func commit(_ snapshot: SettingsSnapshot) {
         requiresBiometricGate = snapshot.requiresBiometricGate
         dictationLocaleID = snapshot.dictationLocaleID
         dictationMode = snapshot.dictationMode
@@ -121,16 +118,20 @@ public final class OpenPawSettings {
         biometricGraceInterval = snapshot.biometricGraceInterval
         shortcuts = snapshot.shortcuts
         sessionProfiles = snapshot.sessionProfiles
-        return eventBudgetPerSession
     }
 
     public func apply(_ proposal: SettingsImportProposal, confirmSecurityReductions: Bool) throws {
+        try SettingsImportProposal.validate(proposal.snapshot)
         if !proposal.securityReductions.isEmpty && !confirmSecurityReductions { throw SettingsValidationError.securityReductionRequiresConfirmation }
-        apply(proposal.snapshot)
+        commit(proposal.snapshot)
     }
 
     public static func preview() -> OpenPawSettings {
-        let suite = "openpaw.previews"; let store = UserDefaults(suiteName: suite) ?? .standard; store.removePersistentDomain(forName: suite)
+        let suite = "openpaw.previews"
+        guard let store = UserDefaults(suiteName: suite) else {
+            preconditionFailure("Could not create isolated preview defaults suite")
+        }
+        store.removePersistentDomain(forName: suite)
         let settings = OpenPawSettings(defaults: store)
         settings.shortcuts = ShortcutSet(shortcuts: ShortcutSet.default.shortcuts + [Shortcut(id: "gst", label: "gst", payload: .literal("git status\n"), order: 100), Shortcut(id: "clr", label: "clr", payload: .literal("clear\n"), order: 101)])
         return settings

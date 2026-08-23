@@ -218,9 +218,9 @@ final class AppWiring {
     /// has no way to hear.
     let asrModels: LocalASRModelStore
 
-    /// A device preference, so it lives in `UserDefaults` rather than in the model, which holds host state.
     var terminalFontSize: CGFloat {
-        didSet { UserDefaults.standard.set(Double(terminalFontSize), forKey: Self.fontSizeKey) }
+        get { settings.terminalFontSize }
+        set { settings.terminalFontSize = newValue }
     }
 
     var terminalTitle = ""
@@ -232,7 +232,7 @@ final class AppWiring {
     /// Remote paths of uploaded attachments, in the order they were attached, for the composer to reference.
     var attachedPaths: [String] = []
 
-    private static let fontSizeKey = "terminal.fontSize"
+    private static let legacyFontSizeKey = "terminal.fontSize"
     private let hosts: HostStoreFile
 
     /// `RootView` is built once, not per body evaluation: it holds a reference-type router that `openApproval(itemID:)`
@@ -287,8 +287,8 @@ final class AppWiring {
         cachedRoot?.cancelInboxRouteRequest()
     }
 
-    /// A binding to `terminalFontSize` for code that is not inside a view body. Pinch zoom writes through it, and the
-    /// `didSet` above persists it.
+    /// A binding to the shared settings-owned terminal font size. Pinch zoom writes through the same persisted settings
+    /// object that the Settings screen edits, so changes are immediate in both directions.
     private var fontSizeBinding: Binding<CGFloat> {
         Binding(
             get: { [weak self] in self?.terminalFontSize ?? TerminalSurface.defaultFontSize },
@@ -394,7 +394,7 @@ final class AppWiring {
         let model: OpenPawModel
         #if DEBUG && targetEnvironment(simulator)
             if let debugScenario {
-                model = debugScenario.makeModel(terminal: terminal)
+                model = debugScenario.makeModel(terminal: terminal, settings: settings)
             } else {
                 model = OpenPawModel(
                     hostStore: hosts.load(),
@@ -424,8 +424,10 @@ final class AppWiring {
         self.asrModels = asrModels
         self.sessionCommandRunner = sessionCommandRunner
 
-        let stored = UserDefaults.standard.double(forKey: Self.fontSizeKey)
-        terminalFontSize = stored > 0 ? CGFloat(stored) : TerminalSurface.defaultFontSize
+        if UserDefaults.standard.object(forKey: "openpaw.settings.terminalFontSize") == nil {
+            let stored = UserDefaults.standard.double(forKey: Self.legacyFontSizeKey)
+            if stored > 0 { settings.terminalFontSize = CGFloat(stored) }
+        }
         self.hosts = hosts
         self.terminal = terminal
         self.hostAPI = hostAPI
@@ -831,7 +833,8 @@ final class GateController {
         refresh(trigger: .launch)
     }
 
-    init(policy: GatePolicy, lastUnlockedAt: Date?, leftForegroundAt: Date?, now: Date, settings: OpenPawSettings = OpenPawSettings(defaults: UserDefaults(suiteName: "openpaw.gate.tests.\(UUID().uuidString)") ?? .standard)) {
+    init(policy: GatePolicy, lastUnlockedAt: Date?, leftForegroundAt: Date?, now: Date, settings: OpenPawSettings? = nil) {
+        let settings = settings ?? Self.isolatedTestSettings()
         self.settings = settings
         self.unavailableReason = policy.unavailableReason
         self.policy = policy
@@ -839,6 +842,15 @@ final class GateController {
         self.leftForegroundAt = leftForegroundAt
         self.decisionNow = now
 
+    }
+
+    private static func isolatedTestSettings() -> OpenPawSettings {
+        let suite = "openpaw.gate.tests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            preconditionFailure("Could not create isolated gate defaults suite")
+        }
+        defaults.removePersistentDomain(forName: suite)
+        return OpenPawSettings(defaults: defaults)
     }
 
     /// Why this device cannot satisfy the gate, or `nil` when it can.

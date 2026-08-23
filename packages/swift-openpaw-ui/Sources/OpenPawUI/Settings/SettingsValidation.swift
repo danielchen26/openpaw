@@ -1,4 +1,5 @@
 import Foundation
+import OpenPawTerminalCore
 
 public enum SettingsValidationError: Error, Equatable, CustomStringConvertible {
     case futureSchemaVersion(Int)
@@ -50,10 +51,15 @@ public struct SettingsImportProposal: Sendable, Hashable {
     }
 
     @MainActor
-    public static func reset(_ category: SettingsResetCategory, current settings: OpenPawSettings) -> SettingsImportProposal {
-        let defaults = OpenPawSettings(defaults: UserDefaults(suiteName: "openpaw.settings.reset.defaults.\(UUID().uuidString)") ?? .standard)
+    public static func reset(_ category: SettingsResetCategory, current settings: OpenPawSettings) throws -> SettingsImportProposal {
+        let suite = "openpaw.settings.reset.defaults.\(UUID().uuidString)"
+        guard let store = UserDefaults(suiteName: suite) else {
+            throw SettingsValidationError.invalidValue("reset defaults suite")
+        }
+        store.removePersistentDomain(forName: suite)
+        defer { store.removePersistentDomain(forName: suite) }
+        let baseline = OpenPawSettings(defaults: store).snapshot()
         var snapshot = settings.snapshot()
-        let baseline = defaults.snapshot()
         switch category {
         case .appearanceAndTerminal:
             snapshot.terminalFontSize = baseline.terminalFontSize
@@ -77,6 +83,7 @@ public struct SettingsImportProposal: Sendable, Hashable {
         case .dataAll:
             snapshot = baseline
         }
+        try validate(snapshot)
         return proposal(snapshot: snapshot, current: settings, migrationNotes: ["Reset \(category.rawValue) settings to defaults."])
     }
 
@@ -100,24 +107,89 @@ public struct SettingsImportProposal: Sendable, Hashable {
         append(.appearanceAndTerminal, "shortcut-bar-visible", String(old.isShortcutBarVisible), String(snapshot.isShortcutBarVisible))
         append(.connections, "preview-port", String(old.previewPort), String(snapshot.previewPort))
         append(.sessionsAndBudgets, "event-budget", String(old.eventBudgetPerSession), String(snapshot.eventBudgetPerSession))
-        changes.sort { $0.controlID < $1.controlID }
+
+        let oldShortcuts = Dictionary(uniqueKeysWithValues: old.shortcuts.shortcuts.map { ($0.id, $0) })
+        let newShortcuts = Dictionary(uniqueKeysWithValues: snapshot.shortcuts.shortcuts.map { ($0.id, $0) })
+        for id in Set(oldShortcuts.keys).union(newShortcuts.keys).sorted() {
+            guard oldShortcuts[id] != newShortcuts[id] else { continue }
+            let values = changedDisplay(old: oldShortcuts[id].map(shortcutDisplay) ?? "absent", new: newShortcuts[id].map(shortcutDisplay) ?? "absent")
+            changes.append(SettingsChange(category: .appearanceAndTerminal, controlID: "shortcut.\(id)", oldDisplayValue: values.old, newDisplayValue: values.new, securityImpact: nil))
+        }
+
+        let oldProfiles = old.sessionProfiles
+        let newProfiles = snapshot.sessionProfiles
+        for id in Set(oldProfiles.keys).union(newProfiles.keys).sorted() {
+            guard oldProfiles[id] != newProfiles[id] else { continue }
+            let values = changedDisplay(old: oldProfiles[id].map(profileDisplay) ?? "absent", new: newProfiles[id].map(profileDisplay) ?? "absent")
+            changes.append(SettingsChange(category: .sessionsAndBudgets, controlID: "session-profile.\(id)", oldDisplayValue: values.old, newDisplayValue: values.new, securityImpact: nil))
+        }
+
+        changes.sort { ($0.category.rawValue, $0.controlID) < ($1.category.rawValue, $1.controlID) }
         return SettingsImportProposal(snapshot: snapshot, changes: changes, securityReductions: changes.compactMap(\.securityImpact), sourceSchemaVersion: snapshot.schemaVersion, migrationNotes: migrationNotes)
     }
 
     @MainActor
-    private static func validate(_ snapshot: SettingsSnapshot) throws {
+    static func validate(_ snapshot: SettingsSnapshot) throws {
         guard OpenPawSettings.eventBudgetRange.contains(snapshot.eventBudgetPerSession) else { throw SettingsValidationError.invalidValue("eventBudgetPerSession") }
         guard (1...65_535).contains(snapshot.previewPort) else { throw SettingsValidationError.invalidValue("previewPort") }
         guard snapshot.terminalFontSize.isFinite, OpenPawSettings.fontSizeRange.contains(CGFloat(snapshot.terminalFontSize)) else { throw SettingsValidationError.invalidValue("terminalFontSize") }
         guard snapshot.biometricGraceInterval.isFinite, snapshot.biometricGraceInterval >= 0, snapshot.biometricGraceInterval <= 86_400 else { throw SettingsValidationError.invalidValue("biometricGraceInterval") }
         guard OpenPawSettings.scrollbackChoices.contains(snapshot.scrollbackLines) else { throw SettingsValidationError.invalidValue("scrollbackLines") }
-        for key in snapshot.sessionProfiles.keys { try validateIdentifier(key, field: "sessionProfiles") }
-        for shortcut in snapshot.shortcuts.shortcuts { try validateIdentifier(shortcut.id, field: "shortcuts") }
+        for (key, profile) in snapshot.sessionProfiles {
+            try validateHostID(key)
+            try validate(profile: profile)
+        }
+        for shortcut in snapshot.shortcuts.shortcuts { try validateShortcutID(shortcut.id) }
     }
 
-    private static func validateIdentifier(_ value: String, field: String) throws {
-        guard !value.isEmpty, value.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\:\0\n\r\t")) == nil, value.rangeOfCharacter(from: .controlCharacters) == nil else { throw SettingsValidationError.invalidValue(field) }
+    private static func validate(profile: SessionProfile) throws {
+        guard !profile.terminalType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            !profile.terminalType.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+            profile.terminalType.count <= 64
+        else { throw SettingsValidationError.invalidValue("sessionProfiles.terminalType") }
+        guard HostDraft.columnRange.contains(profile.columns), HostDraft.rowRange.contains(profile.rows) else { throw SettingsValidationError.invalidValue("sessionProfiles.geometry") }
+        guard HostDraft.keepaliveRange.contains(profile.keepaliveSeconds) else { throw SettingsValidationError.invalidValue("sessionProfiles.keepalive") }
+        guard profile.jumpHosts.count <= 8 else { throw SettingsValidationError.invalidValue("sessionProfiles.jumpHosts") }
+        for hop in profile.jumpHosts {
+            let host = hop.hostname.trimmingCharacters(in: .whitespacesAndNewlines)
+            let user = hop.username.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !host.isEmpty, host.count <= 255, !host.contains(where: \.isWhitespace), !host.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { throw SettingsValidationError.invalidValue("sessionProfiles.jumpHost.hostname") }
+            guard HostDraft.portRange.contains(hop.port) else { throw SettingsValidationError.invalidValue("sessionProfiles.jumpHost.port") }
+            guard user.count <= 128, !user.contains(where: \.isWhitespace), !user.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { throw SettingsValidationError.invalidValue("sessionProfiles.jumpHost.username") }
+        }
     }
+
+    private static func validateHostID(_ value: String) throws {
+        guard UUID(uuidString: value)?.uuidString.uppercased() == value.uppercased() else { throw SettingsValidationError.invalidValue("sessionProfiles") }
+    }
+
+    private static func validateShortcutID(_ value: String) throws {
+        guard (1...64).contains(value.count), value != ".", value != ".." else { throw SettingsValidationError.invalidValue("shortcuts") }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+        guard value.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { throw SettingsValidationError.invalidValue("shortcuts") }
+    }
+
+    private static func shortcutDisplay(_ shortcut: Shortcut) -> String {
+        let kind: String
+        switch shortcut.payload {
+        case .literal: kind = "literal"
+        case .chord: kind = "chord"
+        case .modifierLatch: kind = "modifier"
+        }
+        return "\(shortcut.label)|\(kind)|order:\(shortcut.order)|payload:redacted"
+    }
+
+    private static func profileDisplay(_ profile: SessionProfile) -> String {
+        var parts = ["profile", "geometry:\(profile.columns)x\(profile.rows)", "term:\(redactedToken(profile.terminalType))", "keepalive:\(profile.keepaliveSeconds)", "jumps:\(profile.jumpHosts.count)"]
+        if profile.lastConnectedAt != nil { parts.append("lastConnectedAt:set") }
+        return parts.joined(separator: "|")
+    }
+
+    private static func redactedToken(_ value: String) -> String { value.isEmpty ? "empty" : "set" }
 
     private static func display<T>(_ value: T) -> String { String(describing: value) }
+
+    private static func changedDisplay(old: String, new: String) -> (old: String, new: String) {
+        old == new ? (old, "\(new)|changed") : (old, new)
+    }
 }

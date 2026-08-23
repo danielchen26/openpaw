@@ -34,7 +34,7 @@
         }
 
         @MainActor
-        func makeModel(terminal: (any TerminalBackend)? = nil) -> OpenPawModel {
+        func makeModel(terminal: (any TerminalBackend)? = nil, settings: OpenPawSettings) -> OpenPawModel {
             let backend = PreviewBackend(previewScenario)
             let host = HostRecord(
                 id: Self.hostID,
@@ -73,7 +73,8 @@
                 terminal: modelTerminal,
                 tailscaleRouteHintSource: DebugTailscaleRoutePathSource(),
                 tailscaleAdminConnector: DebugTailscaleAdminConnector(),
-                connectionPreflightRunner: DebugConnectionPreflightRunner()
+                connectionPreflightRunner: DebugConnectionPreflightRunner(),
+                settings: settings
             )
             model.health = backend.healthInfo
             model.sessions = backend.sessionList

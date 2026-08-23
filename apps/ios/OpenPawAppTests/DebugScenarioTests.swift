@@ -1,5 +1,7 @@
 #if DEBUG && targetEnvironment(simulator)
+    import Foundation
     import OpenPawTerminalCore
+    import OpenPawUI
     import XCTest
 
     @testable import OpenPawApp
@@ -8,10 +10,7 @@
     final class DebugScenarioTests: XCTestCase {
     func testRecognisesEverySupportedScenarioFromLaunchArguments() {
         for scenario in DebugScenario.allCases {
-            XCTAssertEqual(
-                DebugScenario(arguments: ["OpenPaw", "-openpaw-debug-scenario", scenario.rawValue]),
-                scenario
-            )
+            XCTAssertEqual(DebugScenario(arguments: ["OpenPaw", "-openpaw-debug-scenario", scenario.rawValue]), scenario)
         }
     }
 
@@ -29,7 +28,7 @@
     }
 
     func testConnectedWorkspaceSeedsOneSSHHostAndCoherentWorkspaceState() {
-        let model = DebugScenario.connectedWorkspace.makeModel()
+        let model = DebugScenario.connectedWorkspace.makeModel(settings: isolatedSettings("connected"))
 
         XCTAssertEqual(model.hostStore.hosts.map(\.nickname), ["Scenario host"])
         XCTAssertEqual(model.selectedHostID, model.hostStore.hosts.first?.id)
@@ -42,7 +41,7 @@
     }
 
     func testFailureScenarioUsesTypedDisconnectedState() {
-        let model = DebugScenario.connectionFailures.makeModel()
+        let model = DebugScenario.connectionFailures.makeModel(settings: isolatedSettings("failure"))
 
         guard case .disconnected(let reason) = model.connection else {
             return XCTFail("expected a disconnected fixture")
@@ -52,7 +51,7 @@
     }
 
     func testNoHostsScenarioContainsNoSavedOrSelectedHost() {
-        let model = DebugScenario.noHosts.makeModel()
+        let model = DebugScenario.noHosts.makeModel(settings: isolatedSettings("no-hosts"))
 
         XCTAssertTrue(model.hostStore.hosts.isEmpty)
         XCTAssertNil(model.selectedHostID)
@@ -60,7 +59,7 @@
     }
 
     func testHostSwitcherScenarioSelectsWithoutConnectingAndConnectsOnlyOnRequest() async throws {
-        let model = DebugScenario.hostSwitcher.makeModel()
+        let model = DebugScenario.hostSwitcher.makeModel(settings: isolatedSettings("switcher"))
         let second = try XCTUnwrap(model.hostStore.hosts.last)
 
         XCTAssertEqual(model.hostStore.hosts.map(\.nickname), ["Scenario host", "Build server"])
@@ -72,6 +71,24 @@
 
         await model.connectSelectedHost()
         XCTAssertEqual(model.connection, .connected(.ssh))
+    }
+
+    func testScenarioModelUsesInjectedSettingsInstance() {
+        let settings = isolatedSettings("shared-settings")
+        settings.eventBudgetPerSession = 321
+
+        let model = DebugScenario.connectedWorkspace.makeModel(settings: settings)
+
+        XCTAssertEqual(model.eventBudgetPerSession, 321)
+        model.eventBudgetPerSession = 654
+        XCTAssertEqual(settings.eventBudgetPerSession, 654)
+    }
+
+    private func isolatedSettings(_ name: String) -> OpenPawSettings {
+        let suite = "DebugScenarioTests.\(name).\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        return OpenPawSettings(defaults: defaults)
     }
     }
 #endif
