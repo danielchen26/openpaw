@@ -301,6 +301,41 @@ final class AppWiring {
             onHostKeyProblem: { error in promptSink.get()?(error) }
         )
 
+        // Preflight owns a separate SSH transport and loopback tunnel. Testing a proposed host must never tear down or
+        // replace the terminal the user is already working in.
+        let preflightPins = LockedBox<[String]>([])
+        let preflightTransportBox = LockedBox<SSHTransport?>(nil)
+        let preflightTerminal = SSHTerminalBackend(
+            makeTransport: { _ in
+                let pinned = preflightPins.get()
+                let transport = SSHTransport(
+                    secretResolver: keychain,
+                    hostKeyVerification: { fingerprint in
+                        if pinned.contains(fingerprint) { return .trusted }
+                        if let expected = pinned.first {
+                            return .changed(expected: expected, actual: fingerprint)
+                        }
+                        return .unknown(fingerprint: fingerprint)
+                    }
+                )
+                preflightTransportBox.set(transport)
+                return transport
+            },
+            makeConfiguration: { host in
+                preflightPins.set(host.pinnedFingerprints)
+                return host.connectionConfiguration
+            },
+            onHostKeyProblem: { _ in }
+        )
+        let preflightAPI = HostAPIBackend(
+            forwarder: SSHLoopbackForwarder(connection: { await preflightTransportBox.get()?.connection })
+        )
+        let connectionPreflight = TypedConnectionPreflightRunner(
+            terminal: preflightTerminal,
+            capabilities: preflightTerminal,
+            backend: preflightAPI
+        )
+
         // A UI test can point the structured API at a daemon on this machine instead of tunnelling. Fenced so the
         // shipping build has no such path: see `debugDirectForwarder()`.
         var forwarder: any LoopbackForwarder = SSHLoopbackForwarder(
@@ -309,6 +344,7 @@ final class AppWiring {
             if let direct = Self.debugDirectForwarder() { forwarder = direct }
         #endif
         let hostAPI = HostAPIBackend(forwarder: forwarder)
+        let tailscaleAdmin = TailscaleAdminConnector()
         let asrModels = LocalASRModelStore()
         let appleSpeech = SpeechDictation()
         let model: OpenPawModel
@@ -322,7 +358,9 @@ final class AppWiring {
                     terminal: terminal,
                     dictation: appleSpeech,
                     dictationModels: asrModels,
-                    dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech)
+                    dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech),
+                    tailscaleAdminConnector: tailscaleAdmin,
+                    connectionPreflightRunner: connectionPreflight
                 )
             }
         #else
@@ -332,7 +370,9 @@ final class AppWiring {
                 terminal: terminal,
                 dictation: appleSpeech,
                 dictationModels: asrModels,
-                dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech)
+                dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech),
+                tailscaleAdminConnector: tailscaleAdmin,
+                connectionPreflightRunner: connectionPreflight
             )
         #endif
         self.asrModels = asrModels

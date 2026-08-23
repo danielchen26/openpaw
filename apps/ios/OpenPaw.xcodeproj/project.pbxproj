@@ -56,6 +56,8 @@
 		1A2B3C00000000000000F107 /* RootTabSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F106 /* RootTabSwipeUITests.swift */; };
 		1A2B3C00000000000000F109 /* DestinationSwipeCatcherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F108 /* DestinationSwipeCatcherTests.swift */; };
 		1A2B3C00000000000000F111 /* HostSwitcherUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F110 /* HostSwitcherUITests.swift */; };
+		1A2B3C00000000000000F113 /* TailscaleAdminConnector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F112 /* TailscaleAdminConnector.swift */; };
+		1A2B3C00000000000000F115 /* TailscaleAdminConnectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F114 /* TailscaleAdminConnectorTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -120,6 +122,8 @@
 		1A2B3C00000000000000F106 /* RootTabSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabSwipeUITests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F108 /* DestinationSwipeCatcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationSwipeCatcherTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F110 /* HostSwitcherUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSwitcherUITests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000F112 /* TailscaleAdminConnector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailscaleAdminConnector.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000F114 /* TailscaleAdminConnectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailscaleAdminConnectorTests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000B2 /* OpenPawUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenPawUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -191,6 +195,7 @@
 				1A2B3C000000000000000026 /* BiometricGate.swift */,
 				1A2B3C000000000000000027 /* MarkedTextComposer.swift */,
 				1A2B3C000000000000000028 /* Redaction.swift */,
+				1A2B3C00000000000000F112 /* TailscaleAdminConnector.swift */,
 				1A2B3C000000000000000029 /* Info.plist */,
 				1A2B3C00000000000000F001 /* SymbolsNerdFontMono-Regular.ttf */,
 			);
@@ -213,6 +218,7 @@
 				1A2B3C00000000000000002E /* HostAPIBackendTests.swift */,
 				1A2B3C00000000000000F102 /* DebugScenarioTests.swift */,
 				1A2B3C00000000000000F108 /* DestinationSwipeCatcherTests.swift */,
+				1A2B3C00000000000000F114 /* TailscaleAdminConnectorTests.swift */,
 			);
 			path = OpenPawAppTests;
 			sourceTree = "<group>";
@@ -382,6 +388,7 @@
 				1A2B3C000000000000000036 /* BiometricGate.swift in Sources */,
 				1A2B3C000000000000000037 /* MarkedTextComposer.swift in Sources */,
 				1A2B3C000000000000000038 /* Redaction.swift in Sources */,
+				1A2B3C00000000000000F113 /* TailscaleAdminConnector.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -402,6 +409,7 @@
 				1A2B3C000000000000000047 /* HostAPIBackendTests.swift in Sources */,
 				1A2B3C00000000000000F103 /* DebugScenarioTests.swift in Sources */,
 				1A2B3C00000000000000F109 /* DestinationSwipeCatcherTests.swift in Sources */,
+				1A2B3C00000000000000F115 /* TailscaleAdminConnectorTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

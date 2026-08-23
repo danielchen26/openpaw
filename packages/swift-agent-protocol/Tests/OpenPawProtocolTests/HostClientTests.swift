@@ -327,6 +327,43 @@ final class HostClientTests: XCTestCase {
         }
     }
 
+    func testTailscaleDiscoveryTaxonomyCodesDecodeEndToEnd() async {
+        let cases: [(String, TailscaleDiscoveryErrorCode)] = [
+            ("missing_cli", .missingCLI),
+            ("logged_out", .loggedOut),
+            ("timeout", .timeout),
+            ("output_limit", .outputLimit),
+            ("busy", .busy),
+            ("unavailable_state", .unavailableState),
+            ("malformed_response", .malformedResponse),
+            ("command_failed", .commandFailed),
+        ]
+        for (raw, expected) in cases {
+            respond(status: 502, body: #"{"error":{"code":"\#(raw)","message":"Safe message"},"stderr":"secret"}"#)
+            await assertThrows(try await makeClient().tailscaleDevices()) { error in
+                guard case .tailscaleDiscovery(let code, let message) = error else {
+                    return XCTFail("expected discovery error for \(raw), got \(error)")
+                }
+                XCTAssertEqual(code, expected)
+                XCTAssertEqual(message, "Safe message")
+                XCTAssertFalse(String(describing: error).contains("secret"))
+            }
+        }
+    }
+
+    func testTailscaleDiscoveryPreservesAuthErrors() async {
+        respond(status: 401, body: #"{"error":{"code":"missing_cli","message":"safe"}}"#)
+        await assertThrows(try await makeClient().tailscaleDevices()) { error in
+            guard case .unauthorized = error else { return XCTFail("expected unauthorized, got \(error)") }
+        }
+
+        respond(status: 403, body: #"{"capability":"devices.read","error":{"code":"missing_cli","message":"safe"}}"#)
+        await assertThrows(try await makeClient().tailscaleDevices()) { error in
+            guard case .forbidden(let capability) = error else { return XCTFail("expected forbidden, got \(error)") }
+            XCTAssertEqual(capability, "devices.read")
+        }
+    }
+
     func testTailscaleUnsupportedVersionAndMalformedBodyAreSafe() async {
         respond(status: 200, body: #"{"version":2,"candidates":[]}"#)
         await assertThrows(try await makeClient().tailscaleDevices()) { error in

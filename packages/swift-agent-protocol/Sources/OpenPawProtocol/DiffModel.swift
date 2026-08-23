@@ -685,6 +685,8 @@ public enum TailscaleDiscoveryErrorCode: Codable, Sendable, Hashable {
     case timeout
     case outputLimit
     case busy
+    case unavailableState
+    case commandFailed
     case malformedResponse
     case unsupportedVersion
     case unavailable
@@ -697,6 +699,8 @@ public enum TailscaleDiscoveryErrorCode: Codable, Sendable, Hashable {
         case .timeout: "timeout"
         case .outputLimit: "output_limit"
         case .busy: "busy"
+        case .unavailableState: "unavailable_state"
+        case .commandFailed: "command_failed"
         case .malformedResponse: "malformed_response"
         case .unsupportedVersion: "unsupported_version"
         case .unavailable: "unavailable"
@@ -712,6 +716,8 @@ public enum TailscaleDiscoveryErrorCode: Codable, Sendable, Hashable {
         case "timeout": .timeout
         case "output_limit": .outputLimit
         case "busy": .busy
+        case "unavailable_state": .unavailableState
+        case "command_failed": .commandFailed
         case "malformed_response": .malformedResponse
         case "unsupported_version": .unsupportedVersion
         case "unavailable": .unavailable

@@ -1299,7 +1299,7 @@ async fn tailscale_devices_http_route_uses_real_fixed_argv_process_and_sanitizes
 
 #[cfg(unix)]
 #[tokio::test]
-async fn tailscale_devices_http_route_maps_process_failures_to_unavailable() {
+async fn tailscale_devices_http_route_maps_process_failures_to_typed_command_failure() {
     let temp = tempfile::tempdir().unwrap();
     let script = temp.path().join("tailscale-fails");
     std::fs::write(&script, "#!/bin/sh\necho secret-stderr >&2\nexit 2\n").unwrap();
@@ -1312,7 +1312,7 @@ async fn tailscale_devices_http_route_maps_process_failures_to_unavailable() {
     let response = harness.get("/v1/tailscale/devices").await;
     assert_eq!(response.status(), 502);
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "unavailable");
+    assert_eq!(body["error"]["code"], "command_failed");
     assert!(!body.to_string().contains("secret-stderr"));
 }
 
@@ -1407,9 +1407,11 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
             | TailscaleUnavailable::LoggedOut(message)
             | TailscaleUnavailable::Timeout(message)
             | TailscaleUnavailable::Unavailable(message)
+            | TailscaleUnavailable::CommandFailed(message)
             | TailscaleUnavailable::OutputLimit(message)
             | TailscaleUnavailable::Busy(message)
-            | TailscaleUnavailable::UnavailableState(message) => message.clone(),
+            | TailscaleUnavailable::UnavailableState(message)
+            | TailscaleUnavailable::MalformedResponse(message) => message.clone(),
         };
         let runner = Arc::new(FakeTailscaleRunner {
             result: Err(unavailable),
@@ -1483,9 +1485,13 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
     });
     let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
     let malformed = harness.get("/v1/tailscale/devices").await;
-    assert_eq!(malformed.status(), 500);
+    assert_eq!(malformed.status(), 502);
     let body: Value = malformed.json().await.unwrap();
-    assert_eq!(body["error"], "internal error");
+    assert_eq!(body["error"]["code"], "malformed_response");
+    assert_eq!(
+        body["error"]["message"],
+        "Tailscale discovery returned malformed data on the connected host."
+    );
 
     let runner = Arc::new(FakeTailscaleRunner {
         result: Ok(br#"{"BackendState":"Running","Peer":{"n":{"ID":"n1","HostName":"bad-last-seen","TailscaleIP":"100.64.0.2","LastSeen":"not-rfc3339"}}}"#.to_vec()),
@@ -1493,9 +1499,9 @@ async fn tailscale_devices_returns_typed_unavailable_and_hard_malformed_errors()
     });
     let harness = Harness::boot_with_runner(Vec::new(), Some(runner)).await;
     let invalid_last_seen = harness.get("/v1/tailscale/devices").await;
-    assert_eq!(invalid_last_seen.status(), 500);
+    assert_eq!(invalid_last_seen.status(), 502);
     let body: Value = invalid_last_seen.json().await.unwrap();
-    assert_eq!(body["error"], "internal error");
+    assert_eq!(body["error"]["code"], "malformed_response");
 }
 
 /// Register a device with explicit capability names.

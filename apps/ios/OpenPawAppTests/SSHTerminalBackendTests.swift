@@ -211,6 +211,37 @@ final class SSHTerminalBackendTests: XCTestCase {
         XCTAssertEqual(captured, "ordinary")
     }
 
+    func testTypedCapabilityProbeUsesOnlyTheFixedTmuxCommand() async throws {
+        let transport = ControlledTransport(autoRespond: { command in
+            guard command.contains("command -v tmux >/dev/null 2>&1 && tmux -V"),
+                let marker = Self.marker(in: command),
+                let startMarker = Self.startMarker(in: command)
+            else { return nil }
+            return "\(startMarker)\ntmux 3.5\n\(marker):0\n"
+        })
+        let backend = makeBackend(transport)
+        try await backend.connect(host: host())
+
+        let result = try await backend.probe(.multiplexer(.tmux))
+
+        XCTAssertEqual(result, "tmux 3.5")
+        let writes = await transport.allWrites()
+        XCTAssertTrue(writes.contains { $0.contains("command -v tmux >/dev/null 2>&1 && tmux -V") })
+        XCTAssertFalse(writes.contains { $0.contains("mosh-server") || $0.contains("etserver") })
+    }
+
+    func testSSHCapabilityProbeDoesNotRunARemoteCommand() async throws {
+        let transport = ControlledTransport()
+        let backend = makeBackend(transport)
+        try await backend.connect(host: host())
+
+        let result = try await backend.probe(.transport(.ssh))
+        let writes = await transport.allWrites()
+
+        XCTAssertEqual(result, "SSH connected")
+        XCTAssertTrue(writes.isEmpty)
+    }
+
     private func makeBackend(_ transport: ControlledTransport) -> SSHTerminalBackend {
         SSHTerminalBackend(
             makeTransport: { _ in transport },

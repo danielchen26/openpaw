@@ -70,7 +70,10 @@
             let model = OpenPawModel(
                 hostStore: HostStore(hosts: hosts),
                 backend: backend,
-                terminal: modelTerminal
+                terminal: modelTerminal,
+                tailscaleRouteHintSource: DebugTailscaleRoutePathSource(),
+                tailscaleAdminConnector: DebugTailscaleAdminConnector(),
+                connectionPreflightRunner: DebugConnectionPreflightRunner()
             )
             model.health = backend.healthInfo
             model.sessions = backend.sessionList
@@ -133,5 +136,59 @@
         func send(chord: KeyChord, applicationCursorKeys: Bool) async throws {}
         func resize(columns: Int, rows: Int) async throws {}
         func run(command: String) async throws -> String { "" }
+    }
+
+    private struct DebugTailscaleRoutePathSource: TailscaleRoutePathSourcing {
+        func currentSnapshot() async -> TailscaleRoutePathSnapshot {
+            TailscaleRoutePathSnapshot(isSatisfied: true, interfaceNames: ["utun7"])
+        }
+    }
+
+    private actor DebugTailscaleAdminConnector: TailscaleAdminConnecting {
+        private var connected = false
+
+        func connect(_ credentials: TailscaleAdminCredentials) async throws {
+            guard credentials.validationIssues.isEmpty else { throw DebugFixtureError.invalidCredentials }
+            connected = true
+        }
+
+        func fetchSavedDevices() async throws -> [TailscaleAdminDeviceCandidate] {
+            guard connected else { throw DebugFixtureError.missingCredentials }
+            return [
+                TailscaleAdminDeviceCandidate(
+                    id: "debug-admin-device",
+                    name: "admin-mac.example.ts.net",
+                    hostname: "admin-mac",
+                    addresses: ["100.64.0.44"],
+                    os: "macOS",
+                    user: "operator",
+                    isOnline: true
+                )
+            ]
+        }
+
+        func disconnectAndDeleteCredentials() async throws { connected = false }
+    }
+
+    private struct DebugConnectionPreflightRunner: ConnectionPreflightRunning {
+        func run(for host: HostRecord) async -> ConnectionPreflightReport {
+            var report = ConnectionPreflightReport()
+            report.passCurrentStage(summary: "SSH route reached")
+            report.passCurrentStage(summary: "Pinned host key accepted")
+            report.passCurrentStage(summary: "SSH authentication succeeded")
+            report.passCurrentStage(summary: "OpenPaw host API is reachable")
+            if let multiplexer = host.multiplexerPreference {
+                report.passCurrentStage(summary: "\(multiplexer.displayName) available")
+            } else {
+                report.skipCurrentStage(reason: "No multiplexer selected")
+            }
+            report.passCurrentStage(summary: "SSH connected")
+            return report
+        }
+    }
+
+    private enum DebugFixtureError: Error {
+        case invalidCredentials
+        case missingCredentials
     }
 #endif

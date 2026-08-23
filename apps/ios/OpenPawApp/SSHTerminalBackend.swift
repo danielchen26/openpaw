@@ -12,7 +12,7 @@ import OpenPawUI
 ///
 /// The PTY is authoritative for execution. A host with no `openpaw-host` daemon still gives a fully working terminal
 /// through this object alone, which is why it holds no reference to `OpenPawBackend` and never waits on one.
-actor SSHTerminalBackend: TerminalBackend, CommandRunner {
+actor SSHTerminalBackend: TerminalBackend, CommandRunner, TerminalCapabilityProbing {
 
     /// Builds a transport for a configuration. In the app this is `TransportSelector`'s decision; in tests it is a
     /// closure returning a mock.
@@ -129,6 +129,27 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner {
 
     func run(_ command: String) async throws -> String {
         try await run(command: command)
+    }
+
+    /// Runs only fixed capability checks. No caller-controlled shell text crosses this API.
+    func probe(_ probe: TerminalCapabilityProbe) async throws -> String {
+        switch probe {
+        case .multiplexer(.tmux):
+            return try await run(command: "command -v tmux >/dev/null 2>&1 && tmux -V")
+        case .multiplexer(.zellij):
+            return try await run(command: "command -v zellij >/dev/null 2>&1 && zellij --version")
+        case .multiplexer(.screen):
+            return try await run(command: "command -v screen >/dev/null 2>&1 && screen --version")
+        case .multiplexer(.herdr):
+            return try await run(command: "command -v herdr >/dev/null 2>&1 && herdr --version")
+        case .transport(.ssh):
+            guard lastState.isConnected else { throw TransportError.notConnected }
+            return "SSH connected"
+        case .transport(.mosh):
+            return try await run(command: "command -v mosh-server >/dev/null 2>&1 && mosh-server --help >/dev/null 2>&1 && printf 'Mosh server available'")
+        case .transport(.eternalTerminal):
+            return try await run(command: "command -v etserver >/dev/null 2>&1 && printf 'Eternal Terminal server available'")
+        }
     }
 
     // MARK: Reconnect

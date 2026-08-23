@@ -40,6 +40,18 @@ public protocol StructuredBackendLifecycle: Sendable {
     func disconnect() async
 }
 
+public enum PairedHostCapabilityStatus: Sendable, Hashable {
+    /// Existing installations paired before capability retention was added. The host remains authoritative.
+    case unknown
+    case granted
+    case denied
+}
+
+/// Optional local view of the exact grants returned when this phone paired with one host.
+public protocol PairedHostCapabilityProviding: Sendable {
+    func pairedCapabilityStatus(_ capability: String, hostID: HostRecord.ID) -> PairedHostCapabilityStatus
+}
+
 public protocol TerminalBackend: Sendable {
     var stateStream: AsyncStream<ConnectionState> { get }
     var outputStream: AsyncStream<Data> { get }

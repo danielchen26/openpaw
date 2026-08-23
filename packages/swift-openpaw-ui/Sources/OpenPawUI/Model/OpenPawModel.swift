@@ -14,6 +14,7 @@ public enum TailscaleDiscoveryState: Sendable, Hashable {
     case loading
     case candidates([TailscaleDeviceCandidate])
     case empty
+    case permissionDenied(message: String)
     case unavailable(code: TailscaleDiscoveryErrorCode, message: String)
     case failure(message: String)
 
@@ -95,9 +96,21 @@ public final class OpenPawModel {
     public var lastError: PresentedError?
     public var isRefreshing = false
     public private(set) var tailscaleDiscovery: TailscaleDiscoveryState = .idle
+    public private(set) var tailscaleRouteHint: TailscaleRouteHint = .notDetected
+    public private(set) var tailscaleDiscoveryMetadata: TailscaleDiscoveryMetadata?
+    public private(set) var tailscaleAdminConnection: TailscaleAdminConnectionState = .disconnected
+    public private(set) var connectionPreflightReport: ConnectionPreflightReport?
+    public private(set) var isConnectionPreflightRunning = false
 
     private var tailscaleDiscoveryTask: Task<Void, Never>?
     private var tailscaleDiscoveryGeneration = 0
+    private var tailscaleDiscoveryOwner: TailscaleDiscoveryFlowID?
+    @ObservationIgnored private let tailscaleRouteHintSource: any TailscaleRoutePathSourcing
+    @ObservationIgnored private let tailscaleAdminConnector: (any TailscaleAdminConnecting)?
+    @ObservationIgnored private let connectionPreflightRunner: (any ConnectionPreflightRunning)?
+    @ObservationIgnored private let now: @Sendable () -> Date
+    private var tailscaleAdminGeneration = 0
+    private var connectionPreflightGeneration = 0
     private var hostSelectionGeneration = 0
 
     private var eventTask: Task<Void, Never>?
@@ -119,13 +132,21 @@ public final class OpenPawModel {
         terminal: (any TerminalBackend)? = nil,
         dictation: (any DictationEngine)? = nil,
         dictationModels: (any DictationModelInstalling)? = nil,
-        dictationEngineFactory: (any DictationEngineMaking)? = nil
+        dictationEngineFactory: (any DictationEngineMaking)? = nil,
+        tailscaleRouteHintSource: any TailscaleRoutePathSourcing = SystemTailscaleRoutePathSource(),
+        tailscaleAdminConnector: (any TailscaleAdminConnecting)? = nil,
+        connectionPreflightRunner: (any ConnectionPreflightRunning)? = nil,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.hostStore = hostStore
         self.backend = backend
         self.terminal = terminal
         self.dictation = dictation
         self.dictationEngineFactory = dictationEngineFactory
+        self.tailscaleRouteHintSource = tailscaleRouteHintSource
+        self.tailscaleAdminConnector = tailscaleAdminConnector
+        self.connectionPreflightRunner = connectionPreflightRunner
+        self.now = now
         if let dictationModels { self.dictationModels = dictationModels }
         self.selectedHostID = hostStore.hosts.first?.id
         self.structuredBackendReady = backend.map { !($0 is any StructuredBackendLifecycle) } ?? false
@@ -273,33 +294,126 @@ public final class OpenPawModel {
         }
     }
 
+    /// Starts discovery once for one Add Device presentation. SwiftUI may call this repeatedly while rendering.
+    public func beginTailscaleDiscovery(owner: TailscaleDiscoveryFlowID) {
+        guard tailscaleDiscoveryOwner != owner else { return }
+        tailscaleDiscoveryOwner = owner
+        startTailscaleDiscovery(owner: owner)
+    }
+
+    /// Explicit user retry. Only the flow that owns the visible result can replace it.
+    public func retryTailscaleDiscovery(owner: TailscaleDiscoveryFlowID) {
+        guard tailscaleDiscoveryOwner == owner else { return }
+        startTailscaleDiscovery(owner: owner)
+    }
+
+    /// Ends one flow without cancelling a newer presentation that already took ownership.
+    public func endTailscaleDiscovery(owner: TailscaleDiscoveryFlowID) {
+        guard tailscaleDiscoveryOwner == owner else { return }
+        cancelTailscaleDiscovery()
+    }
+
+    /// Compatibility entry point for older call sites. New Add Device UI uses flow ownership.
     public func refreshTailscaleDevices() {
+        if let owner = tailscaleDiscoveryOwner {
+            retryTailscaleDiscovery(owner: owner)
+        } else {
+            beginTailscaleDiscovery(owner: TailscaleDiscoveryFlowID())
+        }
+    }
+
+    private func startTailscaleDiscovery(owner: TailscaleDiscoveryFlowID) {
         tailscaleDiscoveryGeneration += 1
         let generation = tailscaleDiscoveryGeneration
         tailscaleDiscoveryTask?.cancel()
-        guard selectedHost != nil, connection.isConnected, structuredBackendReady, let backend, let hostID = selectedHostID else {
+        guard tailscaleDiscoveryOwner == owner else { return }
+        guard let discoveryHost = selectedHost, connection.isConnected, structuredBackendReady, let backend else {
             tailscaleDiscovery = .noConnectedHost
+            tailscaleDiscoveryMetadata = nil
+            tailscaleDiscoveryTask = Task { [weak self, tailscaleRouteHintSource] in
+                let hint = await TailscaleRouteHintResolver(source: tailscaleRouteHintSource).currentHint()
+                guard let self, self.tailscaleDiscoveryOwner == owner, self.tailscaleDiscoveryGeneration == generation else { return }
+                self.tailscaleRouteHint = hint
+            }
             return
         }
+        let hostID = discoveryHost.id
         let connectionGeneration = connectionGeneration
+        if let capabilityProvider = backend as? any PairedHostCapabilityProviding,
+            capabilityProvider.pairedCapabilityStatus("devices.read", hostID: hostID) == .denied
+        {
+            tailscaleDiscovery = .permissionDenied(
+                message: "The paired discovery host is missing devices.read. Re-pair it with an operator profile, then Retry."
+            )
+            tailscaleDiscoveryMetadata = TailscaleDiscoveryMetadata(
+                source: .pairedHost(id: hostID, displayName: discoveryHost.nickname),
+                routeHint: tailscaleRouteHint,
+                refreshedAt: nil
+            )
+            tailscaleDiscoveryTask = Task { [weak self, tailscaleRouteHintSource] in
+                let hint = await TailscaleRouteHintResolver(source: tailscaleRouteHintSource).currentHint()
+                guard let self, self.tailscaleDiscoveryOwner == owner,
+                    self.tailscaleDiscoveryGeneration == generation,
+                    self.selectedHostID == hostID,
+                    self.connectionGeneration == connectionGeneration
+                else { return }
+                self.tailscaleRouteHint = hint
+                self.tailscaleDiscoveryMetadata = TailscaleDiscoveryMetadata(
+                    source: .pairedHost(id: hostID, displayName: discoveryHost.nickname),
+                    routeHint: hint,
+                    refreshedAt: nil
+                )
+            }
+            return
+        }
         tailscaleDiscovery = .loading
-        tailscaleDiscoveryTask = Task { [weak self, backend] in
+        tailscaleDiscoveryMetadata = TailscaleDiscoveryMetadata(
+            source: .pairedHost(id: hostID, displayName: discoveryHost.nickname),
+            routeHint: tailscaleRouteHint,
+            refreshedAt: nil
+        )
+        tailscaleDiscoveryTask = Task { [weak self, backend, tailscaleRouteHintSource, now] in
+            let hint = await TailscaleRouteHintResolver(source: tailscaleRouteHintSource).currentHint()
             do {
                 let response = try await backend.tailscaleDevices()
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
-                    guard let self, self.tailscaleDiscoveryGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration, self.structuredBackendReady else { return }
+                    guard let self, self.tailscaleDiscoveryOwner == owner, self.tailscaleDiscoveryGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration, self.structuredBackendReady else { return }
+                    self.tailscaleRouteHint = hint
+                    self.tailscaleDiscoveryMetadata = TailscaleDiscoveryMetadata(
+                        source: .pairedHost(id: hostID, displayName: discoveryHost.nickname),
+                        routeHint: hint,
+                        refreshedAt: now()
+                    )
                     self.tailscaleDiscovery = response.candidates.isEmpty ? .empty : .candidates(response.candidates)
                 }
             } catch is CancellationError {
+            } catch HostClientError.unauthorized {
+                await MainActor.run {
+                    guard let self, self.tailscaleDiscoveryOwner == owner, self.tailscaleDiscoveryGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration else { return }
+                    self.tailscaleRouteHint = hint
+                    self.tailscaleDiscovery = .permissionDenied(
+                        message: "The paired discovery host rejected this device. Pair it again, then Retry."
+                    )
+                }
+            } catch HostClientError.forbidden {
+                await MainActor.run {
+                    guard let self, self.tailscaleDiscoveryOwner == owner, self.tailscaleDiscoveryGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration else { return }
+                    self.tailscaleRouteHint = hint
+                    self.tailscaleDiscovery = .permissionDenied(
+                        message: "The paired discovery host is missing devices.read. Re-pair it with an operator profile, then Retry."
+                    )
+                }
             } catch HostClientError.tailscaleDiscovery(let code, let message) {
                 await MainActor.run {
-                    guard let self, self.tailscaleDiscoveryGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration else { return }
+                    guard let self, self.tailscaleDiscoveryOwner == owner, self.tailscaleDiscoveryGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration else { return }
+                    self.tailscaleRouteHint = hint
                     self.tailscaleDiscovery = .unavailable(code: code, message: message)
                 }
             } catch {
                 await MainActor.run {
-                    guard let self, self.tailscaleDiscoveryGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration else { return }
+                    guard let self, self.tailscaleDiscoveryOwner == owner, self.tailscaleDiscoveryGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration else { return }
+                    self.tailscaleRouteHint = hint
                     self.tailscaleDiscovery = .failure(message: "Tailscale discovery failed. Retry or add SSH details manually.")
                 }
             }
@@ -310,7 +424,132 @@ public final class OpenPawModel {
         tailscaleDiscoveryGeneration += 1
         tailscaleDiscoveryTask?.cancel()
         tailscaleDiscoveryTask = nil
+        tailscaleDiscoveryOwner = nil
         tailscaleDiscovery = .idle
+        tailscaleDiscoveryMetadata = nil
+    }
+
+    /// Stores administrator-created credentials only after the explicit Connect action, then performs one read-only
+    /// Devices API request. Returned devices remain proposals and never mutate `hostStore`.
+    public func connectTailscaleAdministrator(credentials: TailscaleAdminCredentials) async {
+        tailscaleAdminGeneration += 1
+        let generation = tailscaleAdminGeneration
+        let issues = credentials.validationIssues
+        guard issues.isEmpty else {
+            tailscaleAdminConnection = .failure(message: Self.tailscaleAdminValidationMessage(issues))
+            return
+        }
+        guard let tailscaleAdminConnector else {
+            tailscaleAdminConnection = .failure(message: "The advanced Tailscale connector is unavailable in this build.")
+            return
+        }
+
+        tailscaleAdminConnection = .connecting
+        do {
+            try await tailscaleAdminConnector.connect(credentials.normalized)
+            guard tailscaleAdminGeneration == generation else { return }
+            tailscaleAdminConnection = .refreshing
+            let devices = try await tailscaleAdminConnector.fetchSavedDevices()
+            guard tailscaleAdminGeneration == generation else { return }
+            tailscaleAdminConnection = .candidates(devices)
+        } catch is CancellationError {
+        } catch {
+            guard tailscaleAdminGeneration == generation else { return }
+            tailscaleAdminConnection = .failure(message: Self.tailscaleAdminFailureMessage(error))
+        }
+    }
+
+    /// Refreshes an already saved administrator connection. This never prompts for or returns stored credentials.
+    public func refreshTailscaleAdministrator() async {
+        tailscaleAdminGeneration += 1
+        let generation = tailscaleAdminGeneration
+        guard let tailscaleAdminConnector else {
+            tailscaleAdminConnection = .failure(message: "The advanced Tailscale connector is unavailable in this build.")
+            return
+        }
+        tailscaleAdminConnection = .refreshing
+        do {
+            let devices = try await tailscaleAdminConnector.fetchSavedDevices()
+            guard tailscaleAdminGeneration == generation else { return }
+            tailscaleAdminConnection = .candidates(devices)
+        } catch is CancellationError {
+        } catch {
+            guard tailscaleAdminGeneration == generation else { return }
+            tailscaleAdminConnection = .failure(message: Self.tailscaleAdminFailureMessage(error))
+        }
+    }
+
+    /// Revokes the app's local connection by deleting credentials and invalidating any older in-flight response.
+    public func disconnectTailscaleAdministrator() async {
+        tailscaleAdminGeneration += 1
+        tailscaleAdminConnection = .disconnected
+        guard let tailscaleAdminConnector else { return }
+        do {
+            try await tailscaleAdminConnector.disconnectAndDeleteCredentials()
+        } catch is CancellationError {
+        } catch {
+            tailscaleAdminConnection = .failure(
+                message: "OpenPaw could not delete the saved administrator credentials. Try again before leaving this device unattended."
+            )
+        }
+    }
+
+    private static func tailscaleAdminValidationMessage(_ issues: [TailscaleAdminCredentialValidationIssue]) -> String {
+        var fields: [String] = []
+        if issues.contains(.missingClientID) || issues.contains(.invalidClientID) { fields.append("Client ID") }
+        if issues.contains(.missingClientSecret) { fields.append("client secret") }
+        if issues.contains(.missingTailnet) || issues.contains(.invalidTailnet) { fields.append("tailnet") }
+        return "Check the administrator \(fields.joined(separator: ", ")). Credentials were not saved or sent."
+    }
+
+    private static func tailscaleAdminFailureMessage(_ error: any Error) -> String {
+        guard let error = error as? TailscaleAdminConnectionError else {
+            return "Administrator device discovery failed. Verify the credentials and network, then Retry."
+        }
+        switch error {
+        case .unauthorized:
+            return "Tailscale rejected the administrator credentials. Verify the OAuth client and try again."
+        case .forbidden:
+            return "This OAuth client cannot read tailnet devices. Grant the read-only Devices scope and try again."
+        case .rateLimited:
+            return "Tailscale rate-limited device discovery. Wait, then Retry."
+        case .missingCredentials:
+            return "No saved administrator connection. Enter administrator credentials to connect."
+        case .invalidCredentials:
+            return "Check the administrator credentials. They were not saved or sent."
+        case .networkUnavailable:
+            return "The Tailscale administrator API is unreachable. Check the network, then Retry."
+        case .keychainUnavailable, .keychainFailure:
+            return "OpenPaw could not use Keychain for the administrator connection. Check device security settings and try again."
+        case .malformedJSON, .httpStatus:
+            return "Tailscale returned an unsupported response. Retry, then check Diagnostics if it continues."
+        }
+    }
+
+    /// Runs a separate, typed probe connection. It never replaces the active terminal and a stale result cannot
+    /// overwrite a newer host check.
+    public func runConnectionPreflight(for host: HostRecord) async {
+        connectionPreflightGeneration += 1
+        let generation = connectionPreflightGeneration
+        isConnectionPreflightRunning = true
+        connectionPreflightReport = ConnectionPreflightReport()
+        guard let connectionPreflightRunner else {
+            var report = ConnectionPreflightReport()
+            report.failCurrentStage(.transportUnavailable)
+            connectionPreflightReport = report
+            isConnectionPreflightRunning = false
+            return
+        }
+
+        let report = await connectionPreflightRunner.run(for: host)
+        guard connectionPreflightGeneration == generation else { return }
+        connectionPreflightReport = report
+        isConnectionPreflightRunning = false
+    }
+
+    public func cancelConnectionPreflight() {
+        connectionPreflightGeneration += 1
+        isConnectionPreflightRunning = false
     }
 
     @_spi(SnapshotTesting) public func setTailscaleDiscoveryForSnapshot(_ state: TailscaleDiscoveryState) {

@@ -389,6 +389,7 @@ public struct HostDraft: Sendable, Hashable {
 /// the connection fail with a shrug.
 public enum TransportAvailability: Sendable {
     public static let built: Set<TransportKind> = [.ssh]
+    public static let selectable: [TransportKind] = TransportKind.allCases.filter { built.contains($0) }
 
     public static func isBuilt(_ kind: TransportKind?) -> Bool {
         guard let kind else { return true }
@@ -416,6 +417,7 @@ public struct HostEditorView: View {
     @State private var newTag = ""
     @State private var credentialError: String?
     @State private var hasAttemptedSave = false
+    @State private var preflightTarget: String?
 
     /// Pass `record` to edit, omit it to add. Saving writes into `model.hostStore` and the device-local profile.
     public init(
@@ -454,6 +456,7 @@ public struct HostEditorView: View {
                 identity
                 credentials
                 transport
+                preflight
                 jumpChain
                 session
                 tagList
@@ -539,7 +542,7 @@ public struct HostEditorView: View {
         Panel(label: "Transport") {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.small) {
                 transportRow(nil, title: "Automatic", detail: "Try the best available, fall back to SSH.")
-                ForEach(TransportKind.allCases, id: \.self) { kind in
+                ForEach(TransportAvailability.selectable, id: \.self) { kind in
                     transportRow(
                         kind, title: kind.displayName,
                         detail: kind.remoteBinary.map { "Needs \($0) on the host." } ?? "Always available.")
@@ -550,6 +553,72 @@ public struct HostEditorView: View {
                         .foregroundStyle(OpenPawTheme.textTertiary)
                 }
             }
+        }
+    }
+
+    private var preflight: some View {
+        Panel(label: "Connection preflight") {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                Text("Tests a disposable connection in this order: route, host key, authentication, OpenPaw health, multiplexer, then transport. It never replaces the active terminal and never saves this draft.")
+                    .font(OpenPawTheme.Human.caption)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(model.isConnectionPreflightRunning ? "Testing…" : "Test connection") {
+                    runPreflight()
+                }
+                .buttonStyle(.plain)
+                .font(OpenPawTheme.Machine.headline)
+                .frame(minHeight: 44)
+                .foregroundStyle(OpenPawTheme.textPrimary)
+                .disabled(model.isConnectionPreflightRunning)
+                .accessibilityIdentifier("connection.preflight.run")
+
+                if let preflightTarget {
+                    Text("Results for \(preflightTarget)")
+                        .font(OpenPawTheme.Human.caption)
+                        .foregroundStyle(OpenPawTheme.textTertiary)
+                }
+                if let report = model.connectionPreflightReport {
+                    ForEach(ConnectionPreflightStage.allCases, id: \.self) { stage in
+                        preflightRow(stage, state: report[stage])
+                    }
+                }
+            }
+        }
+    }
+
+    private func preflightRow(
+        _ stage: ConnectionPreflightStage,
+        state: ConnectionPreflightStageState
+    ) -> some View {
+        let presentation = preflightPresentation(state)
+        return HStack(alignment: .firstTextBaseline, spacing: OpenPawTheme.Space.small) {
+            Image(systemName: presentation.icon)
+                .foregroundStyle(presentation.colour)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.hair) {
+                Text(stage.displayName)
+                    .font(OpenPawTheme.Machine.body)
+                    .foregroundStyle(OpenPawTheme.textPrimary)
+                Text(presentation.detail)
+                    .font(OpenPawTheme.Human.caption)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("connection.preflight.stage.\(stage.rawValue)")
+    }
+
+    private func preflightPresentation(
+        _ state: ConnectionPreflightStageState
+    ) -> (icon: String, colour: Color, detail: String) {
+        switch state {
+        case .pending: ("circle", OpenPawTheme.textTertiary, "Pending")
+        case .running: ("arrow.trianglehead.2.clockwise.rotate.90", OpenPawTheme.caution, "Running")
+        case .passed(let summary): ("checkmark.circle.fill", OpenPawTheme.ok, summary ?? "Passed")
+        case .skipped(let reason): ("minus.circle", OpenPawTheme.textTertiary, reason)
+        case .failed(let failure): ("xmark.octagon.fill", OpenPawTheme.bad, failure.displayName)
+        case .blocked: ("lock.circle", OpenPawTheme.textTertiary, "Blocked by an earlier stage")
         }
     }
 
@@ -795,6 +864,19 @@ public struct HostEditorView: View {
             onDismiss()
         } catch {
             credentialError = String(describing: error)
+        }
+    }
+
+    private func runPreflight() {
+        hasAttemptedSave = true
+        credentialError = nil
+        guard draft.validate().isEmpty else { return }
+        do {
+            let record = try draft.record(id: existing?.id ?? UUID(), existing: existing)
+            preflightTarget = "\(record.username)@\(record.hostname):\(record.port)"
+            Task { await model.runConnectionPreflight(for: record) }
+        } catch {
+            credentialError = "OpenPaw could not prepare this preflight. Check the credential references and try again."
         }
     }
 }

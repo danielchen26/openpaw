@@ -4,7 +4,10 @@ import OpenPawTerminalCore
 import SwiftUI
 
 public struct AddDeviceCandidate: Identifiable, Sendable, Hashable {
-    public enum Source: String, Sendable, Hashable { case tailscale }
+    public enum Source: String, Sendable, Hashable {
+        case tailscale
+        case tailscaleAdministrator
+    }
     public let id: String
     public var nickname: String
     public var hostname: String
@@ -33,16 +36,35 @@ public struct AddDeviceCandidate: Identifiable, Sendable, Hashable {
         HostDraft(nickname: nickname, hostname: hostname)
     }
 
-    public var accessibilityLabel: String { "\(nickname), \(hostname), Tailscale discovery candidate, not trusted or saved" }
+    public var accessibilityLabel: String {
+        let sourceName = source == .tailscaleAdministrator ? "Tailscale administrator connector" : "paired host Tailscale discovery"
+        return "\(nickname), \(hostname), candidate from \(sourceName), not trusted or saved"
+    }
 
     public static func from(_ candidate: TailscaleDeviceCandidate) -> AddDeviceCandidate {
         AddDeviceCandidate(id: candidate.id, nickname: candidate.displayName, hostname: candidate.dnsName ?? candidate.tailscaleIPs.first ?? candidate.displayName, dnsName: candidate.dnsName, tailscaleIPs: candidate.tailscaleIPs, os: candidate.os, online: candidate.online)
+    }
+
+    public static func from(_ candidate: TailscaleAdminDeviceCandidate) -> AddDeviceCandidate {
+        let name = candidate.name.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let hostname = name.isEmpty ? (candidate.hostname ?? candidate.addresses.first ?? "") : name
+        return AddDeviceCandidate(
+            id: candidate.id,
+            nickname: candidate.hostname ?? name,
+            hostname: hostname,
+            dnsName: name.isEmpty ? nil : name,
+            tailscaleIPs: candidate.addresses,
+            os: candidate.os,
+            online: candidate.isOnline ?? false,
+            source: .tailscaleAdministrator
+        )
     }
 }
 
 public enum AddDeviceFlowStep: String, Sendable, Hashable {
     case welcome
     case tailscaleCandidates
+    case tailscaleAdministrator
     case confirmCandidate
     case editDetails
 }
@@ -52,6 +74,7 @@ public struct AddDeviceFlowState: Sendable, Hashable {
     public var discovered: [AddDeviceCandidate]
     public private(set) var selectedCandidate: AddDeviceCandidate?
     private var editDetailsReturnStep: AddDeviceFlowStep = .welcome
+    private var candidateListReturnStep: AddDeviceFlowStep = .tailscaleCandidates
 
     public init(hosts: [HostRecord], discovered: [AddDeviceCandidate] = []) {
         self.step = .welcome
@@ -63,8 +86,16 @@ public struct AddDeviceFlowState: Sendable, Hashable {
         step = .tailscaleCandidates
     }
 
+    public mutating func startTailscaleAdministrator() {
+        selectedCandidate = nil
+        step = .tailscaleAdministrator
+    }
+
     public mutating func selectCandidate(id: AddDeviceCandidate.ID) {
         guard let candidate = discovered.first(where: { $0.id == id }) else { return }
+        if step == .tailscaleCandidates || step == .tailscaleAdministrator {
+            candidateListReturnStep = step
+        }
         selectedCandidate = candidate
         step = .confirmCandidate
     }
@@ -99,8 +130,11 @@ public struct AddDeviceFlowState: Sendable, Hashable {
         case .tailscaleCandidates:
             selectedCandidate = nil
             step = .welcome
+        case .tailscaleAdministrator:
+            selectedCandidate = nil
+            step = .welcome
         case .confirmCandidate:
-            step = .tailscaleCandidates
+            step = candidateListReturnStep
         case .editDetails:
             step = editDetailsReturnStep
         }
@@ -109,12 +143,15 @@ public struct AddDeviceFlowState: Sendable, Hashable {
 
 public enum AddDeviceFlowCopy {
     public static let title = "Add a device"
-    public static let tailscaleAction = "Find with Tailscale"
-    public static let sshAction = "Add SSH details"
+    public static let tailscaleAction = "Tailscale devices"
+    public static let sshAction = "SSH / transport preference"
+    public static let adminAction = "Advanced Tailscale connector"
+    public static let adminRequirement = "Tailnet administrator credentials required. This is not normal Tailscale login."
     public static let honestDiscovery = "Find other tailnet devices from a connected OpenPaw host. Candidates are not trusted, saved, SSH-ready, or connected."
     public static let noCandidates = "No Tailscale devices were reported by the connected discovery host. Add SSH details to enter a device manually."
     public static let confirmation = "This is only a discovery candidate. OpenPaw will not trust it, save it, or connect until you review and save SSH details yourself."
-    public static let onboardingCopy = [title, tailscaleAction, sshAction, honestDiscovery, noCandidates, confirmation]
+    public static let entryActions = [tailscaleAction, sshAction, adminAction]
+    public static let onboardingCopy = [title, tailscaleAction, sshAction, adminAction, adminRequirement, honestDiscovery, noCandidates, confirmation]
 }
 
 @MainActor
@@ -126,6 +163,10 @@ public struct AddDeviceFlow: View {
 
     @State private var state: AddDeviceFlowState
     @State private var draft: HostDraft?
+    @State private var discoveryOwner = TailscaleDiscoveryFlowID()
+    @State private var adminClientID = ""
+    @State private var adminClientSecret = ""
+    @State private var adminTailnet = ""
 
     public init(
         model: OpenPawModel,
@@ -162,6 +203,8 @@ public struct AddDeviceFlow: View {
                 welcome
             case .tailscaleCandidates:
                 tailscaleCandidates
+            case .tailscaleAdministrator:
+                tailscaleAdministrator
             case .confirmCandidate:
                 confirmCandidate
             case .editDetails:
@@ -170,11 +213,11 @@ public struct AddDeviceFlow: View {
                     settings: settings,
                     initialDraft: draft ?? HostDraft(),
                     onDismiss: {
-                        model.cancelTailscaleDiscovery()
+                        model.endTailscaleDiscovery(owner: discoveryOwner)
                         onDismiss()
                     },
                     onCancel: {
-                        model.cancelTailscaleDiscovery()
+                        model.endTailscaleDiscovery(owner: discoveryOwner)
                         state.back()
                     }
                 )
@@ -186,20 +229,20 @@ public struct AddDeviceFlow: View {
             if state.step == .welcome {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") {
-                        model.cancelTailscaleDiscovery()
+                        model.endTailscaleDiscovery(owner: discoveryOwner)
                         onDismiss()
                     }
                 }
             } else if state.step != .editDetails {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Back") {
-                        model.cancelTailscaleDiscovery()
                         state.back()
                     }
                 }
             }
         }
-        .onDisappear { model.cancelTailscaleDiscovery() }
+        .task { model.beginTailscaleDiscovery(owner: discoveryOwner) }
+        .onDisappear { model.endTailscaleDiscovery(owner: discoveryOwner) }
     }
 
     private var welcome: some View {
@@ -217,21 +260,23 @@ public struct AddDeviceFlow: View {
                     HStack(alignment: .top, spacing: OpenPawTheme.Space.medium) {
                         actionButton(AddDeviceFlowCopy.tailscaleAction, glyph: "point.3.connected.trianglepath.dotted") {
                             state.startTailscaleDiscovery()
-                            model.refreshTailscaleDevices()
                         }
                         actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
-                            model.cancelTailscaleDiscovery()
                             draft = state.startManualSSH()
+                        }
+                        actionButton(AddDeviceFlowCopy.adminAction, glyph: "person.badge.key") {
+                            state.startTailscaleAdministrator()
                         }
                     }
                     VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
                         actionButton(AddDeviceFlowCopy.tailscaleAction, glyph: "point.3.connected.trianglepath.dotted") {
                             state.startTailscaleDiscovery()
-                            model.refreshTailscaleDevices()
                         }
                         actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
-                            model.cancelTailscaleDiscovery()
                             draft = state.startManualSSH()
+                        }
+                        actionButton(AddDeviceFlowCopy.adminAction, glyph: "person.badge.key") {
+                            state.startTailscaleAdministrator()
                         }
                     }
                 }
@@ -250,13 +295,13 @@ public struct AddDeviceFlow: View {
                 Text(AddDeviceFlowCopy.honestDiscovery)
                     .font(OpenPawTheme.Human.prose)
                     .foregroundStyle(OpenPawTheme.textSecondary)
+                discoveryProvenance
                 let discovered = liveCandidates
                 if discovered.isEmpty {
                     discoveryStatusView
                         .font(OpenPawTheme.Human.prose)
                         .foregroundStyle(OpenPawTheme.textSecondary)
                     actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
-                        model.cancelTailscaleDiscovery()
                         draft = state.startManualSSH()
                     }
                 } else {
@@ -272,6 +317,114 @@ public struct AddDeviceFlow: View {
             .padding(OpenPawTheme.Space.xl)
             .frame(maxWidth: 680, alignment: .leading)
         }
+    }
+
+    private var tailscaleAdministrator: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.large) {
+                Text(AddDeviceFlowCopy.adminAction)
+                    .font(OpenPawTheme.Human.title)
+                    .foregroundStyle(OpenPawTheme.textPrimary)
+                Text(AddDeviceFlowCopy.adminRequirement)
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.caution)
+                Text("Create a read-only OAuth client in the Tailscale administrator console. OpenPaw stores these credentials in this device's Keychain and requests device metadata only. It cannot read the account from the installed Tailscale app.")
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+
+                adminCredentialFields
+                adminConnectionContent
+            }
+            .padding(OpenPawTheme.Space.xl)
+            .frame(maxWidth: 680, alignment: .leading)
+        }
+    }
+
+    private var adminCredentialFields: some View {
+        Panel(label: "Tailnet administrator credentials") {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                TextField("OAuth client ID", text: $adminClientID)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("addDevice.tailscaleAdmin.clientID")
+                SecureField("OAuth client secret", text: $adminClientSecret)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("addDevice.tailscaleAdmin.clientSecret")
+                TextField("Tailnet, for example example.ts.net", text: $adminTailnet)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("addDevice.tailscaleAdmin.tailnet")
+                Button("Connect administrator source") {
+                    let credentials = TailscaleAdminCredentials(
+                        clientID: adminClientID,
+                        clientSecret: adminClientSecret,
+                        tailnet: adminTailnet
+                    )
+                    adminClientSecret = ""
+                    Task { await model.connectTailscaleAdministrator(credentials: credentials) }
+                }
+                .font(OpenPawTheme.Machine.headline)
+                .frame(minHeight: 44)
+                .disabled(model.tailscaleAdminConnection == .connecting || model.tailscaleAdminConnection == .refreshing)
+                .accessibilityIdentifier("addDevice.tailscaleAdmin.connect")
+            }
+        }
+    }
+
+    @ViewBuilder private var adminConnectionContent: some View {
+        switch model.tailscaleAdminConnection {
+        case .disconnected:
+            Button("Use saved administrator connection") {
+                Task { await model.refreshTailscaleAdministrator() }
+            }
+            .frame(minHeight: 44)
+            .accessibilityIdentifier("addDevice.tailscaleAdmin.useSaved")
+        case .connecting:
+            ProgressView("Saving credentials securely…")
+                .accessibilityIdentifier("addDevice.tailscaleAdmin.progress")
+        case .refreshing:
+            ProgressView("Loading read-only tailnet devices…")
+                .accessibilityIdentifier("addDevice.tailscaleAdmin.progress")
+        case .failure(let message):
+            Text(message)
+                .font(OpenPawTheme.Human.prose)
+                .foregroundStyle(OpenPawTheme.caution)
+                .accessibilityIdentifier("addDevice.tailscaleAdmin.error")
+            Button("Retry saved connection") {
+                Task { await model.refreshTailscaleAdministrator() }
+            }
+            .frame(minHeight: 44)
+            disconnectAdministratorButton
+        case .candidates(let devices):
+            if devices.isEmpty {
+                Text("The administrator connection returned no devices. Nothing was saved as an OpenPaw host.")
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+            } else {
+                Text("Choose a device proposal. You will still review SSH details before anything is saved or connected.")
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                ForEach(devices.map(AddDeviceCandidate.from)) { candidate in
+                    Button { state.selectCandidate(id: candidate.id, from: devices.map(AddDeviceCandidate.from)) } label: {
+                        candidateRow(candidate)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(candidate.accessibilityLabel)
+                }
+            }
+            HStack {
+                Button("Refresh") { Task { await model.refreshTailscaleAdministrator() } }
+                    .frame(minHeight: 44)
+                disconnectAdministratorButton
+            }
+        }
+    }
+
+    private var disconnectAdministratorButton: some View {
+        Button("Disconnect and delete credentials", role: .destructive) {
+            adminClientSecret = ""
+            Task { await model.disconnectTailscaleAdministrator() }
+        }
+        .frame(minHeight: 44)
+        .accessibilityIdentifier("addDevice.tailscaleAdmin.disconnect")
     }
 
     private var confirmCandidate: some View {
@@ -315,7 +468,7 @@ public struct AddDeviceFlow: View {
             return state.discovered
         case .candidates(let candidates):
             return candidates.map(AddDeviceCandidate.from)
-        case .loading, .noConnectedHost, .empty, .unavailable, .failure:
+        case .loading, .noConnectedHost, .empty, .permissionDenied, .unavailable, .failure:
             return []
         }
     }
@@ -330,20 +483,45 @@ public struct AddDeviceFlow: View {
                 .font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary)
         case .empty:
             Text(AddDeviceFlowCopy.noCandidates).font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary)
-            Button("Retry") { model.refreshTailscaleDevices() }
-        case .unavailable(_, let message), .failure(let message):
+            Button("Retry") { model.retryTailscaleDiscovery(owner: discoveryOwner) }
+        case .permissionDenied(let message), .unavailable(_, let message), .failure(let message):
             Text(message).font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary)
-            Button("Retry") { model.refreshTailscaleDevices() }
+            Button("Retry") { model.retryTailscaleDiscovery(owner: discoveryOwner) }
         case .candidates:
             EmptyView()
         }
     }
 
+    @ViewBuilder private var discoveryProvenance: some View {
+        if model.tailscaleRouteHint == .likelyAvailable {
+            Label("Tailscale route detected. This is a connectivity hint, not account access.", systemImage: "point.3.connected.trianglepath.dotted")
+                .font(OpenPawTheme.Human.caption)
+                .foregroundStyle(OpenPawTheme.textSecondary)
+        }
+        if let metadata = model.tailscaleDiscoveryMetadata {
+            let source = metadata.source.displayName
+            if let refreshedAt = metadata.refreshedAt {
+                Text("Supplied by \(source) · refreshed \(RelativeTime.short(refreshedAt))")
+                    .font(OpenPawTheme.Human.caption)
+                    .foregroundStyle(OpenPawTheme.textTertiary)
+                    .accessibilityLabel("Tailscale candidates supplied by \(source)")
+                    .accessibilityIdentifier("addDevice.tailscale.provenance")
+            } else {
+                Text("Requesting candidates from \(source)")
+                    .font(OpenPawTheme.Human.caption)
+                    .foregroundStyle(OpenPawTheme.textTertiary)
+            }
+        }
+    }
+
     private func candidateRow(_ candidate: AddDeviceCandidate) -> some View {
-        Panel(label: "Tailscale candidate") {
+        Panel(label: candidate.source == .tailscaleAdministrator ? "Administrator connector candidate" : "Tailscale candidate") {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.small) {
                 Text(candidate.nickname).font(OpenPawTheme.Machine.title).foregroundStyle(OpenPawTheme.textPrimary)
                 Text(candidate.hostname).font(OpenPawTheme.Machine.code).foregroundStyle(OpenPawTheme.textSecondary)
+                Text("Proposed SSH target: \(candidate.hostname):22")
+                    .font(OpenPawTheme.Human.caption)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
                 Text("Discovered only. Not trusted, not saved.").font(OpenPawTheme.Human.caption).foregroundStyle(OpenPawTheme.caution)
             }
         }

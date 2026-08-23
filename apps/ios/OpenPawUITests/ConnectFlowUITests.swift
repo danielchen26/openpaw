@@ -31,6 +31,89 @@ final class ConnectFlowUITests: XCTestCase {
         return Target(nickname: environment["OPENPAW_LIVE_NICKNAME"] ?? "home", keyPath: keyPath)
     }
 
+    private func scenarioApp(_ scenario: String) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-openpaw-debug-scenario", scenario,
+            "-openpaw.settings.biometricGate", "<false/>",
+        ]
+        app.launch()
+        return app
+    }
+
+    func testAddDeviceAutomaticallyLoadsPairedHostCandidatesWithTruthfulProvenance() {
+        let app = scenarioApp("connectedWorkspace")
+
+        let add = app.buttons["Add a Tailscale or SSH device"].firstMatch
+        XCTAssertTrue(add.waitForExistence(timeout: 10))
+        add.tap()
+
+        XCTAssertTrue(app.buttons["Tailscale devices"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["SSH / transport preference"].exists)
+        XCTAssertTrue(app.buttons["Advanced Tailscale connector"].exists)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Sign in with Tailscale")).firstMatch.exists)
+
+        app.buttons["Tailscale devices"].tap()
+        XCTAssertTrue(app.staticTexts["Tailscale route detected. This is a connectivity hint, not account access."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["addDevice.tailscale.provenance"].waitForExistence(timeout: 5))
+        let candidate = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "not trusted or saved")).firstMatch
+        XCTAssertTrue(candidate.waitForExistence(timeout: 5), app.debugDescription)
+        candidate.tap()
+        XCTAssertTrue(app.staticTexts["Review before this becomes a host"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Confirm candidate and review SSH details"].exists)
+    }
+
+    func testAdvancedAdministratorCandidateRequiresConfirmationAndRunsTypedPreflight() {
+        let app = scenarioApp("connectedWorkspace")
+        let add = app.buttons["Add a Tailscale or SSH device"].firstMatch
+        XCTAssertTrue(add.waitForExistence(timeout: 10))
+        add.tap()
+        app.buttons["Advanced Tailscale connector"].tap()
+
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Tailnet administrator credentials required")).firstMatch.waitForExistence(timeout: 5))
+        app.textFields["addDevice.tailscaleAdmin.clientID"].tap()
+        app.textFields["addDevice.tailscaleAdmin.clientID"].typeText("client-id")
+        app.secureTextFields["addDevice.tailscaleAdmin.clientSecret"].tap()
+        app.secureTextFields["addDevice.tailscaleAdmin.clientSecret"].typeText("fixture-secret")
+        app.textFields["addDevice.tailscaleAdmin.tailnet"].tap()
+        app.textFields["addDevice.tailscaleAdmin.tailnet"].typeText("example.ts.net")
+        app.buttons["addDevice.tailscaleAdmin.connect"].tap()
+
+        let candidate = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "admin-mac.example.ts.net")).firstMatch
+        XCTAssertTrue(candidate.waitForExistence(timeout: 5), app.debugDescription)
+        candidate.tap()
+        XCTAssertTrue(app.staticTexts["Review before this becomes a host"].waitForExistence(timeout: 5))
+        app.buttons["Confirm candidate and review SSH details"].tap()
+
+        let username = app.textFields["Username"]
+        XCTAssertTrue(username.waitForExistence(timeout: 5))
+        username.tap()
+        username.typeText("openpaw")
+        let preflight = app.buttons["connection.preflight.run"]
+        for _ in 0..<5 where !preflight.isHittable { app.swipeUp() }
+        XCTAssertTrue(preflight.isHittable, app.debugDescription)
+        preflight.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["connection.preflight.stage.route"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["connection.preflight.stage.transportCapabilities"].exists)
+        XCTAssertFalse(app.buttons["Mosh"].exists)
+        XCTAssertFalse(app.buttons["Eternal Terminal"].exists)
+    }
+
+    func testNoHostStateKeepsManualSSHUsable() {
+        let app = scenarioApp("noHosts")
+        let add = app.buttons["Add a Tailscale or SSH device"].firstMatch
+        XCTAssertTrue(add.waitForExistence(timeout: 10))
+        add.tap()
+        app.buttons["Tailscale devices"].tap()
+
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "No connected discovery host")).firstMatch.waitForExistence(timeout: 5))
+        app.buttons["SSH / transport preference"].tap()
+        XCTAssertTrue(app.textFields["Hostname"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["SSH"].exists)
+        XCTAssertFalse(app.buttons["Mosh"].exists)
+        XCTAssertFalse(app.buttons["Eternal Terminal"].exists)
+    }
+
     /// The state of every real install: a host record exists, but its key was never imported, because the app has no
     /// screen that imports one. Tapping Connect here must explain itself on screen.
     ///

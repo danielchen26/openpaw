@@ -96,6 +96,8 @@ pub enum TailscaleUnavailable {
     LoggedOut(String),
     /// Generic fixed-command/process failure that is not evidence of logged-out state.
     Unavailable(String),
+    /// The fixed command exited nonzero without exposing stderr or arguments.
+    CommandFailed(String),
     /// The fixed command exceeded its timeout.
     Timeout(String),
     /// The fixed command produced more output than the bounded limit.
@@ -104,6 +106,8 @@ pub enum TailscaleUnavailable {
     Busy(String),
     /// The local Tailscale daemon did not report a known running backend state.
     UnavailableState(String),
+    /// The local Tailscale daemon returned malformed or unsupported JSON.
+    MalformedResponse(String),
 }
 
 /// Structured unavailable response body.
@@ -140,6 +144,9 @@ impl TailscaleUnavailable {
     fn unavailable() -> Self {
         Self::Unavailable("Tailscale discovery is unavailable on the connected host.".to_owned())
     }
+    fn command_failed() -> Self {
+        Self::CommandFailed("Tailscale discovery failed on the connected host.".to_owned())
+    }
     fn timeout() -> Self {
         Self::Timeout("Tailscale discovery timed out on the connected host.".to_owned())
     }
@@ -155,6 +162,11 @@ impl TailscaleUnavailable {
         Self::UnavailableState(format!(
             "Tailscale is not in a supported running state on the connected host: {reason}."
         ))
+    }
+    fn malformed_response() -> Self {
+        Self::MalformedResponse(
+            "Tailscale discovery returned malformed data on the connected host.".to_owned(),
+        )
     }
 }
 
@@ -201,9 +213,9 @@ pub async fn devices(
     match parse_status_json(&bytes) {
         Ok(response) => Ok(Json(response).into_response()),
         Err(TailscaleParseError::Unavailable(err)) => Err(unavailable_response(err)),
-        Err(TailscaleParseError::Malformed(err)) => Err(ApiError::internal(format!(
-            "malformed tailscale status json: {err}"
-        ))),
+        Err(TailscaleParseError::Malformed(_)) => Err(unavailable_response(
+            TailscaleUnavailable::malformed_response(),
+        )),
     }
 }
 
@@ -214,6 +226,8 @@ fn unavailable_response(err: TailscaleUnavailable) -> ApiError {
         | TailscaleUnavailable::UnavailableState(_) => StatusCode::SERVICE_UNAVAILABLE,
         TailscaleUnavailable::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
         TailscaleUnavailable::Unavailable(_)
+        | TailscaleUnavailable::CommandFailed(_)
+        | TailscaleUnavailable::MalformedResponse(_)
         | TailscaleUnavailable::OutputLimit(_)
         | TailscaleUnavailable::Busy(_) => StatusCode::BAD_GATEWAY,
     };
@@ -550,7 +564,7 @@ async fn run_status_command(
         result = &mut read => {
             if result.is_err() {
                 cleanup_process(child_pid, &mut wait).await;
-                return Err(TailscaleUnavailable::unavailable());
+                return Err(TailscaleUnavailable::command_failed());
             }
             if bytes.len() > max_bytes {
                 cleanup_process(child_pid, &mut wait).await;
@@ -580,13 +594,13 @@ async fn run_status_command(
             };
             if !status.success() {
                 cleanup_process(child_pid, &mut wait).await;
-                return Err(TailscaleUnavailable::unavailable());
+                return Err(TailscaleUnavailable::command_failed());
             }
             match timeout_at(deadline, &mut read).await {
                 Ok(result) => {
                     if result.is_err() {
                         cleanup_process(child_pid, &mut wait).await;
-                        return Err(TailscaleUnavailable::unavailable());
+                        return Err(TailscaleUnavailable::command_failed());
                     }
                     if bytes.len() > max_bytes {
                         cleanup_process(child_pid, &mut wait).await;
@@ -610,7 +624,7 @@ async fn run_status_command(
 
     if !status.success() {
         cleanup_process(child_pid, &mut wait).await;
-        return Err(TailscaleUnavailable::unavailable());
+        return Err(TailscaleUnavailable::command_failed());
     }
     Ok(bytes)
 }
@@ -890,13 +904,13 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn process_runner_maps_nonzero_to_unavailable_without_stderr_leak() {
+    async fn process_runner_maps_nonzero_to_command_failed_without_stderr_leak() {
         let (_temp, script) = executable_script("nonzero", "echo secret-stderr >&2\nexit 1\n");
         let err = run_status_command(&script, MAX_STATUS_BYTES, STATUS_TIMEOUT)
             .await
             .unwrap_err();
         assert!(
-            matches!(err, TailscaleUnavailable::Unavailable(message) if !message.contains("secret-stderr"))
+            matches!(err, TailscaleUnavailable::CommandFailed(message) if !message.contains("secret-stderr"))
         );
     }
 
@@ -919,7 +933,7 @@ mod tests {
         let err = run_status_command(&script, MAX_STATUS_BYTES, STATUS_TIMEOUT)
             .await
             .unwrap_err();
-        assert!(matches!(err, TailscaleUnavailable::Unavailable(_)));
+        assert!(matches!(err, TailscaleUnavailable::CommandFailed(_)));
         let child_pid: i32 = std::fs::read_to_string(&child_pid_file)
             .unwrap()
             .trim()

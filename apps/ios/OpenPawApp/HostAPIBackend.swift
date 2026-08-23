@@ -22,7 +22,7 @@ protocol LoopbackForwarder: Sendable {
 /// to it through a `direct-tcpip` channel on the SSH connection the terminal already established. That is the whole
 /// security model of the structured side: there is no port to scan, no certificate to get wrong, and no path that
 /// works when the SSH connection is down.
-final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle {
+final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, PairedHostCapabilityProviding {
 
     /// The port `openpaw-host` binds on the remote machine. Configurable because a user may run two hosts, and
     /// defaulted because almost nobody does.
@@ -142,6 +142,11 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle {
     }
 
     var isPaired: Bool { activeHostID.get().flatMap { credentials.loadSigner(hostID: $0) } != nil }
+
+    func pairedCapabilityStatus(_ capability: String, hostID: HostRecord.ID) -> PairedHostCapabilityStatus {
+        guard let capabilities = credentials.loadCapabilities(hostID: hostID) else { return .unknown }
+        return capabilities.contains(capability) ? .granted : .denied
+    }
 
     // MARK: OpenPawBackend
 
@@ -337,6 +342,7 @@ actor SSHLoopbackForwarder: LoopbackForwarder {
 protocol DeviceCredentialStoring: Sendable {
     func save(_ result: PairingResult, hostID: HostRecord.ID) throws
     func loadSigner(hostID: HostRecord.ID) -> RequestSigner?
+    func loadCapabilities(hostID: HostRecord.ID) -> Set<String>?
     func clear(hostID: HostRecord.ID) throws
 }
 
@@ -359,12 +365,18 @@ struct DeviceCredentialStore: DeviceCredentialStoring {
         case deviceID = "device_id"
         case token = "token"
         case hmacKey = "hmac_key_b64"
+        case capabilities
     }
 
     func save(_ result: PairingResult, hostID: HostRecord.ID) throws {
         try write(result.deviceID, to: .deviceID, hostID: hostID)
         try write(result.token, to: .token, hostID: hostID)
         try write(result.hmacKeyB64, to: .hmacKey, hostID: hostID)
+        let capabilities = try JSONEncoder().encode(result.capabilities.sorted())
+        guard let capabilityJSON = String(data: capabilities, encoding: .utf8) else {
+            throw KeychainError(status: errSecDecode, operation: "encoding capabilities")
+        }
+        try write(capabilityJSON, to: .capabilities, hostID: hostID)
     }
 
     func loadSigner(hostID: HostRecord.ID) -> RequestSigner? {
@@ -376,8 +388,15 @@ struct DeviceCredentialStore: DeviceCredentialStoring {
         return RequestSigner(deviceID: deviceID, token: token, hmacKeyBase64: hmacKey)
     }
 
+    func loadCapabilities(hostID: HostRecord.ID) -> Set<String>? {
+        guard let encoded = read(.capabilities, hostID: hostID), let data = encoded.data(using: .utf8),
+            let capabilities = try? JSONDecoder().decode([String].self, from: data)
+        else { return nil }
+        return Set(capabilities)
+    }
+
     func clear(hostID: HostRecord.ID) throws {
-        for account in [Account.deviceID, .token, .hmacKey] {
+        for account in [Account.deviceID, .token, .hmacKey, .capabilities] {
             let status = SecItemDelete(query(for: account, hostID: hostID) as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else {
                 throw KeychainError(status: status, operation: "deleting \(account.rawValue)")

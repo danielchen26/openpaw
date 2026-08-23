@@ -38,12 +38,13 @@ final class HostAPIBackendTests: XCTestCase {
         let credentials = FakeCredentialStore()
         let backend = HostAPIBackend(forwarder: FakeForwarder(port: 49_322), credentials: credentials, urlSession: Self.stubSession())
         let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
-        StubURLProtocol.response = (200, Data(#"{"device_id":"dev_a","token":"tok_a","hmac_key_b64":"\#(key)","capabilities":[]}"#.utf8))
+        StubURLProtocol.response = (200, Data(#"{"device_id":"dev_a","token":"tok_a","hmac_key_b64":"\#(key)","capabilities":["devices.read"]}"#.utf8))
 
         try await backend.connect(hostID: hostA)
         _ = try await backend.pair(pairingCode: "123456", deviceName: "iPhone")
         XCTAssertEqual(credentials.savedHostIDs, [hostA])
         XCTAssertTrue(backend.isPaired)
+        XCTAssertEqual(backend.pairedCapabilityStatus("devices.read", hostID: hostA), .granted)
 
         await backend.disconnect()
         try await backend.connect(hostID: hostB)
@@ -109,6 +110,7 @@ private actor FakeForwarder: LoopbackForwarder {
 private final class FakeCredentialStore: DeviceCredentialStoring, @unchecked Sendable {
     private let lock = NSLock()
     var signers: [HostRecord.ID: RequestSigner]
+    var capabilities: [HostRecord.ID: Set<String>] = [:]
     private(set) var loadedHostIDs: [HostRecord.ID] = []
     private(set) var savedHostIDs: [HostRecord.ID] = []
     private(set) var clearedHostIDs: [HostRecord.ID] = []
@@ -121,6 +123,7 @@ private final class FakeCredentialStore: DeviceCredentialStoring, @unchecked Sen
         if let signer = result.signer {
             signers[hostID] = signer
         }
+        capabilities[hostID] = Set(result.capabilities)
         lock.unlock()
     }
 
@@ -131,10 +134,17 @@ private final class FakeCredentialStore: DeviceCredentialStoring, @unchecked Sen
         return signers[hostID]
     }
 
+    func loadCapabilities(hostID: HostRecord.ID) -> Set<String>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capabilities[hostID]
+    }
+
     func clear(hostID: HostRecord.ID) throws {
         lock.lock()
         clearedHostIDs.append(hostID)
         signers.removeValue(forKey: hostID)
+        capabilities.removeValue(forKey: hostID)
         lock.unlock()
     }
 }

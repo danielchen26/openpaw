@@ -371,7 +371,7 @@ Use existing terminal/backend abstractions. If a fixed remote capability probe i
 
 **Step 4: Implement the optional zero-host admin connector**
 
-This is not normal Tailscale login. Require the user to provide an admin-created OAuth client ID, client secret, and tailnet identifier. Store the credentials in the iOS Keychain, never in `UserDefaults` or settings export. Mint short-lived access tokens only when refreshing the Devices API, request read-only device scope, redact all authentication values, and support Disconnect/Delete. Use an injectable `URLSession` and local mock server/`URLProtocol` tests for success, 401/403, rate limit, malformed JSON, pagination, cancellation, and token refresh. Candidates still require confirmation before a host record is saved.
+This is not normal Tailscale login. Require the user to provide an admin-created OAuth client ID, client secret, and tailnet identifier. Store the credentials in the iOS Keychain, never in `UserDefaults` or settings export. Mint short-lived access tokens only when refreshing the Devices API, request read-only device scope, redact all authentication values, and support Disconnect/Delete. Use an injectable `URLSession` and local mock server/`URLProtocol` tests for success, 401/403, rate limit, malformed JSON, cancellation, and token refresh. The official Devices API is not paginated today, so assert one request with no invented cursor; add pagination only if the official response later defines it. Candidates still require confirmation before a host record is saved.
 
 **Step 5: Improve the flow**
 
