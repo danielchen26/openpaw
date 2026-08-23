@@ -122,7 +122,8 @@ public final class OpenPawSettings {
 
     public func apply(_ proposal: SettingsImportProposal, confirmSecurityReductions: Bool) throws {
         try SettingsImportProposal.validate(proposal.snapshot)
-        if !proposal.securityReductions.isEmpty && !confirmSecurityReductions { throw SettingsValidationError.securityReductionRequiresConfirmation }
+        let reductions = SettingsImportProposal.securityReductions(in: proposal.snapshot, current: self)
+        if !reductions.isEmpty && !confirmSecurityReductions { throw SettingsValidationError.securityReductionRequiresConfirmation }
         commit(proposal.snapshot)
     }
 

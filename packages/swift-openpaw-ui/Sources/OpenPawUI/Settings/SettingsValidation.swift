@@ -37,11 +37,19 @@ public struct SettingsChange: Sendable, Hashable {
 }
 
 public struct SettingsImportProposal: Sendable, Hashable {
-    public var snapshot: SettingsSnapshot
-    public var changes: [SettingsChange]
-    public var securityReductions: [SettingsSecurityReduction]
-    public var sourceSchemaVersion: Int
-    public var migrationNotes: [String]
+    public private(set) var snapshot: SettingsSnapshot
+    public private(set) var changes: [SettingsChange]
+    public private(set) var securityReductions: [SettingsSecurityReduction]
+    public private(set) var sourceSchemaVersion: Int
+    public private(set) var migrationNotes: [String]
+
+    public init(snapshot: SettingsSnapshot, changes: [SettingsChange], securityReductions: [SettingsSecurityReduction], sourceSchemaVersion: Int, migrationNotes: [String]) {
+        self.snapshot = snapshot
+        self.changes = changes
+        self.securityReductions = securityReductions
+        self.sourceSchemaVersion = sourceSchemaVersion
+        self.migrationNotes = migrationNotes
+    }
 
     @MainActor
     public static func parse(_ data: Data, current settings: OpenPawSettings) throws -> SettingsImportProposal {
@@ -135,11 +143,22 @@ public struct SettingsImportProposal: Sendable, Hashable {
         guard snapshot.terminalFontSize.isFinite, OpenPawSettings.fontSizeRange.contains(CGFloat(snapshot.terminalFontSize)) else { throw SettingsValidationError.invalidValue("terminalFontSize") }
         guard snapshot.biometricGraceInterval.isFinite, snapshot.biometricGraceInterval >= 0, snapshot.biometricGraceInterval <= 86_400 else { throw SettingsValidationError.invalidValue("biometricGraceInterval") }
         guard OpenPawSettings.scrollbackChoices.contains(snapshot.scrollbackLines) else { throw SettingsValidationError.invalidValue("scrollbackLines") }
+        var shortcutIDs: Set<String> = []
+        for shortcut in snapshot.shortcuts.shortcuts {
+            try validateShortcutID(shortcut.id)
+            guard shortcutIDs.insert(shortcut.id).inserted else { throw SettingsValidationError.invalidValue("shortcuts.duplicateID") }
+        }
         for (key, profile) in snapshot.sessionProfiles {
             try validateHostID(key)
             try validate(profile: profile)
         }
-        for shortcut in snapshot.shortcuts.shortcuts { try validateShortcutID(shortcut.id) }
+    }
+
+    @MainActor
+    static func securityReductions(in snapshot: SettingsSnapshot, current settings: OpenPawSettings) -> [SettingsSecurityReduction] {
+        var reductions: [SettingsSecurityReduction] = []
+        if settings.requiresBiometricGate && !snapshot.requiresBiometricGate { reductions.append(.biometricProtectionDisabled) }
+        return reductions
     }
 
     private static func validate(profile: SessionProfile) throws {

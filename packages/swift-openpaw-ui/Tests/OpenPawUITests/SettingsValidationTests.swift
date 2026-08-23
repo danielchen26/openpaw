@@ -51,6 +51,23 @@ final class SettingsValidationTests: XCTestCase {
         XCTAssertFalse(settings.requiresBiometricGate)
     }
 
+    func testApplyRederivesSecurityReductionFromSnapshotInsteadOfTrustingProposalField() throws {
+        let settings = OpenPawSettings(defaults: defaults())
+        settings.requiresBiometricGate = true
+        var reduced = settings.snapshot()
+        reduced.requiresBiometricGate = false
+        let tampered = SettingsImportProposal(
+            snapshot: reduced,
+            changes: [],
+            securityReductions: [],
+            sourceSchemaVersion: SettingsSnapshot.currentSchemaVersion,
+            migrationNotes: []
+        )
+
+        XCTAssertThrowsError(try settings.apply(tampered, confirmSecurityReductions: false))
+        XCTAssertTrue(settings.requiresBiometricGate)
+    }
+
     func testEventBudgetShortcutPreviewAndGraceSurviveReload() throws {
         let suite = "openpaw.settings.validation.reload.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -99,6 +116,17 @@ final class SettingsValidationTests: XCTestCase {
             candidate.shortcuts = ShortcutSet(shortcuts: [Shortcut(id: id, label: "secret label", payload: .literal("SECRET_PAYLOAD"), order: 1)])
             XCTAssertThrowsError(try SettingsImportProposal.parse(try JSONEncoder.openPawSettings.encode(candidate), current: settings), id)
         }
+    }
+
+    func testImportRejectsDuplicateShortcutIDsBeforeDiffing() throws {
+        let settings = OpenPawSettings(defaults: defaults())
+        var snapshot = settings.snapshot()
+        snapshot.shortcuts = ShortcutSet(shortcuts: [
+            Shortcut(id: "dup", label: "one", payload: .literal("one"), order: 1),
+            Shortcut(id: "dup", label: "two", payload: .literal("two"), order: 2),
+        ])
+
+        XCTAssertThrowsError(try SettingsImportProposal.parse(try JSONEncoder.openPawSettings.encode(snapshot), current: settings))
     }
 
     func testImportDiffIncludesRedactedShortcutAndSessionProfileChanges() throws {
