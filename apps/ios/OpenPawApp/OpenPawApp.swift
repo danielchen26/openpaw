@@ -195,6 +195,9 @@ final class AppWiring {
     let terminal: SSHTerminalBackend
     let hostAPI: HostAPIBackend
     let gate: GateController
+    #if DEBUG && targetEnvironment(simulator)
+        let debugScenario: DebugScenario?
+    #endif
     let restorationStore = LocalSessionRestorationStore()
     /// Downloaded speech models. Held so the app can hand them back on a memory warning, which the model layer
     /// has no way to hear.
@@ -255,6 +258,10 @@ final class AppWiring {
     }
 
     init() {
+        #if DEBUG && targetEnvironment(simulator)
+            let debugScenario = DebugScenario(arguments: ProcessInfo.processInfo.arguments)
+            self.debugScenario = debugScenario
+        #endif
         let hosts = HostStoreFile()
         let keychain = KeychainStore(service: "dev.openpaw.app.ssh")
         // Handed from `makeConfiguration` to `makeTransport`: the pins belong to the `HostRecord`, and only the
@@ -304,14 +311,30 @@ final class AppWiring {
         let hostAPI = HostAPIBackend(forwarder: forwarder)
         let asrModels = LocalASRModelStore()
         let appleSpeech = SpeechDictation()
-        let model = OpenPawModel(
-            hostStore: hosts.load(),
-            backend: hostAPI,
-            terminal: terminal,
-            dictation: appleSpeech,
-            dictationModels: asrModels,
-            dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech)
-        )
+        let model: OpenPawModel
+        #if DEBUG && targetEnvironment(simulator)
+            if let debugScenario {
+                model = debugScenario.makeModel(terminal: terminal)
+            } else {
+                model = OpenPawModel(
+                    hostStore: hosts.load(),
+                    backend: hostAPI,
+                    terminal: terminal,
+                    dictation: appleSpeech,
+                    dictationModels: asrModels,
+                    dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech)
+                )
+            }
+        #else
+            model = OpenPawModel(
+                hostStore: hosts.load(),
+                backend: hostAPI,
+                terminal: terminal,
+                dictation: appleSpeech,
+                dictationModels: asrModels,
+                dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech)
+            )
+        #endif
         self.asrModels = asrModels
 
         let stored = UserDefaults.standard.double(forKey: Self.fontSizeKey)
@@ -340,7 +363,7 @@ final class AppWiring {
     func start() async {
         guard gate.decision == .unlocked else { return }
         #if DEBUG && targetEnvironment(simulator)
-            await debugPairIfRequested()
+            if debugScenario == nil { await debugPairIfRequested() }
         #endif
         guard model.canRefreshRemoteState else { return }
         await model.refresh()

@@ -24,32 +24,6 @@ in_dir() {
   (cd "$ROOT/$dir" && "$@")
 }
 
-latest_ios_simulator() {
-  xcrun simctl list devices available -j | python3 -c '
-import json
-import re
-import sys
-
-candidates = []
-for runtime, devices in json.load(sys.stdin)["devices"].items():
-    match = re.search(r"\.iOS-(\d+)-(\d+)(?:-(\d+))?$", runtime)
-    if match is None:
-        continue
-    version = tuple(int(part or 0) for part in match.groups())
-    for device in devices:
-        if not device.get("isAvailable"):
-            continue
-        candidates.append((
-            version,
-            device.get("state") == "Booted",
-            "iPhone" in device.get("name", ""),
-            device["udid"],
-        ))
-
-print(max(candidates)[-1] if candidates else "")
-'
-}
-
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/opaw-check}
 
 product_claims_step() {
@@ -133,6 +107,7 @@ PY
 }
 
 step "docs · product claims"  product_claims_step
+step "scripts · test"         python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
 if [ "${OPENPAW_PRODUCT_CLAIMS_ONLY:-0}" = 1 ]; then
   if ((${#FAILED[@]})); then
@@ -179,14 +154,13 @@ app_test_step() {
     return 0
   fi
   local destination
-  destination=$(latest_ios_simulator)
-  if [ -z "$destination" ]; then
+  if ! destination=$(python3 scripts/ios-test-destination.py); then
     printf '   no available iOS Simulator; skipping the app-hosted tests.\n'
     return 0
   fi
   in_dir apps/ios xcodebuild \
     -project OpenPaw.xcodeproj -scheme OpenPawAppTests \
-    -destination "platform=iOS Simulator,id=$destination" \
+    -destination "$destination" \
     -skipPackagePluginValidation -skipMacroValidation \
     -quiet test
 }
@@ -204,20 +178,41 @@ ui_test_step() {
     return 0
   fi
   local destination
-  destination=$(latest_ios_simulator)
-  if [ -z "$destination" ]; then
+  if ! destination=$(python3 scripts/ios-test-destination.py); then
     printf '   no available iOS Simulator; skipping the dictation UI test.\n'
     return 0
   fi
   in_dir apps/ios xcodebuild \
     -project OpenPaw.xcodeproj -scheme OpenPaw \
-    -destination "platform=iOS Simulator,id=$destination" \
+    -destination "$destination" \
     -skipPackagePluginValidation -skipMacroValidation \
     -only-testing:OpenPawUITests/DictationEngineSettingsUITests \
     -quiet test
 }
 
 step "app · test" app_test_step
+
+# The deterministic simulator fixture is the reusable acceptance boundary for later UI workflows. Keep its launch
+# contract in the default check so fixture wiring cannot silently drift while focused feature suites stay green.
+scenario_ui_test_step() {
+  if ! xcodebuild -project apps/ios/OpenPaw.xcodeproj -list >/dev/null 2>&1; then
+    printf '   xcodebuild cannot load its plug-ins here; skipping the scenario UI test.\n'
+    return 0
+  fi
+  local destination
+  if ! destination=$(python3 scripts/ios-test-destination.py); then
+    printf '   no available iOS Simulator; skipping the scenario UI test.\n'
+    return 0
+  fi
+  in_dir apps/ios xcodebuild \
+    -project OpenPaw.xcodeproj -scheme OpenPaw \
+    -destination "$destination" \
+    -skipPackagePluginValidation -skipMacroValidation \
+    -only-testing:OpenPawUITests/ScenarioLaunchUITests \
+    -quiet test
+}
+
+step "app · scenario ui" scenario_ui_test_step
 
 step "app · dictation ui" ui_test_step
 

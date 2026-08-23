@@ -33,3 +33,4 @@ tools/dictation-cer/*.aiff
 
 # Bytecode from scripts/dictation-ui-live.py importing smoke.py as a module to reuse its daemon setup.
 scripts/__pycache__/
+scripts/**/__pycache__/
