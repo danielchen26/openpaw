@@ -207,9 +207,11 @@ pub struct SanitizedStatus {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Repository {
+    pub provider_repo_id: String,
     pub owner: String,
     pub name: String,
     pub https_url: String,
+    pub is_private: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloneSpec {
@@ -773,10 +775,26 @@ fn parse_github_repo(v: serde_json::Value) -> Result<Repository, ProviderError> 
         .get("clone_url")
         .and_then(|x| x.as_str())
         .ok_or_else(|| ProviderError::Protocol("malformed GitHub clone_url".into()))?;
+    let provider_repo_id = v
+        .get("id")
+        .and_then(|x| x.as_u64())
+        .map(|id| id.to_string())
+        .or_else(|| {
+            v.get("full_name")
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| ProviderError::Protocol("malformed GitHub repository id".into()))?;
+    let is_private = v
+        .get("private")
+        .and_then(|x| x.as_bool())
+        .ok_or_else(|| ProviderError::Protocol("malformed GitHub repository visibility".into()))?;
     let repo = Repository {
+        provider_repo_id,
         owner: owner.into(),
         name: name.into(),
         https_url: url.into(),
+        is_private,
     };
     validate_repo(&repo, ProviderKind::GitHub)?;
     Ok(repo)
@@ -845,10 +863,22 @@ fn parse_hf_repo(item: serde_json::Value, kind: &str) -> Result<Repository, Prov
         "spaces" => "spaces/",
         _ => "",
     };
+    let stable_kind = match kind {
+        "datasets" => "dataset",
+        "spaces" => "space",
+        _ => "model",
+    };
+    let is_private = item
+        .get("private")
+        .and_then(|x| x.as_bool())
+        .or_else(|| item.get("gated").and_then(|x| x.as_bool()))
+        .unwrap_or(false);
     let repo = Repository {
+        provider_repo_id: format!("{stable_kind}:{id}"),
         owner: owner.into(),
         name: name.into(),
         https_url: format!("https://huggingface.co/{prefix}{id}"),
+        is_private,
     };
     validate_repo(&repo, ProviderKind::HuggingFace)?;
     Ok(repo)

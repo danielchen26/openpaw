@@ -108,7 +108,7 @@ async fn github_repository_listing_uses_real_page_parameters() {
             app_seen.lock().unwrap().push(params.clone());
             let page: usize = params["page"].parse().unwrap();
             let len = if page == 1 { 100 } else { 1 };
-            let repos: Vec<_> = (0..len).map(|i| json!({"name":format!("r{i}"),"owner":{"login":"me"},"clone_url":format!("https://github.com/me/r{i}.git")})).collect();
+            let repos: Vec<_> = (0..len).map(|i| json!({"id":i + ((page - 1) * 100),"name":format!("r{i}"),"full_name":format!("me/r{i}"),"private":false,"owner":{"login":"me"},"clone_url":format!("https://github.com/me/r{i}.git")})).collect();
             let mut headers = HeaderMap::new();
             if page == 1 {
                 headers.insert("link", format!("<{}/user/repos?per_page=100&page=2>; rel=\"next\"", params.get("base").map_or("", String::as_str)).parse().unwrap());
@@ -127,6 +127,35 @@ async fn github_repository_listing_uses_real_page_parameters() {
     assert_eq!(seen[0]["per_page"], "100");
     assert_eq!(seen[0]["page"], "1");
     assert_eq!(seen[1]["page"], "2");
+}
+
+#[tokio::test]
+async fn github_repository_metadata_preserves_stable_id_and_private_visibility() {
+    let app = Router::new().route(
+        "/user/repos",
+        get(|| async {
+            Json(json!([
+                {"id": 123456789, "name":"public.repo", "full_name":"me/public.repo", "private":false, "owner":{"login":"me"}, "clone_url":"https://github.com/me/public.repo.git"},
+                {"id": 987654321, "name":"private.repo", "full_name":"me/private.repo", "private":true, "owner":{"login":"me"}, "clone_url":"https://github.com/me/private.repo.git"},
+                {"name":"fallback", "full_name":"me/fallback", "private":false, "owner":{"login":"me"}, "clone_url":"https://github.com/me/fallback.git"}
+            ]))
+        }),
+    );
+    let base = serve(app).await;
+    let gh = GitHubProvider::new(PublicClientConfig::github_app("client", &base, &base));
+    let repos = gh
+        .list_repositories(&SecretToken::new("gh_secret_private".into()))
+        .await
+        .unwrap();
+
+    assert_eq!(repos[0].provider_repo_id, "123456789");
+    assert!(!repos[0].is_private);
+    assert_eq!(repos[1].provider_repo_id, "987654321");
+    assert!(repos[1].is_private);
+    assert_eq!(repos[2].provider_repo_id, "me/fallback");
+    let rendered = format!("{repos:?}");
+    assert!(!rendered.contains("gh_secret_private"));
+    assert!(!rendered.contains("Authorization"));
 }
 
 #[tokio::test]
@@ -198,7 +227,7 @@ async fn hf_listing_uses_whoami_author_scope_and_preserves_link_cursor_for_all_r
                     headers.insert("link", format!("</hf/api/{kind}?limit=100&full=false&author=me&cursor=opaque%2B{kind}>; rel=\"next\"").parse().unwrap());
                 }
                 let repo_id = format!("me/{id_kind}-{}", cursor.unwrap_or_else(|| "first".into()));
-                (headers, Json(json!([{ "id": repo_id }])))
+                (headers, Json(json!([{ "id": repo_id, "private": false }])))
             }
         }));
     let base = serve(app).await;
@@ -234,6 +263,86 @@ async fn hf_listing_uses_whoami_author_scope_and_preserves_link_cursor_for_all_r
     );
 }
 
+#[tokio::test]
+async fn hf_repository_metadata_preserves_ids_visibility_and_kind_collisions() {
+    let app = Router::new()
+        .route(
+            "/hf/api/whoami-v2",
+            get(|| async { Json(json!({"name":"me"})) }),
+        )
+        .route(
+            "/hf/api/{kind}",
+            get(
+                |axum::extract::Path(kind): axum::extract::Path<String>| async move {
+                    let items = match kind.as_str() {
+                        "datasets" => json!([
+                            {"id":"me/shared.name", "private":true},
+                            {"id":"me/dot.slash-resistant", "private":false}
+                        ]),
+                        "spaces" => json!([
+                            {"id":"me/shared.name", "private":false},
+                            {"id":"me/gated-space", "gated":true}
+                        ]),
+                        _ => json!([
+                            {"id":"me/shared.name", "private":false},
+                            {"modelId":"me/private-model", "private":true}
+                        ]),
+                    };
+                    Json(items)
+                },
+            ),
+        );
+    let base = serve(app).await;
+    let hf = HuggingFaceProvider::new(PublicClientConfig::hugging_face(
+        "client",
+        &base,
+        format!("{base}/hf"),
+    ));
+    let repos = hf
+        .list_repositories(&SecretToken::new("hf_secret_private".into()))
+        .await
+        .unwrap();
+
+    assert!(
+        repos
+            .iter()
+            .any(|r| r.provider_repo_id == "model:me/shared.name"
+                && !r.is_private
+                && r.https_url == "https://huggingface.co/me/shared.name")
+    );
+    assert!(
+        repos
+            .iter()
+            .any(|r| r.provider_repo_id == "dataset:me/shared.name"
+                && r.is_private
+                && r.https_url == "https://huggingface.co/datasets/me/shared.name")
+    );
+    assert!(
+        repos
+            .iter()
+            .any(|r| r.provider_repo_id == "space:me/shared.name"
+                && !r.is_private
+                && r.https_url == "https://huggingface.co/spaces/me/shared.name")
+    );
+    assert!(
+        repos
+            .iter()
+            .any(|r| r.provider_repo_id == "space:me/gated-space" && r.is_private)
+    );
+    assert_eq!(
+        repos
+            .iter()
+            .filter(|r| r.name == "shared.name")
+            .map(|r| r.provider_repo_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+    let rendered = format!("{repos:?}");
+    assert!(!rendered.contains("hf_secret_private"));
+    assert!(!rendered.contains("Bearer"));
+}
+
 #[test]
 fn clone_specs_reject_unapproved_hosts_and_url_tricks_before_token_use() {
     let gh = GitHubProvider::new(PublicClientConfig::github_app(
@@ -256,9 +365,11 @@ fn clone_specs_reject_unapproved_hosts_and_url_tricks_before_token_use() {
     ];
     for url in github_bad_urls {
         let repo = Repository {
+            provider_repo_id: "github:bad".into(),
             owner: "me".into(),
             name: "r".into(),
             https_url: url.into(),
+            is_private: false,
         };
         let err = gh
             .clone_spec(&repo, SecretToken::new("gh_secret".into()))
@@ -275,9 +386,11 @@ fn clone_specs_reject_unapproved_hosts_and_url_tricks_before_token_use() {
     ];
     for url in hf_bad_urls {
         let repo = Repository {
+            provider_repo_id: "hf:bad".into(),
             owner: "me".into(),
             name: "r".into(),
             https_url: url.into(),
+            is_private: false,
         };
         let err = hf
             .clone_spec(&repo, SecretToken::new("hf_secret".into()))
@@ -300,7 +413,7 @@ async fn cancellation_prevents_requests_and_follow_on_listing_pages() {
             handler_cancel.cancel();
             let mut headers = HeaderMap::new();
             headers.insert("link", "</user/repos?per_page=100&page=2>; rel=\"next\"".parse().unwrap());
-            (headers, Json(json!([{ "name":"r", "owner":{"login":"me"}, "clone_url":"https://github.com/me/r.git" }])))
+            (headers, Json(json!([{ "id":1, "name":"r", "full_name":"me/r", "private":false, "owner":{"login":"me"}, "clone_url":"https://github.com/me/r.git" }])))
         }
     }));
     let base = serve(app).await;
@@ -523,9 +636,11 @@ async fn remote_revoke_requires_confidential_config_and_status_is_sanitized() {
 #[test]
 fn canonical_clone_spec_has_https_url_and_secret_credential_seam() {
     let repo = Repository {
+        provider_repo_id: "1".into(),
         owner: "me".into(),
         name: "r".into(),
         https_url: canonical_https_clone_url("github.com", "me", "r"),
+        is_private: false,
     };
     let gh = GitHubProvider::new(PublicClientConfig::github_app(
         "client",
