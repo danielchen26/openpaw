@@ -164,3 +164,39 @@ private final class StubURLProtocol: URLProtocol {
 
     override func stopLoading() {}
 }
+
+#if DEBUG && targetEnvironment(simulator)
+    final class DebugSSHTargetTests: XCTestCase {
+        func testParsesUsernameHostnameAndNonstandardPort() throws {
+            let target = try XCTUnwrap(DebugSSHTarget("developer@127.0.0.1:22222"))
+
+            XCTAssertEqual(target.username, "developer")
+            XCTAssertEqual(target.hostname, "127.0.0.1")
+            XCTAssertEqual(target.port, 22_222)
+        }
+
+        func testDefaultsToTheStandardSSHPort() throws {
+            let target = try XCTUnwrap(DebugSSHTarget("developer@localhost"))
+
+            XCTAssertEqual(target.username, "developer")
+            XCTAssertEqual(target.hostname, "localhost")
+            XCTAssertEqual(target.port, 22)
+        }
+
+        func testRejectsURLsAndInvalidPortsInsteadOfPartiallyParsingThem() {
+            for value in [
+                "developer@host:0",
+                "developer@host:65536",
+                "developer@host:22/path",
+                "developer@host:22?query",
+                "developer@host:22#fragment",
+                "developer:password@host",
+                "developer@host:",
+                " developer@host",
+                "developer@host%2Fbad",
+            ] {
+                XCTAssertNil(DebugSSHTarget(value), "unexpectedly accepted \(value)")
+            }
+        }
+    }
+#endif

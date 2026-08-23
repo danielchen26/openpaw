@@ -8,14 +8,28 @@ import XCTest
 
 /// Drives the real `SpeechDictation` against the real Speech framework.
 ///
-/// The simulator's audio input is the host Mac's microphone, so this is the same code path a phone runs: an
-/// `AVAudioEngine` tap feeding `SFSpeechRecognizer`. A test that substituted a fake engine could not tell whether
-/// dictation actually produces words on this machine, which is the only question worth asking here.
+/// A simulator records the host Mac's microphone and a phone records its own, but both exercise the same app path:
+/// an `AVAudioEngine` tap feeding `SFSpeechRecognizer`. A test that substituted a fake engine could not tell whether
+/// dictation actually produces words on the device, which is the only question worth asking here.
 ///
 /// Skipped rather than failed when the environment cannot answer: no speech authorisation, or no on-device model
 /// installed for the locale. Both are properties of the machine, not defects in the app, and a red test for them
 /// would train us to ignore the suite.
 final class LiveDictationTests: XCTestCase {
+
+    private struct RequiredDeviceCapabilityMissing: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    /// Simulator infrastructure gaps are skips. The same gap on a physical device is failed acceptance evidence.
+    private func unavailable(_ message: String) throws -> Never {
+        #if targetEnvironment(simulator)
+            throw XCTSkip(message)
+        #else
+            throw RequiredDeviceCapabilityMissing(message: message)
+        #endif
+    }
 
     private func requireAuthorization() throws {
         let status = SFSpeechRecognizer.authorizationStatus()
@@ -23,10 +37,9 @@ final class LiveDictationTests: XCTestCase {
         let waited = XCTestExpectation(description: "speech authorization")
         SFSpeechRecognizer.requestAuthorization { _ in waited.fulfill() }
         _ = XCTWaiter().wait(for: [waited], timeout: 20)
-        try XCTSkipUnless(
-            SFSpeechRecognizer.authorizationStatus() == .authorized,
-            "speech recognition is not authorised on this simulator"
-        )
+        guard SFSpeechRecognizer.authorizationStatus() == .authorized else {
+            try unavailable("speech recognition is not authorised on this test device")
+        }
     }
 
     /// The microphone the app would record from has to actually deliver samples, or dictation is dead before the
@@ -40,7 +53,7 @@ final class LiveDictationTests: XCTestCase {
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
-        try XCTSkipUnless(format.sampleRate > 0, "this simulator exposes no usable audio input")
+        guard format.sampleRate > 0 else { try unavailable("this test device exposes no usable audio input") }
 
         let counted = NSLock()
         var frames = 0
@@ -71,7 +84,7 @@ final class LiveDictationTests: XCTestCase {
 
         let locale = Locale(identifier: "en-US")
         let recognizer = try XCTUnwrap(SFSpeechRecognizer(locale: locale))
-        try XCTSkipUnless(recognizer.isAvailable, "the en-US recogniser is unavailable on this machine")
+        guard recognizer.isAvailable else { try unavailable("the en-US recogniser is unavailable on this device") }
 
         let request = SFSpeechURLRecognitionRequest(url: audio)
         request.shouldReportPartialResults = false
@@ -96,11 +109,11 @@ final class LiveDictationTests: XCTestCase {
         _ = XCTWaiter().wait(for: [finished], timeout: 45)
 
         if let failure {
-            throw XCTSkip("the recogniser could not run here: \(failure.localizedDescription)")
+            try unavailable("the recogniser could not run here: \(failure.localizedDescription)")
         }
         let heard = (transcript as String).lowercased()
         print("DICTATION heard=\"\(heard)\"")
-        try XCTSkipIf(heard.isEmpty, "no on-device model produced a transcript for en-US")
+        if heard.isEmpty { try unavailable("no on-device model produced a transcript for en-US") }
         XCTAssertTrue(
             heard.contains("files") || heard.contains("directory"),
             "dictation heard \"\(heard)\" instead of \"\(spoken)\""

@@ -35,38 +35,56 @@ final class LocalASRDictation: DictationEngine {
 
     var deliversFinalAfterStop: Bool { true }
 
-    func transcribe(locale: Locale, mode: DictationMode) -> AsyncThrowingStream<DictationUpdate, any Error> {
-        AsyncThrowingStream { continuation in
-            let session = session
-            let choice = choice
-            let store = store
-            let task = Task {
-                do {
-                    let turn = await session.beginTurn()
-                    try await session.startRecording(turn: turn)
-                    // Recording continues until `stop()`, which returns the samples. Waiting here rather than
-                    // polling keeps the microphone's lifetime tied to the finger, not to a timer.
-                    let samples = await session.awaitRecording(turn: turn)
-                    guard !Task.isCancelled, !samples.isEmpty else {
-                        continuation.finish()
-                        return
-                    }
-                    let model = try await store.loadedModel(for: choice)
-                    let text = try await model.transcribe(samples: samples, locale: locale, mode: mode)
-                    continuation.yield(DictationUpdate(text: text, isFinal: true))
-                    continuation.finish()
-                } catch is CancellationError {
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+    func transcribe(locale: Locale, mode: DictationMode) -> DictationTranscription {
+        let pair = AsyncThrowingStream<DictationUpdate, any Error>.makeStream()
+        let session = session
+        let choice = choice
+        let store = store
+        let startTask = Task<Int?, Never> {
+            do {
+                let turn = await session.beginTurn()
+                try await session.startRecording(turn: turn)
+                pair.continuation.yield(DictationUpdate(text: "", isFinal: false, isReady: true))
+                return turn
+            } catch is CancellationError {
+                pair.continuation.finish()
+                return nil
+            } catch {
+                pair.continuation.finish(throwing: error)
+                return nil
             }
-            continuation.onTermination = { _ in task.cancel() }
         }
-    }
-
-    func stop() async {
-        await session.stopRecording()
+        let task = Task {
+            guard let turn = await startTask.value else { return }
+            // Recording continues until this transcription's `stop()` returns the samples. Waiting here rather than
+            // polling keeps the microphone's lifetime tied to the finger, not to a timer.
+            let samples = await session.awaitRecording(turn: turn)
+            guard !Task.isCancelled, !samples.isEmpty else {
+                pair.continuation.finish()
+                return
+            }
+            do {
+                let model = try await store.loadedModel(for: choice)
+                let text = try await model.transcribe(samples: samples, locale: locale, mode: mode)
+                pair.continuation.yield(DictationUpdate(text: text, isFinal: true))
+                pair.continuation.finish()
+            } catch is CancellationError {
+                pair.continuation.finish()
+            } catch {
+                pair.continuation.finish(throwing: error)
+            }
+        }
+        let stop: @Sendable () async -> Void = {
+            startTask.cancel()
+            guard let turn = await startTask.value else { return }
+            await session.stopRecording(turn: turn)
+        }
+        pair.continuation.onTermination = { _ in
+            startTask.cancel()
+            task.cancel()
+            Task { await stop() }
+        }
+        return DictationTranscription(updates: pair.stream, stop: stop)
     }
 }
 
@@ -212,6 +230,11 @@ private actor LocalASRSession {
         converter = nil
         deactivate()
         resumeWaiters()
+    }
+
+    func stopRecording(turn: Int) async {
+        guard turn == activeTurn else { return }
+        await stopRecording()
     }
 
     private func append(_ newSamples: [Float]) {

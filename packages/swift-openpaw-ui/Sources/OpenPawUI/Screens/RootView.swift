@@ -537,10 +537,9 @@ public struct RootView: View {
         if destination.pushesDetail {
             NavigationStack {
                 content(destination, width: width)
-                    // A navigation stack does not pass the container's bottom safe-area inset down to what it
-                    // is showing, so the strip's height has to be handed to the content directly. Without this
-                    // the last control on a scrolling screen sits underneath the strip at the end of the scroll
-                    // and cannot be tapped at all — which is what the strip's own inset was meant to prevent.
+                    // The root still needs its own inset because the app-wide strip belongs outside this stack.
+                    // A modifier here does not follow a later push; the transcript destination repeats the same
+                    // contract below so its composer cannot be covered by the strip.
                     .safeAreaPadding(.bottom, deckInset)
             }
         } else {
@@ -761,6 +760,10 @@ public struct RootView: View {
             )
                 .navigationDestination(item: chatSessionBinding) { sessionID in
                     transcript(sessionID)
+                        // SwiftUI does not inherit the list's safe-area padding across a NavigationStack push.
+                        // Without this explicit edge the composer sits under the app-wide deck, so a tap meant
+                        // for its microphone activates the Terminal destination underneath instead of voice.
+                        .safeAreaPadding(.bottom, deckInset)
                 }
         case .split:
             HStack(spacing: 0) {

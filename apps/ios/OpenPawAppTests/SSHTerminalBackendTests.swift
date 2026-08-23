@@ -203,7 +203,8 @@ final class SSHTerminalBackendTests: XCTestCase {
         let backend = makeBackend(transport)
         try await backend.connect(host: host())
 
-        async let visible = Self.firstVisibleOutput(from: Self.visibleOutput(from: backend))
+        let visibleStream = Self.visibleOutput(from: backend)
+        async let visible = Self.firstVisibleOutput(from: visibleStream)
         await transport.emitOutput("ordinary")
 
         let captured = await visible

@@ -120,6 +120,73 @@ struct AppShell: View {
 /// Nothing here is a singleton and nothing reaches for a global: the model is constructed with its two backends and
 /// handed down, which is what lets the same screens render in `openpaw-snapshot` against `PreviewBackend` and in tests
 /// against a mock transport.
+#if DEBUG && targetEnvironment(simulator)
+    /// Parses the opt-in SSH target used by the live simulator harness.
+    ///
+    /// A nonstandard port lets the harness use its own unprivileged sshd instead of editing the developer's
+    /// `~/.ssh/authorized_keys` or depending on Remote Login's port 22 configuration.
+    struct DebugSSHTarget: Equatable {
+        let username: String?
+        let hostname: String
+        let port: Int
+
+        init?(_ value: String) {
+            let whitespace = CharacterSet.whitespacesAndNewlines
+            guard !value.isEmpty,
+                value == value.trimmingCharacters(in: whitespace),
+                value.unicodeScalars.allSatisfy({ !whitespace.contains($0) }),
+                !value.contains(where: { "/?#%".contains($0) })
+            else { return nil }
+
+            let userAndAuthority = value.split(separator: "@", omittingEmptySubsequences: false)
+            guard userAndAuthority.count <= 2 else { return nil }
+            let authority = String(userAndAuthority.last ?? "")
+            let username = userAndAuthority.count == 2 ? String(userAndAuthority[0]) : nil
+            let usernameCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+            guard username.map({ !$0.isEmpty && $0.unicodeScalars.allSatisfy(usernameCharacters.contains) }) ?? true
+            else { return nil }
+
+            let hostname: String
+            let portText: String?
+            if authority.hasPrefix("[") {
+                guard let close = authority.firstIndex(of: "]") else { return nil }
+                hostname = String(authority[authority.index(after: authority.startIndex)..<close])
+                let remainder = authority[authority.index(after: close)...]
+                if remainder.isEmpty {
+                    portText = nil
+                } else {
+                    guard remainder.first == ":" else { return nil }
+                    portText = String(remainder.dropFirst())
+                }
+                let ipv6Characters = CharacterSet(charactersIn: "0123456789abcdefABCDEF:.")
+                guard !hostname.isEmpty, hostname.unicodeScalars.allSatisfy(ipv6Characters.contains) else { return nil }
+            } else {
+                let hostAndPort = authority.split(separator: ":", omittingEmptySubsequences: false)
+                guard hostAndPort.count <= 2 else { return nil }
+                hostname = String(hostAndPort[0])
+                portText = hostAndPort.count == 2 ? String(hostAndPort[1]) : nil
+                let hostnameCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-_"))
+                guard !hostname.isEmpty, hostname.unicodeScalars.allSatisfy(hostnameCharacters.contains) else {
+                    return nil
+                }
+            }
+
+            guard portText?.isEmpty != true else { return nil }
+            let port: Int
+            if let portText {
+                guard let parsed = Int(portText) else { return nil }
+                port = parsed
+            } else {
+                port = 22
+            }
+            guard (1...65_535).contains(port) else { return nil }
+            self.username = username
+            self.hostname = hostname
+            self.port = port
+        }
+    }
+#endif
+
 @MainActor
 @Observable
 final class AppWiring {
@@ -308,12 +375,15 @@ final class AppWiring {
                     let next = arguments.index(after: index)
                     return next < arguments.endIndex ? arguments[next] : nil
                 }
-            let seededKey = arguments.firstIndex(of: "-openpaw-debug-seed-key")
-                .flatMap { index -> String? in
-                    let next = arguments.index(after: index)
-                    return next < arguments.endIndex ? arguments[next] : nil
-                }
-                .map { ($0 as NSString).lastPathComponent }
+                .flatMap(DebugSSHTarget.init)
+            let seededKey = ProcessInfo.processInfo.environment["OPENPAW_DEBUG_SEED_KEY_IDENTIFIER"]
+                .flatMap { $0.isEmpty ? nil : $0 }
+                ?? arguments.firstIndex(of: "-openpaw-debug-seed-key")
+                    .flatMap { index -> String? in
+                        let next = arguments.index(after: index)
+                        return next < arguments.endIndex ? arguments[next] : nil
+                    }
+                    .map { ($0 as NSString).lastPathComponent }
             let auth: AuthMethod =
                 seededKey
                 .flatMap { try? KeychainReference(identifier: $0) }
@@ -326,10 +396,9 @@ final class AppWiring {
             let record = HostRecord(
                 id: UUID(uuidString: "0BDEBE00-0000-4000-8000-00000DEBEB00") ?? UUID(),
                 nickname: "Debug daemon",
-                hostname: sshTarget.flatMap { $0.split(separator: "@").last.map(String.init) } ?? "127.0.0.1",
-                username: sshTarget.flatMap {
-                    $0.contains("@") ? String($0.split(separator: "@")[0]) : nil
-                } ?? "debug",
+                hostname: sshTarget?.hostname ?? "127.0.0.1",
+                port: sshTarget?.port ?? 22,
+                username: sshTarget?.username ?? "debug",
                 auth: auth
             )
             model.hostStore.upsert(record)
@@ -370,6 +439,15 @@ final class AppWiring {
                 if !hostAPI.isPaired || pairedPort != currentPort {
                     try await hostAPI.pair(pairingCode: code, deviceName: "uitest")
                     UserDefaults.standard.set(currentPort, forKey: pairedPortKey)
+                }
+
+                // With an SSH target the whole path is real, so walk the same door a user walks: pairing alone
+                // leaves `structuredBackendReady` false, because the model refuses to list sessions the user
+                // cannot type into until the terminal is connected, and nothing else in the app presses Connect
+                // for them. Without this call the sessions list stays empty forever and the composer, which is
+                // the entire point of the live harness, is unreachable.
+                if sshTarget != nil {
+                    await model.connectSelectedHost()
                 }
             } catch {
                 // Deliberately not fatal. The test asserts on what the screen shows, and a failure here surfaces
@@ -519,6 +597,18 @@ extension TransportError {
         }
 
         static func seedDebugKeyIfRequested(into keychain: KeychainStore) {
+            let environment = ProcessInfo.processInfo.environment
+            if let encoded = environment["OPENPAW_DEBUG_SEED_KEY_BASE64"], !encoded.isEmpty {
+                guard let data = Data(base64Encoded: encoded), !data.isEmpty else {
+                    assertionFailure("debug key seed data was not valid base64")
+                    return
+                }
+                let identifier = environment["OPENPAW_DEBUG_SEED_KEY_IDENTIFIER"]
+                    .flatMap { $0.isEmpty ? nil : $0 } ?? "openpaw-ui-test-key"
+                storeDebugKey(data, identifier: identifier, into: keychain)
+                return
+            }
+
             let arguments = ProcessInfo.processInfo.arguments
             guard let flag = arguments.firstIndex(of: "-openpaw-debug-seed-key"),
                 arguments.index(after: flag) < arguments.endIndex
@@ -530,6 +620,10 @@ extension TransportError {
                 return
             }
             let identifier = (path as NSString).lastPathComponent
+            storeDebugKey(data, identifier: identifier, into: keychain)
+        }
+
+        private static func storeDebugKey(_ data: Data, identifier: String, into keychain: KeychainStore) {
             do {
                 let reference = try KeychainReference(identifier: identifier)
                 try keychain.store(secret: data, for: reference, requireBiometry: false)

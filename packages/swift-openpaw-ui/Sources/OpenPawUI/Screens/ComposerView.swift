@@ -202,7 +202,11 @@ public struct ComposerView: View {
 
     @State private var localeID: String
     @State private var dictationTask: Task<Void, Never>?
+    @State private var dictationTranscription: DictationTranscription?
     @State private var dictationTurnID: VoiceTurnID?
+    @State private var microphoneHoldTask: Task<Void, Never>?
+    @State private var microphoneHoldActive = false
+    @State private var suppressNextMicrophoneButtonAction = false
     @State private var failure: String?
 
     @ScaledMetric(relativeTo: .body) private var lineHeight: CGFloat = 21
@@ -312,7 +316,11 @@ public struct ComposerView: View {
                     }
                 }
                 .accessibilityLabel("Prompt")
-                .accessibilityValue(activeDraftPresentation.accessibilityValue)
+                .accessibilityValue(
+                    voice.isActive
+                        ? activeDraftPresentation.accessibilityValue
+                        : (voice.draft.isEmpty ? "Empty draft" : "Draft \(voice.draft)")
+                )
                 .disabled(!controlPresentation.isDraftEditorEnabled)
             if voice.isActive {
                 Text(activeDraftPresentation.partialPreview)
@@ -451,7 +459,7 @@ public struct ComposerView: View {
     /// Press and hold to talk. Holding is the right gesture for a walk-and-talk product: it cannot be left running
     /// by accident, and letting go is a decision, not a second aimed tap.
     private var microphone: some View {
-        Button(action: { voice.isActive ? stopDictation() : startDictation() }) {
+        Button(action: toggleDictationFromButton) {
             Image(systemName: voice.isActive ? "waveform" : "mic")
                 .imageScale(.medium)
                 .foregroundStyle(voice.isActive ? OpenPawTheme.warn : OpenPawTheme.textSecondary)
@@ -468,12 +476,13 @@ public struct ComposerView: View {
         )
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
-                .onChanged { _ in startDictation() }
-                .onEnded { _ in stopDictation() }
+                .onChanged { _ in beginPossibleMicrophoneHold() }
+                .onEnded { _ in endPossibleMicrophoneHold() }
         )
         .accessibilityLabel(controlPresentation.microphoneAccessibilityLabel)
+        .accessibilityValue(voice.isActive ? (voice.isEngineReady ? "Listening" : "Starting") : "")
         .accessibilityHint(controlPresentation.microphoneAccessibilityHint)
-        .accessibilityAction { voice.isActive ? stopDictation() : startDictation() }
+        .accessibilityAction { toggleDictation() }
         .keyboardShortcut("m", modifiers: [.command, .shift])
     }
 
@@ -627,10 +636,12 @@ public struct ComposerView: View {
         failure = nil
         let locale = Locale(identifier: localeID)
         let destination = voice.destination
+        let transcription = engine.transcribe(locale: locale, mode: destination.dictationMode)
         dictationTurnID = turnID
+        dictationTranscription = transcription
         dictationTask = Task {
             do {
-                for try await update in engine.transcribe(locale: locale, mode: destination.dictationMode) {
+                for try await update in transcription.updates {
                     guard dictationTurnID == turnID else { return }
                     voice.apply(update, turn: turnID)
                 }
@@ -644,27 +655,76 @@ public struct ComposerView: View {
         }
     }
 
+    /// A short tap toggles dictation for accessibility and one-handed use. A sustained press becomes push-to-talk.
+    ///
+    /// The old zero-distance drag started on touch-down and stopped on touch-up while the Button action toggled on
+    /// the same touch. Event ordering then made a tap on Stop run `stop`, followed by `start`, so the control stayed
+    /// on Stop forever. Delaying ownership of the gesture distinguishes an ordinary tap from an intentional hold,
+    /// and suppresses the Button action only after the hold has actually begun.
+    private func toggleDictationFromButton() {
+        guard !microphoneHoldActive, !suppressNextMicrophoneButtonAction else {
+            suppressNextMicrophoneButtonAction = false
+            return
+        }
+        toggleDictation()
+    }
+
+    private func toggleDictation() {
+        voice.isActive ? stopDictation() : startDictation()
+    }
+
+    private func beginPossibleMicrophoneHold() {
+        guard microphoneHoldTask == nil, !microphoneHoldActive else { return }
+        microphoneHoldTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            microphoneHoldTask = nil
+            microphoneHoldActive = true
+            startDictation()
+        }
+    }
+
+    private func endPossibleMicrophoneHold() {
+        microphoneHoldTask?.cancel()
+        microphoneHoldTask = nil
+        guard microphoneHoldActive else { return }
+        microphoneHoldActive = false
+        suppressNextMicrophoneButtonAction = true
+        stopDictation()
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(200))
+            suppressNextMicrophoneButtonAction = false
+        }
+    }
+
     private func stopDictation() {
         guard voice.isActive else { return }
         voice.stop()
         let task = dictationTask
         dictationTask = nil
+        let transcription = dictationTranscription
+        dictationTranscription = nil
+        let timeout: Duration = engine?.deliversFinalAfterStop == true ? .seconds(20) : .seconds(2)
         Task {
-            await engine?.stop()
-            try? await Task.sleep(for: .milliseconds(50))
-            task?.cancel()
+            await transcription?.stopAndWait(for: task, timeout: timeout)
         }
     }
 
     private func cancelDictation() {
+        microphoneHoldTask?.cancel()
+        microphoneHoldTask = nil
+        microphoneHoldActive = false
+        suppressNextMicrophoneButtonAction = false
         guard voice.isActive || dictationTask != nil else { return }
         voice.cancel()
         dictationTurnID = nil
         let task = dictationTask
         dictationTask = nil
+        let transcription = dictationTranscription
+        dictationTranscription = nil
+        task?.cancel()
         Task {
-            await engine?.stop()
-            task?.cancel()
+            await transcription?.stop()
         }
     }
 }

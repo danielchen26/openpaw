@@ -15,12 +15,11 @@ public final class PushToTalkController {
     /// What has been heard so far in this hold. Editable text goes to the screen that claims it on release.
     public private(set) var transcript = ""
     public private(set) var isUnavailable = false
-    /// The finger is up and a local model is still turning the recording into words.
+    /// The finger is up and a whole-utterance local model is still turning the recording into words.
     ///
-    /// Only ever true for an engine that does not stream. Apple's recogniser has already produced text by the time
-    /// the finger lifts, so it commits immediately and this stays false; a downloaded Qwen3 or Parakeet model does
-    /// the whole utterance at once after the microphone closes, and without a state for that the user would let go
-    /// and watch nothing happen for a second, which reads as a dropped sentence.
+    /// Streaming recognisers may also reconcile a final word after release, but that short drain keeps the normal
+    /// listening presentation. This visible state is reserved for downloaded Qwen3 or Parakeet models, which produce
+    /// their only answer after the microphone closes and may take long enough to need explicit feedback.
     public private(set) var isTranscribing = false
 
     /// How long the wait for a non-streaming model's answer may last before the utterance is abandoned.
@@ -52,6 +51,8 @@ public final class PushToTalkController {
     private var locale: Locale = .current
     private var mode: DictationMode = .composer
     private var listenTask: Task<Void, Never>?
+    private var transcription: DictationTranscription?
+    private var transcriptionGeneration = 0
     private var armTask: Task<Void, Never>?
     /// The wait for a non-streaming model's answer after the microphone closed.
     private var finalizeTask: Task<Void, Never>?
@@ -87,17 +88,25 @@ public final class PushToTalkController {
         finalizeTask?.cancel()
         finalizeTask = nil
         isTranscribing = false
+        let previousTranscription = transcription
+        let previousListening = listenTask
+        previousListening?.cancel()
+        Task { await previousTranscription?.stop() }
         transcript = ""
-        listenTask?.cancel()
+        transcriptionGeneration += 1
+        let generation = transcriptionGeneration
+        let transcription = engine.transcribe(locale: locale, mode: mode)
+        self.transcription = transcription
         listenTask = Task { [weak self] in
             guard let self else { return }
             do {
-                for try await update in engine.transcribe(locale: locale, mode: mode) {
+                for try await update in transcription.updates {
                     guard !Task.isCancelled else { return }
+                    guard self.transcriptionGeneration == generation else { return }
                     self.transcript = update.text
                 }
             } catch is CancellationError {
-                // Releasing the finger cancels the stream. That is the normal end of every utterance.
+                // Discarding or replacing a turn cancels its consumer. That is a normal lifecycle end.
             } catch {
                 self.transcript = ""
             }
@@ -112,7 +121,6 @@ public final class PushToTalkController {
     /// The finger came up. Whether anything is delivered depends on how long the microphone was actually open.
     public func touchEnded() {
         let release = state.touchEnded(at: clock.now)
-        let heard = transcript
         switch release {
         case .nothingToDo:
             stopEngine()
@@ -121,51 +129,34 @@ public final class PushToTalkController {
             stopEngine()
             transcript = ""
         case .commit:
-            // A whole-utterance model has produced nothing yet: its words exist only after the microphone closes,
-            // so the commit waits for the stream to finish rather than delivering the empty string it has now.
-            if engine?.deliversFinalAfterStop == true {
-                finalizeAfterStop()
-            } else {
-                stopEngine()
-                deliver(heard)
-                transcript = ""
-            }
+            // Even a streaming recogniser may reconcile its last or only word after the microphone closes. Draining
+            // the owned stream avoids turning a short utterance into an empty commit while still bounding a wedged
+            // recogniser below.
+            finalizeAfterStop()
         }
     }
 
-    /// Closes the microphone and waits for the model's one answer, then delivers it.
+    /// Closes the microphone and waits for the stream's final answer, then delivers it.
     ///
     /// The listening task is left running on purpose — it is the thing that will receive the final update — and is
     /// only torn down once the answer arrives, the engine gives up, or the timeout fires.
     private func finalizeAfterStop() {
-        isTranscribing = true
+        isTranscribing = engine?.deliversFinalAfterStop == true
         let listening = listenTask
-        let engine = engine
+        let transcription = transcription
+        let generation = transcriptionGeneration
+        let timeout: Duration = engine?.deliversFinalAfterStop == true ? Self.finalizeTimeout : .seconds(2)
         armTask?.cancel()
         armTask = nil
         finalizeTask?.cancel()
         finalizeTask = Task { [weak self] in
-            await engine?.stop()
-            // The stream ends when the engine emits its final text; `listenTask` has been writing each update into
-            // `transcript`, so awaiting its completion is how the last one is picked up.
-            // Whichever finishes first wins: the model's answer, or the timeout that stops a wedged model from
-            // leaving the UI transcribing forever. Either way whatever text exists is delivered below.
-            _ = try? await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await listening?.value }
-                group.addTask {
-                    try await Task.sleep(for: PushToTalkController.finalizeTimeout)
-                    throw CancellationError()
-                }
-                defer { group.cancelAll() }
-                return try await group.next()
-            }
-            guard let self, !Task.isCancelled else { return }
-            listening?.cancel()
+            await transcription?.stopAndWait(for: listening, timeout: timeout)
+            guard let self, !Task.isCancelled, self.transcriptionGeneration == generation else { return }
             self.listenTask = nil
+            self.transcription = nil
             self.isTranscribing = false
-            // `waited == nil` means the timeout won. Whatever partial text exists is still delivered: a model that
-            // answered slowly and a model that hung look the same from here, and throwing away words the user said
-            // is the worse of the two mistakes.
+            // On timeout the consumer is cancelled, but whatever partial text already arrived is still delivered: a
+            // slow recogniser and a wedged one look the same here, and throwing away heard words is the worse error.
             self.deliver(self.transcript)
             self.transcript = ""
         }
@@ -202,13 +193,12 @@ public final class PushToTalkController {
         armTask = nil
         let task = listenTask
         listenTask = nil
-        let engine = engine
+        let transcription = transcription
+        self.transcription = nil
+        transcriptionGeneration += 1
+        task?.cancel()
         Task {
-            await engine?.stop()
-            // The engine emits a final result after `stop`, so the stream is given a moment to deliver it before
-            // being torn down. Cancelling immediately loses the last words of every utterance.
-            try? await Task.sleep(for: .milliseconds(50))
-            task?.cancel()
+            await transcription?.stop()
         }
     }
 }

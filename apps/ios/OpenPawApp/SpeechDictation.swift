@@ -7,9 +7,8 @@ import Speech
 ///
 /// Push-to-talk rather than always-listening is a privacy decision, not a UI one: the audio graph only exists
 /// between the moment the user's finger lands on the button and the moment it lifts, so there is no state in which
-/// this app is holding a live microphone tap that the user did not ask for. `stop()` tears the graph down rather
-/// than pausing it, which is why it is `async` — the teardown is ordered and has to finish before the audio session
-/// is handed back to whatever was playing.
+/// this app is holding a live microphone tap that the user did not ask for. Stopping the returned transcription
+/// tears that turn's graph down rather than pausing it, and cannot stop a newer turn that started meanwhile.
 final class SpeechDictation: DictationEngine {
 
     /// The locales the product treats as first class. Both are real defaults for this product's users, and neither is
@@ -48,30 +47,29 @@ final class SpeechDictation: DictationEngine {
         SFSpeechRecognizer(locale: locale)?.supportsOnDeviceRecognition ?? false
     }
 
-    func transcribe(locale: Locale, mode: DictationMode) -> AsyncThrowingStream<DictationUpdate, any Error> {
-        AsyncThrowingStream { continuation in
-            let session = session
-            let task = Task<Int?, Never> {
-                do {
-                    let turn = await session.beginTurn()
-                    return try await session.start(turn: turn, locale: locale, mode: mode, continuation: continuation)
-                } catch {
-                    continuation.finish(throwing: error)
-                    return nil
-                }
-            }
-            continuation.onTermination = { _ in
-                task.cancel()
-                Task {
-                    guard let turn = await task.value else { return }
-                    await session.stop(turn: turn)
-                }
+    func transcribe(locale: Locale, mode: DictationMode) -> DictationTranscription {
+        let pair = AsyncThrowingStream<DictationUpdate, any Error>.makeStream()
+        let session = session
+        let task = Task<Int?, Never> {
+            do {
+                let turn = await session.beginTurn()
+                return try await session.start(
+                    turn: turn, locale: locale, mode: mode, continuation: pair.continuation)
+            } catch {
+                pair.continuation.finish(throwing: error)
+                return nil
             }
         }
-    }
-
-    func stop() async {
-        await session.stop()
+        let stop: @Sendable () async -> Void = {
+            task.cancel()
+            guard let turn = await task.value else { return }
+            await session.stop(turn: turn)
+        }
+        pair.continuation.onTermination = { _ in
+            task.cancel()
+            Task { await stop() }
+        }
+        return DictationTranscription(updates: pair.stream, stop: stop)
     }
 }
 
@@ -211,12 +209,8 @@ private actor DictationSession {
             }
             Task { await self.deliver(update: update, error: error, turn: turn, continuation: continuation) }
         }
+        continuation.yield(DictationUpdate(text: "", isFinal: false, isReady: true))
         return turn
-    }
-
-    func stop() async {
-        guard let activeTurn else { return }
-        await stop(turn: activeTurn)
     }
 
     func stop(turn: Int) async {

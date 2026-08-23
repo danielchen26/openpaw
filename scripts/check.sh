@@ -24,6 +24,32 @@ in_dir() {
   (cd "$ROOT/$dir" && "$@")
 }
 
+latest_ios_simulator() {
+  xcrun simctl list devices available -j | python3 -c '
+import json
+import re
+import sys
+
+candidates = []
+for runtime, devices in json.load(sys.stdin)["devices"].items():
+    match = re.search(r"\.iOS-(\d+)-(\d+)(?:-(\d+))?$", runtime)
+    if match is None:
+        continue
+    version = tuple(int(part or 0) for part in match.groups())
+    for device in devices:
+        if not device.get("isAvailable"):
+            continue
+        candidates.append((
+            version,
+            device.get("state") == "Booted",
+            "iPhone" in device.get("name", ""),
+            device["udid"],
+        ))
+
+print(max(candidates)[-1] if candidates else "")
+'
+}
+
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/opaw-check}
 
 step "host · fmt"            in_dir host cargo fmt --all --check
@@ -64,8 +90,7 @@ app_test_step() {
     return 0
   fi
   local destination
-  destination=$(xcrun simctl list devices available -j \
-    | python3 -c 'import json,sys; ds=[d for v in json.load(sys.stdin)["devices"].values() for d in v if d.get("isAvailable")]; print(ds[0]["udid"] if ds else "")')
+  destination=$(latest_ios_simulator)
   if [ -z "$destination" ]; then
     printf '   no available iOS Simulator; skipping the app-hosted tests.\n'
     return 0
@@ -90,8 +115,7 @@ ui_test_step() {
     return 0
   fi
   local destination
-  destination=$(xcrun simctl list devices available -j \
-    | python3 -c 'import json,sys; ds=[d for v in json.load(sys.stdin)["devices"].values() for d in v if d.get("isAvailable")]; print(ds[0]["udid"] if ds else "")')
+  destination=$(latest_ios_simulator)
   if [ -z "$destination" ]; then
     printf '   no available iOS Simulator; skipping the dictation UI test.\n'
     return 0

@@ -40,17 +40,43 @@ final class DictationEngineSettingsUITests: XCTestCase {
         return (port, code)
     }
 
-    private func launchedApp() -> XCUIApplication {
+    private func launchedApp(forceAppleTerminalDictation: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         // Must be a plist literal: the argument domain parses `-key NO` as the string "NO", which the gate refuses.
         app.launchArguments = ["-openpaw.settings.biometricGate", "<false/>"]
+        if forceAppleTerminalDictation {
+            // A simulator cannot run the local models, so the true audio-input test uses Apple's real recogniser.
+            // Force every safety-relevant input rather than inheriting whatever a previous manual run left behind:
+            // Chinese locale, Apple engine, and words landing in a terminal draft rather than an agent prompt.
+            app.launchArguments += [
+                "-openpaw.settings.dictationEngine", "apple",
+                "-openpaw.settings.dictationLocale", "zh-CN",
+                "-openpaw.settings.dictationMode", "terminal",
+            ]
+        }
         let environment = ProcessInfo.processInfo.environment
         if let sshHost = environment["OPENPAW_UITEST_SSH_HOST"], !sshHost.isEmpty {
             // The app only marks the structured backend ready once the terminal connects, so reaching the
             // composer needs a host this machine can actually SSH into. Supplied by scripts/dictation-ui-live.py.
             app.launchArguments += ["-openpaw-debug-ssh-host", sshHost]
             if let key = environment["OPENPAW_UITEST_SSH_KEY"], !key.isEmpty {
-                app.launchArguments += ["-openpaw-debug-seed-key", key]
+                // The UI test runner can read a host path, but the sandboxed app cannot. Passing that path through
+                // used to work only while a stale simulator container happened to retain access; after a clean boot
+                // the app trapped in its debug seeder before drawing a frame. Read the disposable test key here and
+                // hand the bytes to the DEBUG+simulator-only launch hook instead.
+                let url = URL(fileURLWithPath: key)
+                do {
+                    let data = try Data(contentsOf: url)
+                    guard !data.isEmpty else {
+                        XCTFail("the live UI test SSH key is empty: \(url.path)")
+                        return app
+                    }
+                    app.launchEnvironment["OPENPAW_DEBUG_SEED_KEY_BASE64"] = data.base64EncodedString()
+                    app.launchEnvironment["OPENPAW_DEBUG_SEED_KEY_IDENTIFIER"] = url.lastPathComponent
+                } catch {
+                    XCTFail("the live UI test could not read SSH key \(url.path): \(error.localizedDescription)")
+                    return app
+                }
             }
         }
         if let live = liveDaemon {
@@ -62,6 +88,14 @@ final class DictationEngineSettingsUITests: XCTestCase {
             ]
         }
         app.launch()
+        // First contact with a host this simulator has never seen raises the host-key sheet, and an unanswered
+        // sheet does not merely block the terminal: it sits over every screen, so even the picker tests fail on
+        // "no recogniser picker" while the real problem is an unacknowledged fingerprint. Same handling as
+        // ConnectFlowUITests and DictationFlowUITests.
+        if sshHost != nil {
+            let trust = app.buttons["Trust this host key and continue connecting"]
+            if trust.waitForExistence(timeout: 10) { trust.tap() }
+        }
         return app
     }
 
@@ -147,8 +181,20 @@ final class DictationEngineSettingsUITests: XCTestCase {
     private func settingsShowingRecogniser(_ app: XCUIApplication) -> XCUIElement {
         clearTunnelAlerts(app)
         app.buttons["Settings"].firstMatch.tap()
-        XCTAssertTrue(pageScrollView(app).waitForExistence(timeout: 10), "Settings never rendered")
-        let picker = recogniserPicker(in: app)
+        var picker = recogniserPicker(in: app)
+        if !picker.waitForExistence(timeout: 10) {
+            // The tap can be swallowed whole when it lands during the host-key sheet's dismissal animation, which
+            // is exactly when a live-daemon launch arrives here. The screen is then still Home, which also has a
+            // scroll view, so waiting on a scroll view cannot tell the difference. One more tap, after the window
+            // has settled, is the difference between testing Settings and failing on a transition.
+            clearTunnelAlerts(app)
+            app.buttons["Settings"].firstMatch.tap()
+            picker = recogniserPicker(in: app)
+        }
+        XCTAssertTrue(
+            picker.waitForExistence(timeout: 10),
+            "Settings never rendered its recogniser control. On screen:\n\(app.debugDescription)"
+        )
         XCTAssertTrue(
             scroll(app, to: picker),
             // Reports hittability and frame explicitly, because "not found" and "found but covered by an alert"
@@ -175,6 +221,137 @@ final class DictationEngineSettingsUITests: XCTestCase {
         XCTAssertFalse(
             value.trimmingCharacters(in: .whitespaces).isEmpty,
             "the recogniser picker shows no selection, so the screen does not say which engine will run"
+        )
+    }
+
+    /// Real audio must travel through the simulator's microphone, Apple's recogniser, and the composer into an
+    /// editable terminal draft. No test double is involved: `dictation-ui-live.py --audio-file` waits until this
+    /// test reports that the audio graph is armed, then plays the file into the Mac input selected for Simulator.
+    /// Passing `--audio-device "BlackHole 2ch"` temporarily makes that path a lossless loopback and restores the
+    /// developer's original input and output when the run ends.
+    ///
+    /// A non-empty draft is the acceptance boundary here, not perfect command spelling. Apple's weakness on mixed
+    /// Chinese and English is measured separately by `tools/dictation-cer`; this test answers the more basic product
+    /// question: can a person speak, see words appear, stop listening, and edit before anything executes?
+    func testRealAppleSpeechAudioReachesAnEditableTerminalDraft() throws {
+        #if !targetEnvironment(simulator)
+            throw XCTSkip("the simulator audio bridge is what this test verifies")
+        #endif
+
+        guard liveDaemon != nil, sshHost != nil else {
+            throw XCTSkip("a real session needs dictation-ui-live.py with --ssh-host and --ssh-key")
+        }
+        let environment = ProcessInfo.processInfo.environment
+        guard let readyPath = environment["OPENPAW_UITEST_AUDIO_READY"],
+            let donePath = environment["OPENPAW_UITEST_AUDIO_DONE"],
+            let transcriptPath = environment["OPENPAW_UITEST_AUDIO_TRANSCRIPT"]
+        else {
+            throw XCTSkip("run dictation-ui-live.py with --audio-file to feed real microphone input")
+        }
+        for path in [readyPath, donePath, transcriptPath] { try? FileManager.default.removeItem(atPath: path) }
+
+        let app = launchedApp(forceAppleTerminalDictation: true)
+        let chatTab = app.buttons["Chat"].firstMatch
+        XCTAssertTrue(chatTab.waitForExistence(timeout: 15), "the Chat tab never appeared")
+        clearAlertIfPresent(app)
+        chatTab.tap()
+
+        let sessionRow = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS 'Run the unit tests, then clean the build directory.'")
+        ).firstMatch
+        XCTAssertTrue(
+            sessionRow.waitForExistence(timeout: 10),
+            "the live fixture's agent session never appeared. On screen:\n\(app.debugDescription)"
+        )
+        sessionRow.tap()
+        // The fixture deliberately has no tmux discovery service, so entering its transcript can surface that
+        // limitation as a recoverable app alert. Leaving the alert up would make XCTest call the visible microphone
+        // "not hittable" even after the layout is correct, and would test the alert rather than voice input.
+        clearAlertIfPresent(app)
+
+        let start = app.buttons["Start dictation"]
+        XCTAssertTrue(
+            start.waitForExistence(timeout: 10),
+            "the real composer has no Start dictation control. On screen:\n\(app.debugDescription)"
+        )
+        let deckHandle = app.buttons["Hide controls"]
+        XCTAssertTrue(deckHandle.waitForExistence(timeout: 5), "the app-wide control deck never appeared")
+        XCTAssertTrue(
+            start.frame.maxY <= deckHandle.frame.minY,
+            "the composer microphone is underneath the app-wide control deck, so a person who taps voice opens "
+                + "another screen instead. Microphone: \(start.frame); deck begins at \(deckHandle.frame.minY)."
+        )
+        // Some simulator runtimes report a SwiftUI Button with a simultaneous zero-distance drag as not hittable even
+        // when its entire frame is visible. Tapping its centre is the stronger assertion here: if the deck still owns that
+        // point, the control will not become Stop below and the test fails on the actual user-visible behaviour.
+        func tapVisibleStartControl() {
+            if start.isHittable {
+                start.tap()
+            } else {
+                start.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            }
+        }
+        tapVisibleStartControl()
+
+        // A fresh runtime can ask for microphone and speech permission separately. Each dialog consumes the tap
+        // that opened it, so arm again after allowing until the control enters its starting state.
+        let stop = app.buttons["Stop dictation"]
+        for _ in 0..<3 where !stop.exists {
+            let allow = app.alerts.buttons.matching(
+                NSPredicate(format: "label CONTAINS[c] 'Allow' OR label CONTAINS[c] 'OK'")
+            ).firstMatch
+            if allow.waitForExistence(timeout: 5) { allow.tap() }
+            if start.waitForExistence(timeout: 3) { tapVisibleStartControl() }
+        }
+        XCTAssertTrue(
+            stop.waitForExistence(timeout: 15),
+            "Start dictation never became Stop dictation. On screen:\n"
+                + app.debugDescription
+        )
+
+        // Stop means the user asked to listen; it does not mean the asynchronous engine has installed its input tap.
+        // `Listening` is emitted only after `AVAudioEngine.start()` and the recognition task both exist.
+        let listening = NSPredicate(format: "value == 'Listening'")
+        let engineReady = XCTNSPredicateExpectation(predicate: listening, object: stop)
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [engineReady], timeout: 15), .completed,
+            "dictation never armed its real audio graph. Control value: \(String(describing: stop.value)). "
+                + "On screen:\n\(app.debugDescription)"
+        )
+        FileManager.default.createFile(atPath: readyPath, contents: Data("ready\n".utf8))
+        let audioDeadline = Date().addingTimeInterval(45)
+        while !FileManager.default.fileExists(atPath: donePath), Date() < audioDeadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: donePath),
+            "the host never played the audio after the recogniser armed"
+        )
+
+        // Give SFSpeechRecognizer one final turn of its callback queue before asking it to finish the utterance.
+        Thread.sleep(forTimeInterval: 1)
+        stop.tap()
+        // Rebuild the query after the SwiftUI button changes from waveform/Stop back to mic/Start. XCUI can keep
+        // the pre-transition element bound to its old accessibility identity and report `exists == false` even
+        // while its own failure snapshot describes the same visible button as `label: 'Start dictation'`.
+        let restarted = app.buttons.matching(
+            NSPredicate(format: "label == 'Start dictation'")
+        ).firstMatch
+        XCTAssertTrue(restarted.waitForExistence(timeout: 15), "dictation never stopped")
+
+        let prompt = app.textViews["Prompt"]
+        XCTAssertTrue(prompt.waitForExistence(timeout: 15), "the terminal draft editor disappeared after speech")
+        let value = (prompt.value as? String) ?? ""
+        try? value.write(toFile: transcriptPath, atomically: true, encoding: .utf8)
+        XCTAssertTrue(
+            value.contains("Draft "),
+            "real audio produced no editable draft. Prompt value: \(value). On screen:\n\(app.debugDescription)"
+        )
+        XCTAssertTrue(prompt.isEnabled, "the dictated terminal draft is present but cannot be edited")
+        let execute = app.buttons["Execute the terminal draft"]
+        XCTAssertTrue(
+            execute.exists && execute.isEnabled,
+            "the dictated terminal draft has no enabled explicit execute action. On screen:\n\(app.debugDescription)"
         )
     }
 
@@ -265,6 +442,17 @@ final class DictationEngineSettingsUITests: XCTestCase {
         clearAlertIfPresent(app)
         chatTab.tap()
 
+        // The Chat tab lands on the sessions *list*; the composer, and with it the microphone, only exists inside
+        // one session's transcript. This must be the agent row from `smoke.py`'s checked-in fixture. Its complete
+        // accessibility label starts with a dynamic state ("waiting for you", "idle", …), so the stable title is
+        // the contract to query. "Attach to …" looks plausible but is a terminal action: tapping it navigates to
+        // the terminal and leaves no composer on screen, so the test would fail before approaching voice input.
+        clearAlertIfPresent(app)
+        let sessionRow = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS 'Run the unit tests, then clean the build directory.'")
+        ).firstMatch
+        if sessionRow.waitForExistence(timeout: 10) { sessionRow.tap() }
+
         // Press the microphone control itself, not a coordinate on the terminal. This test used to press the text
         // view at (0.5, 0.4) and claim in its own name to be holding dictation; nothing there is wired to
         // `startDictation()`, so the crash path was never entered and the test would have passed with the engine
@@ -272,8 +460,13 @@ final class DictationEngineSettingsUITests: XCTestCase {
         // `DragGesture(minimumDistance: 0)`, so a press on it is what actually starts a local engine.
         clearAlertIfPresent(app)
 
-        let microphone = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS[c] 'dictation'")).firstMatch
+        // Exactly the composer's label, never CONTAINS "dictation". The loose match found the session list row
+        // "Attach to ... Prove local dictation actually beats Apple ..." first, because the fixture session's
+        // *title* contains the word, pressed that instead, and the test went green having never touched the
+        // microphone. Before the hold the composer names this control exactly "Start dictation". Querying that
+        // label directly also makes XCTest print `Press "Start dictation" Button` in its activity log, so a future
+        // reviewer can prove which control was pressed without trusting this test's variable name.
+        let microphone = app.buttons["Start dictation"]
         let reachedTheMicrophone = microphone.waitForExistence(timeout: 10)
 
         // The app must survive the navigation itself, session or no session. Selecting a local engine touches the
@@ -324,13 +517,12 @@ final class DictationEngineSettingsUITests: XCTestCase {
             app.state, .runningForeground,
             "holding dictation with a local model selected killed the app"
         )
-        // Still answering, not merely still running. A process can survive an abort on a background thread and
-        // leave a frozen screen, which to the user is the same thing. Checked against the microphone the test just
-        // pressed, since on Chat the composer is still on screen. (On the terminal screen this had to be "Escape"
-        // instead: there the tab bar is replaced by the key bar, so waiting for a tab fails on a healthy app.)
+        // Still answering, not merely still running. Dictation stages editable text; it must not navigate to the
+        // terminal until the person explicitly taps Execute. Requiring this same control therefore catches both a
+        // frozen process and an accidental voice-to-execution path.
         XCTAssertTrue(
             microphone.waitForExistence(timeout: 10),
-            "the app is running but no longer draws the composer. On screen:\n\(app.debugDescription)"
+            "the app is running but the composer disappeared after dictation. On screen:\n\(app.debugDescription)"
         )
         XCTAssertEqual(
             app.state, .runningForeground,

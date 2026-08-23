@@ -98,11 +98,8 @@ public struct TerminalScreenView: View {
     @State private var pinchBase: CGFloat?
     @State private var voice = VoiceComposition(destination: .terminal)
     @State private var dictationTask: Task<Void, Never>?
+    @State private var dictationTranscription: DictationTranscription?
     @State private var dictationTurnID: VoiceTurnID?
-
-    #if os(iOS)
-        @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    #endif
 
     public init(
         model: OpenPawModel,
@@ -120,20 +117,8 @@ public struct TerminalScreenView: View {
         self.onFontSizeChange = onFontSizeChange
     }
 
-    /// True only where a size class exists and reports compact.
-    private var isCompactSizeClass: Bool {
-        #if os(iOS)
-            horizontalSizeClass == .compact
-        #else
-            false
-        #endif
-    }
-
     public var body: some View {
-        // Measured, not inferred: the key bar's row count follows the room it actually has. A size class alone
-        // reports regular for every macOS window, which would put a two-row bar in a phone-width frame.
         GeometryReader { proxy in
-            let width = RootWidth.resolve(width: proxy.size.width, isCompactSizeClass: isCompactSizeClass)
             VStack(spacing: 0) {
                 terminal
                 footer
@@ -474,10 +459,12 @@ public struct TerminalScreenView: View {
         let mode = VoiceDestination.terminal.dictationMode
         let locale = settings.dictationLocale
         let turnID = voice.start()
+        let transcription = engine.transcribe(locale: locale, mode: mode)
         dictationTurnID = turnID
+        dictationTranscription = transcription
         dictationTask = Task {
             do {
-                for try await update in engine.transcribe(locale: locale, mode: mode) {
+                for try await update in transcription.updates {
                     guard dictationTurnID == turnID else { return }
                     voice.apply(update, turn: turnID)
                 }
@@ -497,22 +484,24 @@ public struct TerminalScreenView: View {
         voice.stop()
         let task = dictationTask
         dictationTask = nil
+        let transcription = dictationTranscription
+        dictationTranscription = nil
+        let timeout: Duration = engine?.deliversFinalAfterStop == true ? .seconds(20) : .seconds(2)
         Task {
-            await engine?.stop()
-            try? await Task.sleep(for: .milliseconds(50))
-            task?.cancel()
+            await transcription?.stopAndWait(for: task, timeout: timeout)
         }
     }
 
     private func cancelDictation() {
-        let engine = model.dictation
         voice.cancel()
         dictationTurnID = nil
         let task = dictationTask
         dictationTask = nil
+        let transcription = dictationTranscription
+        dictationTranscription = nil
+        task?.cancel()
         Task {
-            await engine?.stop()
-            task?.cancel()
+            await transcription?.stop()
         }
     }
 }

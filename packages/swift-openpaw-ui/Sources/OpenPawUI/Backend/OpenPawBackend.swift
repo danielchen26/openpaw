@@ -51,12 +51,60 @@ public protocol TerminalBackend: Sendable {
     func run(command: String) async throws -> String
 }
 
+/// One owned recognition turn.
+///
+/// Stopping belongs to the stream that was started, not to whichever stream happens to be active later. A fast
+/// stop-then-start can otherwise let an asynchronous stop from the old gesture tear down the new microphone turn.
+public struct DictationTranscription: Sendable {
+    public let updates: AsyncThrowingStream<DictationUpdate, any Error>
+    private let stopAction: @Sendable () async -> Void
+
+    public init(
+        updates: AsyncThrowingStream<DictationUpdate, any Error>,
+        stop: @escaping @Sendable () async -> Void
+    ) {
+        self.updates = updates
+        self.stopAction = stop
+    }
+
+    public func stop() async {
+        await stopAction()
+    }
+
+    /// Closes this turn, then lets its consumer drain the final update. The timeout is a dead-engine guard, not a
+    /// delay: a healthy stream returns as soon as its final result or error arrives.
+    public func stopAndWait(for consumer: Task<Void, Never>?, timeout: Duration) async {
+        let completion = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let stopTask = Task {
+            await stop()
+            await consumer?.value
+            completion.continuation.yield()
+        }
+        let timeoutTask = Task {
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            consumer?.cancel()
+            completion.continuation.yield()
+        }
+        defer {
+            consumer?.cancel()
+            stopTask.cancel()
+            timeoutTask.cancel()
+            completion.continuation.finish()
+        }
+        var iterator = completion.stream.makeAsyncIterator()
+        _ = await iterator.next()
+    }
+}
+
 /// Speech-to-text, injected so `OpenPawUI` stays free of `Speech.framework` and stays buildable on any platform.
 public protocol DictationEngine: Sendable {
     var isAvailable: Bool { get }
     /// Emits progressively refined transcripts until the returned stream finishes.
-    func transcribe(locale: Locale, mode: DictationMode) -> AsyncThrowingStream<DictationUpdate, any Error>
-    func stop() async
+    func transcribe(locale: Locale, mode: DictationMode) -> DictationTranscription
     /// True when the words only arrive after `stop()`, because the engine transcribes a whole recording rather
     /// than a live stream.
     ///
@@ -81,8 +129,15 @@ public enum DictationMode: String, Sendable, Codable, CaseIterable {
 public struct DictationUpdate: Sendable, Equatable {
     public let text: String
     public let isFinal: Bool
-    public init(text: String, isFinal: Bool) {
+    /// True only after the engine has installed its input tap and started its audio graph.
+    ///
+    /// This is separate from an empty partial transcript: silence is valid recognition input, while readiness is a
+    /// lifecycle event consumers can use to avoid playing test audio or announcing “Listening” too early.
+    public let isReady: Bool
+
+    public init(text: String, isFinal: Bool, isReady: Bool = false) {
         self.text = text
         self.isFinal = isFinal
+        self.isReady = isReady
     }
 }

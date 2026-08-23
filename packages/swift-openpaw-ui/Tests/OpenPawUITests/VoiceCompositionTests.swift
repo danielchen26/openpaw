@@ -6,6 +6,20 @@ import Testing
 
 @Suite("Voice composition")
 struct VoiceCompositionTests {
+    @Test func engineReadinessDoesNotPretendEmptyTextIsRecognition() {
+        var voice = VoiceComposition(destination: .terminal, draft: "typed")
+        let turn = voice.start()
+
+        voice.apply(DictationUpdate(text: "", isFinal: false, isReady: true), turn: turn)
+
+        #expect(voice.isEngineReady)
+        #expect(voice.draft == "typed")
+        #expect(voice.partialTranscript == "")
+
+        voice.stop()
+        #expect(!voice.isEngineReady)
+    }
+
     @Test func finalTerminalRecognitionStagesDraftWithoutExecution() {
         var voice = VoiceComposition(destination: .terminal)
         voice.start()
@@ -269,48 +283,6 @@ struct VoiceCompositionTests {
         #expect(inactive.isDraftEditorEnabled)
     }
 
-    @Test func runtimeLifecycleAllowsOwningLateFinalButRejectsOldTerminationAfterRestart() {
-        var lifecycle = DictationRuntimeLifecycle()
-        let old = lifecycle.start()
-        lifecycle.stop()
-
-        #expect(lifecycle.accepts(updateFor: old, isFinal: true))
-
-        let new = lifecycle.start()
-        #expect(!lifecycle.accepts(updateFor: old, isFinal: true))
-        #expect(!lifecycle.shouldStopEngine(forTerminationOf: old))
-        #expect(lifecycle.shouldStopEngine(forTerminationOf: new))
-    }
-
-    @Test func runtimeLifecycleIgnoresStaleStopAfterRapidRestart() {
-        var lifecycle = DictationRuntimeLifecycle()
-        let old = lifecycle.start()
-        let new = lifecycle.start()
-
-        let stoppedOld = lifecycle.stop(turn: old)
-        #expect(!stoppedOld)
-        #expect(lifecycle.accepts(updateFor: new, isFinal: false))
-        let stoppedNew = lifecycle.stop(turn: new)
-        #expect(stoppedNew)
-        #expect(lifecycle.accepts(updateFor: new, isFinal: true))
-    }
-
-    @Test func runtimeLifecycleReportsReplacedTurnSoRapidRestartStopsOldResourcesOnce() {
-        var lifecycle = DictationRuntimeLifecycle()
-        let old = lifecycle.start()
-        let replacement = lifecycle.prepareReplacementTurn()
-
-        #expect(replacement.replacedTurn == old)
-        let stoppedOld = lifecycle.stop(turn: old)
-        #expect(stoppedOld)
-        let stoppedOldAgain = lifecycle.stop(turn: old)
-        #expect(!stoppedOldAgain)
-        let activatedReplacement = lifecycle.activatePreparedTurn(replacement.newTurn)
-        #expect(activatedReplacement)
-        #expect(!lifecycle.shouldStopEngine(forTerminationOf: old))
-        #expect(lifecycle.shouldStopEngine(forTerminationOf: replacement.newTurn))
-    }
-
     @Test func microphoneControlIsKeyboardAndVoiceOverActionable() {
         let stopped = ComposerControlPresentation.make(destination: .agent, hasAttachments: false, hasDraft: false, isSending: false)
         #expect(stopped.microphoneKeyboardShortcut == "⌘⇧M")
@@ -389,11 +361,11 @@ struct VoiceCompositionTests {
 
     @Test func fakeEngineLifecycleCapturesModeAndStop() async {
         let engine = FakeDictationEngine()
-        _ = engine.transcribe(locale: Locale(identifier: "en-US"), mode: .terminal)
+        let transcription = engine.transcribe(locale: Locale(identifier: "en-US"), mode: .terminal)
         for _ in 0..<5 where await engine.requestedModes.isEmpty {
             await Task.yield()
         }
-        await engine.stop()
+        await transcription.stop()
 
         #expect(await engine.requestedModes == [.terminal])
         #expect(await engine.stopCount == 1)
@@ -476,12 +448,13 @@ private actor FakeDictationEngine: DictationEngine {
     private(set) var requestedModes: [DictationMode] = []
     private(set) var stopCount = 0
 
-    nonisolated func transcribe(locale: Locale, mode: DictationMode) -> AsyncThrowingStream<DictationUpdate, any Error> {
+    nonisolated func transcribe(locale: Locale, mode: DictationMode) -> DictationTranscription {
         Task { await record(mode) }
-        return AsyncThrowingStream { continuation in continuation.finish() }
+        let updates = AsyncThrowingStream<DictationUpdate, any Error> { continuation in continuation.finish() }
+        return DictationTranscription(updates: updates) { await self.recordStop() }
     }
 
-    func stop() async { stopCount += 1 }
+    private func recordStop() { stopCount += 1 }
 
     private func record(_ mode: DictationMode) { requestedModes.append(mode) }
 }
