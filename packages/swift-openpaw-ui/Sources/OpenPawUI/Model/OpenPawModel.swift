@@ -116,6 +116,12 @@ public final class OpenPawModel {
 
     public var repos: [RepoSummary] = []
     public var selectedRepo: String?
+    public private(set) var providerListState: ProviderListLoadingState = .idle
+    public private(set) var providers: [ProviderStatus] = []
+    public var selectedProvider: ProviderID?
+    public private(set) var providerAuthorizationState: ProviderAuthorizationFlowState = .idle
+    public private(set) var providerRepoPages: ProviderRepoPagesState = ProviderRepoPagesState()
+    public private(set) var repoImportState: RepoImportOperationState = .idle
 
     // MARK: - Diagnostics and errors
 
@@ -156,6 +162,10 @@ public final class OpenPawModel {
     /// from reattaching after the user has selected or connected host B.
     private var structuredConnectRequestID = 0
     private var structuredConnectOperation: Task<Void, any Error>?
+    private var providerOperationGeneration = 0
+    private var authorizationOperationGeneration = 0
+    private var providerRepoOperationGeneration = 0
+    private var repoImportOperationGeneration = 0
     private let reducer = TranscriptReducer()
 
     public init(
@@ -303,6 +313,189 @@ public final class OpenPawModel {
         } catch {
             guard selectedHostID == hostID, connectionGeneration == generation else { return }
             present(error, while: "loading host state")
+        }
+    }
+
+    public func refreshProviders() async {
+        guard let context = providerRequestContext(capability: "providers.read", activity: "loading providers") else { return }
+        providerOperationGeneration += 1
+        let operation = providerOperationGeneration
+        providerListState = .loading
+        do {
+            let loaded = try await context.backend.providers()
+            guard isCurrent(context.lease), providerOperationGeneration == operation else { return }
+            providers = loaded
+            if selectedProvider == nil { selectedProvider = loaded.first?.id }
+            providerListState = .loaded
+        } catch {
+            guard isCurrent(context.lease), providerOperationGeneration == operation else { return }
+            let presented = presentedError(error, while: "loading providers")
+            providerListState = .failed(presented)
+            lastError = presented
+        }
+    }
+
+    public func beginProviderAuthorization(_ provider: ProviderID) async {
+        guard let context = providerRequestContext(capability: "providers.manage", activity: "authorizing provider") else { return }
+        authorizationOperationGeneration += 1
+        let operation = authorizationOperationGeneration
+        selectedProvider = provider
+        providerAuthorizationState = .starting(provider: provider)
+        do {
+            let start = try await context.backend.beginProviderAuthorization(provider)
+            guard isCurrent(context.lease), authorizationOperationGeneration == operation else { return }
+            providerAuthorizationState = .awaitingUser(start)
+        } catch {
+            guard isCurrent(context.lease), authorizationOperationGeneration == operation else { return }
+            failAuthorization(provider: provider, authorizationID: nil, error: error)
+        }
+    }
+
+    public func pollProviderAuthorization() async {
+        guard case .awaitingUser(let start) = providerAuthorizationState else { return }
+        let provider = selectedProvider ?? .github
+        await pollProviderAuthorization(provider: provider, authorizationID: start.authorizationID)
+    }
+
+    public func pollProviderAuthorization(provider: ProviderID, authorizationID: String) async {
+        guard let context = providerRequestContext(capability: "providers.manage", activity: "checking provider authorization") else { return }
+        authorizationOperationGeneration += 1
+        let operation = authorizationOperationGeneration
+        providerAuthorizationState = .polling(ProviderAuthorizationStatus(authorizationID: authorizationID, state: .pending, provider: provider))
+        do {
+            let status = try await context.backend.providerAuthorizationStatus(provider: provider, authorizationID: authorizationID)
+            guard isCurrent(context.lease), authorizationOperationGeneration == operation else { return }
+            if status.state == .pending || status.state == .slowDown || status.state == .outage {
+                providerAuthorizationState = .polling(status)
+            } else {
+                providerAuthorizationState = .terminal(status)
+                if status.state == .authorized { await refreshProviders() }
+            }
+        } catch {
+            guard isCurrent(context.lease), authorizationOperationGeneration == operation else { return }
+            failAuthorization(provider: provider, authorizationID: authorizationID, error: error)
+        }
+    }
+
+    public func cancelProviderAuthorization() async {
+        let pair: (ProviderID, String)? = switch providerAuthorizationState {
+        case .awaitingUser(let start): (selectedProvider ?? .github, start.authorizationID)
+        case .polling(let status): (status.provider, status.authorizationID)
+        case .failed(let provider, let id, _): id.map { (provider, $0) }
+        default: nil
+        }
+        guard let (provider, authorizationID) = pair,
+              let context = providerRequestContext(capability: "providers.manage", activity: "cancelling provider authorization") else { return }
+        authorizationOperationGeneration += 1
+        let operation = authorizationOperationGeneration
+        providerAuthorizationState = .cancelling(authorizationID: authorizationID)
+        do {
+            let status = try await context.backend.cancelProviderAuthorization(provider: provider, authorizationID: authorizationID)
+            guard isCurrent(context.lease), authorizationOperationGeneration == operation else { return }
+            providerAuthorizationState = .terminal(status)
+        } catch {
+            guard isCurrent(context.lease), authorizationOperationGeneration == operation else { return }
+            failAuthorization(provider: provider, authorizationID: authorizationID, error: error)
+        }
+    }
+
+    public func revokeProvider(_ provider: ProviderID) async {
+        guard let context = providerRequestContext(capability: "providers.manage", activity: "revoking provider") else { return }
+        providerOperationGeneration += 1
+        let operation = providerOperationGeneration
+        do {
+            let status = try await context.backend.revokeProvider(provider)
+            guard isCurrent(context.lease), providerOperationGeneration == operation else { return }
+            providers.removeAll { $0.id == provider }
+            providers.append(status)
+        } catch {
+            guard isCurrent(context.lease), providerOperationGeneration == operation else { return }
+            present(error, while: "revoking provider")
+        }
+    }
+
+    public func loadProviderRepos(reset: Bool = false, cursor: String? = nil) async {
+        guard let provider = selectedProvider,
+              let context = providerRequestContext(capability: "providers.read", activity: "loading provider repositories") else { return }
+        providerRepoOperationGeneration += 1
+        let operation = providerRepoOperationGeneration
+        let requestCursor = reset ? nil : (cursor ?? providerRepoPages.nextCursor)
+        if reset || providerRepoPages.provider != provider { providerRepoPages = ProviderRepoPagesState(provider: provider) }
+        providerRepoPages.isLoading = true
+        providerRepoPages.error = nil
+        do {
+            let page = try await context.backend.providerRepos(provider, cursor: requestCursor)
+            guard isCurrent(context.lease), providerRepoOperationGeneration == operation else { return }
+            var merged = reset ? [] : providerRepoPages.repos
+            var seen = Set(merged.map(\.id))
+            for repo in page.repos where seen.insert(repo.id).inserted { merged.append(repo) }
+            providerRepoPages = ProviderRepoPagesState(provider: provider, repos: Array(merged.prefix(250)), nextCursor: page.nextCursor, isLoading: false)
+        } catch {
+            guard isCurrent(context.lease), providerRepoOperationGeneration == operation else { return }
+            let presented = presentedError(error, while: "loading provider repositories")
+            providerRepoPages.isLoading = false
+            providerRepoPages.error = presented
+            lastError = presented
+        }
+    }
+
+    public func startRepoImport(provider: ProviderID, repoID: String, requestedName: String? = nil) async {
+        guard let context = providerRequestContext(capability: "repos.manage", activity: "importing repository") else { return }
+        repoImportOperationGeneration += 1
+        let operation = repoImportOperationGeneration
+        repoImportState = .starting(provider: provider, repoID: repoID)
+        do {
+            let progress = try await context.backend.importRepo(try RepoImportRequest(provider: provider, repoID: repoID, requestedName: requestedName))
+            guard isCurrent(context.lease), repoImportOperationGeneration == operation else { return }
+            commitImportProgress(progress)
+        } catch {
+            guard isCurrent(context.lease), repoImportOperationGeneration == operation else { return }
+            failImport(importID: nil, error: error)
+        }
+    }
+
+    public func pollRepoImport(_ importID: String? = nil) async {
+        guard let id = importID ?? repoImportState.importID,
+              let context = providerRequestContext(capability: "repos.manage", activity: "checking repository import") else { return }
+        repoImportOperationGeneration += 1
+        let operation = repoImportOperationGeneration
+        do {
+            let progress = try await context.backend.repoImportProgress(id)
+            guard isCurrent(context.lease), repoImportOperationGeneration == operation else { return }
+            commitImportProgress(progress)
+        } catch {
+            guard isCurrent(context.lease), repoImportOperationGeneration == operation else { return }
+            failImport(importID: id, error: error)
+        }
+    }
+
+    public func cancelRepoImport(_ importID: String? = nil) async {
+        guard let id = importID ?? repoImportState.importID,
+              let context = providerRequestContext(capability: "repos.manage", activity: "cancelling repository import") else { return }
+        repoImportOperationGeneration += 1
+        let operation = repoImportOperationGeneration
+        repoImportState = .cancelling(importID: id)
+        do {
+            let progress = try await context.backend.cancelRepoImport(id)
+            guard isCurrent(context.lease), repoImportOperationGeneration == operation else { return }
+            commitImportProgress(progress)
+        } catch {
+            guard isCurrent(context.lease), repoImportOperationGeneration == operation else { return }
+            failImport(importID: id, error: error)
+        }
+    }
+
+    public func registerRepo(rootID: String, requestedName: String? = nil) async {
+        guard let context = providerRequestContext(capability: "repos.manage", activity: "registering repository") else { return }
+        repoImportOperationGeneration += 1
+        let operation = repoImportOperationGeneration
+        do {
+            let progress = try await context.backend.registerRepo(try RepoRegisterRequest(rootID: rootID, requestedName: requestedName))
+            guard isCurrent(context.lease), repoImportOperationGeneration == operation else { return }
+            commitImportProgress(progress)
+        } catch {
+            guard isCurrent(context.lease), repoImportOperationGeneration == operation else { return }
+            failImport(importID: nil, error: error)
         }
     }
 
@@ -1114,6 +1307,73 @@ public final class OpenPawModel {
         connection = .disconnected(reason: "Host selection changed")
     }
 
+    private struct ProviderRequestContext {
+        var backend: any OpenPawBackend
+        var lease: HostConnectionLease
+    }
+
+    private func providerRequestContext(capability: String, activity: String) -> ProviderRequestContext? {
+        guard canRefreshRemoteState, connection.isConnected, let backend, let hostID = selectedHostID else {
+            lastError = PresentedError(title: "Structured host features are unavailable", detail: "Reconnect the host before \(activity).", isRecoverable: true)
+            return nil
+        }
+        if let capabilityProvider = backend as? any PairedHostCapabilityProviding,
+           capabilityProvider.pairedCapabilityStatus(capability, hostID: hostID) == .denied {
+            lastError = PresentedError(title: "This device cannot do that", detail: "It is missing the \(capability) capability. Re-pair with the operator profile.", isRecoverable: true)
+            return nil
+        }
+        return ProviderRequestContext(
+            backend: backend,
+            lease: HostConnectionLease(hostID: hostID, connectionGeneration: connectionGeneration, hostSelectionToken: hostSelectionGeneration, requestID: connectionRequestID)
+        )
+    }
+
+    private func isCurrent(_ lease: HostConnectionLease) -> Bool {
+        selectedHostID == lease.hostID
+            && connectionGeneration == lease.connectionGeneration
+            && hostSelectionGeneration == lease.hostSelectionToken
+            && connectionRequestID == lease.requestID
+            && structuredBackendReady
+            && connection.isConnected
+    }
+
+    private func presentedError(_ error: any Error, while activity: String) -> PresentedError {
+        if let clientError = error as? HostClientError {
+            switch clientError {
+            case .forbidden(let capability):
+                return PresentedError(title: "This device cannot do that", detail: capability.map { "It is missing the \($0) capability. Re-pair with the operator profile." } ?? "Re-pair with the operator profile.", isRecoverable: true)
+            case .badRequest(let message):
+                return PresentedError(title: "The host rejected the request", detail: message, isRecoverable: true)
+            default:
+                break
+            }
+        }
+        present(error, while: activity)
+        return lastError ?? PresentedError(title: "Failed while \(activity)", detail: "Retry after reconnecting the host.", isRecoverable: true)
+    }
+
+    private func failAuthorization(provider: ProviderID, authorizationID: String?, error: any Error) {
+        let presented = presentedError(error, while: "authorizing provider")
+        providerAuthorizationState = .failed(provider: provider, authorizationID: authorizationID, error: presented)
+        lastError = presented
+    }
+
+    private func commitImportProgress(_ progress: RepoImportProgress) {
+        switch progress.state {
+        case .completed, .failed, .cancelled, .recoveryRequired:
+            repoImportState = .terminal(progress)
+            if progress.state == .completed { Task { await refresh() } }
+        default:
+            repoImportState = .progress(progress)
+        }
+    }
+
+    private func failImport(importID: String?, error: any Error) {
+        let presented = presentedError(error, while: "importing repository")
+        repoImportState = .failed(importID: importID, error: presented)
+        lastError = presented
+    }
+
     private func clearHostDerivedState() {
         health = nil
         sessions = []
@@ -1123,6 +1383,16 @@ public final class OpenPawModel {
         selectedRepo = nil
         transcripts = [:]
         acknowledgedDetails = []
+        providerOperationGeneration += 1
+        authorizationOperationGeneration += 1
+        providerRepoOperationGeneration += 1
+        repoImportOperationGeneration += 1
+        providers = []
+        selectedProvider = nil
+        providerListState = .idle
+        providerAuthorizationState = .idle
+        providerRepoPages = ProviderRepoPagesState()
+        repoImportState = .idle
     }
 
     private func presentStructuredBackendUnavailable(_ error: any Error) {
