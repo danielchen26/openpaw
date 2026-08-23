@@ -13,6 +13,7 @@
 //! Nothing here writes: there is no commit, no checkout, no fetch. The phone can
 //! look at a repository, never move it.
 
+mod import;
 mod patch;
 mod repo;
 mod status;
@@ -21,6 +22,10 @@ mod tree;
 use openpaw_files::{FileError, Roots};
 use time::OffsetDateTime;
 
+pub use import::{
+    CancellationToken, CloneBytePolicy, CloneRef, CloneRequest, HttpsRemoteUrl, LfsSmudgePolicy,
+    TrustedCloneDestination, clone_repo,
+};
 pub use openpaw_files::{Blob, BlobContent, EntryKind, TreeEntry};
 pub use patch::{ChangeKind, Diff, DiffLine, FileDiff, Hunk, LineKind};
 pub use repo::Repo;
@@ -68,6 +73,21 @@ pub enum GitError {
     /// git produced output this crate could not parse.
     #[error("could not parse git output: {0}")]
     Parse(String),
+    /// A remote URL failed the host-derived HTTPS-only import contract.
+    #[error("invalid HTTPS git remote URL")]
+    InvalidRemoteUrl,
+    /// A trusted-host destination failed filesystem boundary checks.
+    #[error("invalid clone destination: {0}")]
+    InvalidDestination(String),
+    /// The clone exceeded its configured timeout.
+    #[error("git clone timed out")]
+    Timeout,
+    /// The caller cancelled the clone.
+    #[error("git clone cancelled")]
+    Cancelled,
+    /// git emitted more output than the typed byte policy allows.
+    #[error("git output exceeded byte policy")]
+    OutputLimit,
 }
 
 /// Compact repository state for a list view.
