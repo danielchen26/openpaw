@@ -394,6 +394,12 @@ public final class OpenPawModel {
         do {
             let status = try await context.backend.providerAuthorizationStatus(provider: provider, authorizationID: authorizationID)
             guard isCurrent(context.lease), authorizationOperationGeneration == operation, activeAuthorizationProvider == provider, activeAuthorizationID == authorizationID else { return }
+            guard status.provider == provider, status.authorizationID == authorizationID else {
+                providerAuthorizationPollTask?.cancel()
+                providerAuthorizationPollTask = nil
+                failAuthorization(provider: provider, authorizationID: authorizationID, error: ProviderWorkflowOwnershipError())
+                return
+            }
             if !status.state.isTerminalForModel {
                 providerAuthorizationState = .polling(status)
             } else {
@@ -410,7 +416,7 @@ public final class OpenPawModel {
 
     public func cancelProviderAuthorization() async {
         let pair: (ProviderID, String)? = switch providerAuthorizationState {
-        case .awaitingUser(let start): (selectedProvider ?? .github, start.authorizationID)
+        case .awaitingUser(let start): activeAuthorizationProvider.map { ($0, start.authorizationID) }
         case .polling(let status): (status.provider, status.authorizationID)
         case .failed(let provider, let id, _): id.map { (provider, $0) }
         default: nil
@@ -424,7 +430,12 @@ public final class OpenPawModel {
         providerAuthorizationPollTask = nil
         do {
             let status = try await context.backend.cancelProviderAuthorization(provider: provider, authorizationID: authorizationID)
-            guard isCurrent(context.lease), authorizationOperationGeneration == operation else { return }
+            guard isCurrent(context.lease), authorizationOperationGeneration == operation,
+                  activeAuthorizationProvider == provider, activeAuthorizationID == authorizationID else { return }
+            guard status.provider == provider, status.authorizationID == authorizationID else {
+                failAuthorization(provider: provider, authorizationID: authorizationID, error: ProviderWorkflowOwnershipError())
+                return
+            }
             providerAuthorizationState = .terminal(status)
         } catch {
             guard isCurrent(context.lease), authorizationOperationGeneration == operation else { return }
@@ -450,13 +461,21 @@ public final class OpenPawModel {
             providerRepoPages = ProviderRepoPagesState()
         } catch {
             guard isCurrent(context.lease), providerOperationGeneration == operation else { return }
-            present(error, while: "revoking provider")
+            lastError = presentedError(error, while: "revoking provider")
         }
     }
 
     public func loadProviderRepos(reset: Bool = false, cursor: String? = nil) async {
         guard let provider = selectedProvider,
               let context = providerRequestContext(capability: "providers.read", activity: "loading provider repositories") else { return }
+        if let cursor, !reset,
+           (providerRepoPages.provider != provider || providerRepoPages.nextCursor != cursor) {
+            lastError = PresentedError(
+                title: "Repository page expired",
+                detail: "Reload repositories for the selected provider before requesting another page.",
+                isRecoverable: true)
+            return
+        }
         providerRepoOperationGeneration += 1
         let operation = providerRepoOperationGeneration
         let requestCursor = reset ? nil : (cursor ?? providerRepoPages.nextCursor)
@@ -500,11 +519,20 @@ public final class OpenPawModel {
     public func pollRepoImport(_ importID: String? = nil) async {
         guard let id = importID ?? repoImportState.importID,
               let context = providerRequestContext(capability: "repos.manage", activity: "checking repository import") else { return }
+        guard activeRepoImportID == id else {
+            failImport(importID: id, error: ProviderWorkflowOwnershipError())
+            return
+        }
         repoImportOperationGeneration += 1
         let operation = repoImportOperationGeneration
         do {
             let progress = try await context.backend.repoImportProgress(id)
-            guard isCurrent(context.lease), repoImportOperationGeneration == operation else { return }
+            guard isCurrent(context.lease), repoImportOperationGeneration == operation,
+                  activeRepoImportID == id else { return }
+            guard progress.id == id else {
+                failImport(importID: id, error: ProviderWorkflowOwnershipError())
+                return
+            }
             activeRepoImportID = progress.id
             activeRepoImportLease = context.lease
             commitImportProgress(progress)
@@ -518,6 +546,10 @@ public final class OpenPawModel {
     public func cancelRepoImport(_ importID: String? = nil) async {
         guard let id = importID ?? repoImportState.importID,
               let context = providerRequestContext(capability: "repos.manage", activity: "cancelling repository import") else { return }
+        guard activeRepoImportID == id else {
+            failImport(importID: id, error: ProviderWorkflowOwnershipError())
+            return
+        }
         repoImportOperationGeneration += 1
         let operation = repoImportOperationGeneration
         repoImportState = .cancelling(importID: id)
@@ -525,7 +557,12 @@ public final class OpenPawModel {
         repoImportPollTask = nil
         do {
             let progress = try await context.backend.cancelRepoImport(id)
-            guard isCurrent(context.lease), repoImportOperationGeneration == operation else { return }
+            guard isCurrent(context.lease), repoImportOperationGeneration == operation,
+                  activeRepoImportID == id else { return }
+            guard progress.id == id else {
+                failImport(importID: id, error: ProviderWorkflowOwnershipError())
+                return
+            }
             commitImportProgress(progress)
         } catch {
             guard isCurrent(context.lease), repoImportOperationGeneration == operation else { return }
@@ -1133,7 +1170,8 @@ public final class OpenPawModel {
         let requestID = connectionRequestID
         stopFollowing()
         cancelTailscaleDiscovery()
-        clearHostDerivedState()
+        let preservesActiveRepoImport = activeRepoImportID != nil && activeRepoImportLease?.hostID == host.id
+        clearHostDerivedState(preservingActiveRepoImport: preservesActiveRepoImport)
         structuredBackendReady = backend.map { !($0 is any StructuredBackendLifecycle) } ?? false
         stateTaskHostID = nil
         stateAttemptHasConnected = false
@@ -1164,6 +1202,7 @@ public final class OpenPawModel {
                 do {
                     guard try await connectStructuredBackend(lifecycle, hostID: targetHostID) else { return nil }
                     structuredBackendReady = true
+                    updateProviderCapabilityState()
                     guard connectionRequestID == requestID,
                           selectedHostID == targetHostID,
                           connection.isConnected,
@@ -1172,14 +1211,16 @@ public final class OpenPawModel {
                     startFollowing(session: selectedSessionID)
                 } catch {
                     structuredBackendReady = false
-                    clearHostDerivedState()
+                    clearHostDerivedState(preservingActiveRepoImport: preservesActiveRepoImport)
                     presentStructuredBackendUnavailable(error)
                 }
             } else {
                 structuredBackendReady = backend != nil
+                updateProviderCapabilityState()
                 await refresh()
                 startFollowing(session: selectedSessionID)
             }
+            if structuredBackendReady { resumeRepoImportPollingAfterReconnect() }
         } catch {
             structuredBackendReady = false
             present(error, while: "connecting to \(host.nickname)")
@@ -1293,7 +1334,8 @@ public final class OpenPawModel {
         connectionRequestID += 1
         stopFollowing()
         cancelTailscaleDiscovery()
-        clearHostDerivedState()
+        let preservesActiveRepoImport = activeRepoImportID != nil && activeRepoImportLease?.hostID == selectedHostID
+        clearHostDerivedState(preservingActiveRepoImport: preservesActiveRepoImport)
         stateTaskHostID = nil
         stateAttemptHasConnected = false
         resumeTerminalConnectAcknowledgement()
@@ -1495,7 +1537,7 @@ public final class OpenPawModel {
         lastError = presented
     }
 
-    private func clearHostDerivedState() {
+    private func clearHostDerivedState(preservingActiveRepoImport: Bool = false) {
         health = nil
         sessions = []
         selectedSessionID = nil
@@ -1516,8 +1558,10 @@ public final class OpenPawModel {
         repoImportRefreshTask = nil
         activeAuthorizationProvider = nil
         activeAuthorizationID = nil
-        activeRepoImportID = nil
-        activeRepoImportLease = nil
+        if !preservingActiveRepoImport {
+            activeRepoImportID = nil
+            activeRepoImportLease = nil
+        }
         providers = []
         selectedProvider = nil
         canListProviders = .unavailable
@@ -1526,7 +1570,7 @@ public final class OpenPawModel {
         providerListState = .idle
         providerAuthorizationState = .idle
         providerRepoPages = ProviderRepoPagesState()
-        repoImportState = .idle
+        if !preservingActiveRepoImport { repoImportState = .idle }
     }
 
     private func presentStructuredBackendUnavailable(_ error: any Error) {
@@ -1607,6 +1651,7 @@ extension Error {
 }
 
 private struct InboxDismissResponseError: Error {}
+private struct ProviderWorkflowOwnershipError: Error {}
 
 public struct PresentedError: Identifiable, Sendable, Equatable {
     public let id = UUID()

@@ -128,6 +128,20 @@ final class ProviderRepositoryModelTests: XCTestCase {
         XCTAssertEqual(model.lastError?.title, "This device cannot do that")
     }
 
+    func testStructuredLifecycleConnectionPublishesGrantedProviderCapabilities() async throws {
+        let host = HostRecord(nickname: "A", hostname: "a", username: "u", auth: .agentForwarding)
+        let backend = LifecycleProviderBackend()
+        let terminal = ConnectingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend, terminal: terminal)
+
+        let lease = await model.connectSelectedHost()
+
+        XCTAssertNotNil(lease)
+        XCTAssertEqual(model.canListProviders, .available)
+        XCTAssertEqual(model.canAuthorizeProviders, .available)
+        XCTAssertEqual(model.canImportRepos, .available)
+    }
+
     func testProviderSwitchABASuppressesOldRepoPageCompletion() async throws {
         let backend = GatedProviderBackend()
         backend.gateRepoPages = true
@@ -142,6 +156,24 @@ final class ProviderRepositoryModelTests: XCTestCase {
 
         XCTAssertTrue(model.providerRepoPages.repos.isEmpty)
         XCTAssertNil(model.providerRepoPages.nextCursor)
+    }
+
+    func testExplicitCursorCannotCrossProviderGeneration() async throws {
+        let backend = GatedProviderBackend()
+        backend.repoPages = [
+            ProviderRepoPage(repos: [try repo("1")], nextCursor: "github-next"),
+            ProviderRepoPage(repos: [], nextCursor: nil)
+        ]
+        let model = readyModel(backend: backend)
+        model.selectedProvider = .github
+        await model.loadProviderRepos(reset: true)
+        let staleCursor = try XCTUnwrap(model.providerRepoPages.nextCursor)
+
+        model.selectedProvider = .huggingFace
+        await model.loadProviderRepos(cursor: staleCursor)
+
+        XCTAssertEqual(backend.providerRepoCalls, [.init(provider: .github, cursor: nil)])
+        XCTAssertEqual(model.lastError?.title, "Repository page expired")
     }
 
     func testAuthorizationAutoPollingUsesCapturedProviderAndCanBeCancelled() async throws {
@@ -160,6 +192,51 @@ final class ProviderRepositoryModelTests: XCTestCase {
 
         XCTAssertTrue(backend.authorizationStatusCalls.allSatisfy { $0.provider == .huggingFace && $0.authorizationID == "auth-hf" })
         XCTAssertEqual(backend.cancelAuthorizationCalls.last, .init(provider: .huggingFace, authorizationID: "auth-hf"))
+    }
+
+    func testAuthorizationCancellationKeepsProviderOwnershipBeforeFirstPoll() async throws {
+        let backend = GatedProviderBackend()
+        backend.startResponse = ProviderAuthorizationStart(authorizationID: "auth-hf", verificationURL: URL(string: "https://example.com/device")!, userCode: "ABCD", expiresAt: Date(), intervalSeconds: 60)
+        let model = readyModel(backend: backend)
+
+        await model.beginProviderAuthorization(.huggingFace)
+        model.selectedProvider = .github
+        await model.cancelProviderAuthorization()
+
+        XCTAssertEqual(backend.cancelAuthorizationCalls, [.init(provider: .huggingFace, authorizationID: "auth-hf")])
+    }
+
+    func testAuthorizationStatusRejectsMismatchedReturnedIdentity() async throws {
+        let backend = GatedProviderBackend()
+        backend.startResponse = ProviderAuthorizationStart(authorizationID: "auth-owned", verificationURL: URL(string: "https://example.com/device")!, userCode: "ABCD", expiresAt: Date(), intervalSeconds: 60)
+        backend.authorizationStatuses = [ProviderAuthorizationStatus(authorizationID: "auth-other", state: .authorized, provider: .github)]
+        let model = readyModel(backend: backend)
+
+        await model.beginProviderAuthorization(.huggingFace)
+        await model.pollProviderAuthorization()
+
+        guard case .failed(let provider, let authorizationID, let error) = model.providerAuthorizationState else {
+            return XCTFail("A mismatched status must fail the owned authorization")
+        }
+        XCTAssertEqual(provider, .huggingFace)
+        XCTAssertEqual(authorizationID, "auth-owned")
+        XCTAssertFalse(error.detail.contains("auth-other"))
+    }
+
+    func testAuthorizationCancellationRejectsMismatchedReturnedIdentity() async throws {
+        let backend = GatedProviderBackend()
+        backend.startResponse = ProviderAuthorizationStart(authorizationID: "auth-owned", verificationURL: URL(string: "https://example.com/device")!, userCode: "ABCD", expiresAt: Date(), intervalSeconds: 60)
+        backend.cancelAuthorizationStatus = ProviderAuthorizationStatus(authorizationID: "auth-other", state: .cancelled, provider: .github)
+        let model = readyModel(backend: backend)
+
+        await model.beginProviderAuthorization(.huggingFace)
+        await model.cancelProviderAuthorization()
+
+        guard case .failed(let provider, let authorizationID, _) = model.providerAuthorizationState else {
+            return XCTFail("A mismatched cancellation response must fail the owned authorization")
+        }
+        XCTAssertEqual(provider, .huggingFace)
+        XCTAssertEqual(authorizationID, "auth-owned")
     }
 
     func testCompletedImportSelectsDestinationAndSanitizedErrorsHideRawBodies() async throws {
@@ -192,6 +269,19 @@ final class ProviderRepositoryModelTests: XCTestCase {
         XCTAssertNil(model.providerRepoPages.nextCursor)
     }
 
+    func testRevokeErrorsUseSanitizedProviderWorkflowMessage() async throws {
+        let backend = GatedProviderBackend()
+        backend.revokeError = HostClientError.server(status: 500, body: "https://token.example/private /Users/me/secret raw_provider_body")
+        let model = readyModel(backend: backend)
+
+        await model.revokeProvider(.github)
+
+        XCTAssertEqual(model.lastError?.title, "The host rejected the request")
+        XCTAssertFalse(model.lastError?.detail.contains("token.example") == true)
+        XCTAssertFalse(model.lastError?.detail.contains("/Users/me") == true)
+        XCTAssertFalse(model.lastError?.detail.contains("raw_provider_body") == true)
+    }
+
     func testImportIDSurvivesReconnectAndCanResumePolling() async throws {
         let backend = GatedProviderBackend()
         let model = readyModel(backend: backend)
@@ -206,6 +296,56 @@ final class ProviderRepositoryModelTests: XCTestCase {
 
         XCTAssertEqual(model.selectedRepo, "repo")
         XCTAssertEqual(model.repoImportState, .terminal(try RepoImportProgress(id: "imp", state: .completed, repoName: "repo", destinationName: "repo")))
+    }
+
+    func testConnectSelectedHostPreservesAndAutomaticallyResumesActiveImport() async throws {
+        let backend = GatedProviderBackend()
+        backend.importProgress = try RepoImportProgress(id: "imp", state: .cloning, repoName: "repo", destinationName: "repo")
+        let terminal = ConnectingTerminalBackend()
+        let model = readyModel(backend: backend)
+        await model.startRepoImport(provider: .github, repoID: "1")
+        model.attach(backend: backend, terminal: terminal)
+        model.connection = .disconnected(reason: "drop")
+        backend.pollProgress = try RepoImportProgress(id: "imp", state: .completed, repoName: "repo", destinationName: "root-after-reconnect")
+
+        let lease = await model.connectSelectedHost()
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+
+        XCTAssertNotNil(lease)
+        XCTAssertEqual(backend.repoImportStatusCalls, ["imp"])
+        XCTAssertEqual(model.selectedRepo, "root-after-reconnect")
+    }
+
+    func testImportPollRejectsMismatchedReturnedID() async throws {
+        let backend = GatedProviderBackend()
+        backend.importProgress = try RepoImportProgress(id: "import-owned", state: .cloning, repoName: "repo", destinationName: "repo")
+        backend.pollProgress = try RepoImportProgress(id: "import-other", state: .completed, repoName: "repo", destinationName: "other-root")
+        let model = readyModel(backend: backend)
+
+        await model.startRepoImport(provider: .github, repoID: "1")
+        await model.pollRepoImport("import-owned")
+
+        guard case .failed(let importID, let error) = model.repoImportState else {
+            return XCTFail("A mismatched poll response must fail the owned import")
+        }
+        XCTAssertEqual(importID, "import-owned")
+        XCTAssertFalse(error.detail.contains("import-other"))
+        XCTAssertNotEqual(model.selectedRepo, "other-root")
+    }
+
+    func testImportCancellationRejectsMismatchedReturnedID() async throws {
+        let backend = GatedProviderBackend()
+        backend.importProgress = try RepoImportProgress(id: "import-owned", state: .cloning, repoName: "repo", destinationName: "repo")
+        backend.cancelImportProgress = try RepoImportProgress(id: "import-other", state: .cancelled, repoName: "repo", destinationName: "repo")
+        let model = readyModel(backend: backend)
+
+        await model.startRepoImport(provider: .github, repoID: "1")
+        await model.cancelRepoImport("import-owned")
+
+        guard case .failed(let importID, _) = model.repoImportState else {
+            return XCTFail("A mismatched cancellation response must fail the owned import")
+        }
+        XCTAssertEqual(importID, "import-owned")
     }
 }
 
@@ -229,7 +369,7 @@ private struct AuthCancelCall: Equatable { var provider: ProviderID; var authori
 private struct ProviderRepoCall: Equatable { var provider: ProviderID; var cursor: String? }
 private struct AuthStatusCall: Equatable { var provider: ProviderID; var authorizationID: String }
 
-private final class GatedProviderBackend: OpenPawBackend, PairedHostCapabilityProviding, @unchecked Sendable {
+private class GatedProviderBackend: OpenPawBackend, PairedHostCapabilityProviding, @unchecked Sendable {
     var deniedCapabilities: Set<String>
     var repoPages: [ProviderRepoPage] = []
     var providerRepoCalls: [ProviderRepoCall] = []
@@ -238,9 +378,13 @@ private final class GatedProviderBackend: OpenPawBackend, PairedHostCapabilityPr
     var cancelImportCalls: [String] = []
     var importProgress: RepoImportProgress?
     var pollProgress: RepoImportProgress?
+    var cancelImportProgress: RepoImportProgress?
+    var repoImportStatusCalls: [String] = []
     var importError: (any Error)?
+    var revokeError: (any Error)?
     var startResponse = makeAuthStart("auth-start")
     var authorizationStatuses: [ProviderAuthorizationStatus] = []
+    var cancelAuthorizationStatus: ProviderAuthorizationStatus?
     var authorizationStatusCalls: [AuthStatusCall] = []
     var gateBegin = false
     var gateProviders = false
@@ -282,8 +426,14 @@ private final class GatedProviderBackend: OpenPawBackend, PairedHostCapabilityPr
         if !authorizationStatuses.isEmpty { return authorizationStatuses.removeFirst() }
         return ProviderAuthorizationStatus(authorizationID: authorizationID, state: .authorized, provider: provider)
     }
-    func cancelProviderAuthorization(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus { cancelAuthorizationCalls.append(.init(provider: provider, authorizationID: authorizationID)); return ProviderAuthorizationStatus(authorizationID: authorizationID, state: .cancelled, provider: provider) }
-    func revokeProvider(_ provider: ProviderID) async throws -> ProviderStatus { ProviderStatus(id: provider, displayName: "GitHub", state: .disconnected, repoListingSupported: true) }
+    func cancelProviderAuthorization(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus {
+        cancelAuthorizationCalls.append(.init(provider: provider, authorizationID: authorizationID))
+        return cancelAuthorizationStatus ?? ProviderAuthorizationStatus(authorizationID: authorizationID, state: .cancelled, provider: provider)
+    }
+    func revokeProvider(_ provider: ProviderID) async throws -> ProviderStatus {
+        if let revokeError { throw revokeError }
+        return ProviderStatus(id: provider, displayName: "GitHub", state: .disconnected, repoListingSupported: true)
+    }
     func providerRepos(_ provider: ProviderID, cursor: String?) async throws -> ProviderRepoPage {
         providerRepoCalls.append(.init(provider: provider, cursor: cursor))
         repoPageCalledContinuation?.resume(); repoPageCalledContinuation = nil
@@ -291,8 +441,15 @@ private final class GatedProviderBackend: OpenPawBackend, PairedHostCapabilityPr
         return repoPages.removeFirst()
     }
     func importRepo(_ request: RepoImportRequest) async throws -> RepoImportProgress { importCalls.append(request); if let importError { throw importError }; if let importProgress { return importProgress }; return try RepoImportProgress(id: "import-456", state: .cloning, repoName: "repo", destinationName: "repo") }
-    func repoImportProgress(_ importID: String) async throws -> RepoImportProgress { if let pollProgress { return pollProgress }; return try RepoImportProgress(id: importID, state: .completed, repoName: "repo", destinationName: "repo") }
-    func cancelRepoImport(_ importID: String) async throws -> RepoImportProgress { cancelImportCalls.append(importID); return try RepoImportProgress(id: importID, state: .cancelled, repoName: "repo", destinationName: "repo") }
+    func repoImportProgress(_ importID: String) async throws -> RepoImportProgress {
+        repoImportStatusCalls.append(importID)
+        if let pollProgress { return pollProgress }
+        return try RepoImportProgress(id: importID, state: .completed, repoName: "repo", destinationName: "repo")
+    }
+    func cancelRepoImport(_ importID: String) async throws -> RepoImportProgress {
+        cancelImportCalls.append(importID)
+        return try cancelImportProgress ?? RepoImportProgress(id: importID, state: .cancelled, repoName: "repo", destinationName: "repo")
+    }
     func registerRepo(_ request: RepoRegisterRequest) async throws -> RepoImportProgress { try RepoImportProgress(id: request.rootID, state: .completed, repoName: request.rootID, destinationName: request.requestedName ?? request.rootID) }
 
     func health() async throws -> HealthInfo { throw TestError.unexpectedCall }
@@ -310,6 +467,34 @@ private final class GatedProviderBackend: OpenPawBackend, PairedHostCapabilityPr
     func previewURL(port: Int, path: String) throws -> URL { throw TestError.unexpectedCall }
     func tailscaleDevices() async throws -> TailscaleDevicesResponse { throw TestError.unexpectedCall }
     func audit(limit: Int) async throws -> [AuditEntry] { [] }
+}
+
+private final class LifecycleProviderBackend: GatedProviderBackend, StructuredBackendLifecycle, @unchecked Sendable {
+    private var ready = false
+
+    var isReady: Bool { get async { ready } }
+
+    func connect(hostID: HostRecord.ID) async throws { ready = true }
+    func disconnect() async { ready = false }
+}
+
+private final class ConnectingTerminalBackend: TerminalBackend, @unchecked Sendable {
+    let stateStream: AsyncStream<ConnectionState>
+    let outputStream: AsyncStream<Data> = AsyncStream { $0.finish() }
+    private let stateContinuation: AsyncStream<ConnectionState>.Continuation
+
+    init() {
+        var continuation: AsyncStream<ConnectionState>.Continuation?
+        stateStream = AsyncStream { continuation = $0 }
+        stateContinuation = continuation!
+    }
+
+    func connect(host: HostRecord) async throws { stateContinuation.yield(.connected(.ssh)) }
+    func disconnect() async {}
+    func send(text: String) async throws {}
+    func send(chord: KeyChord, applicationCursorKeys: Bool) async throws {}
+    func resize(columns: Int, rows: Int) async throws {}
+    func run(command: String) async throws -> String { "" }
 }
 
 private final class NonCapabilityBackend: OpenPawBackend, @unchecked Sendable {
