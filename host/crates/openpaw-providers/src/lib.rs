@@ -252,6 +252,14 @@ impl GitHubProvider {
         &self,
         scopes: &[&str],
     ) -> Result<DeviceAuthorization, ProviderError> {
+        self.begin_device_authorization_with_cancel(scopes, None)
+            .await
+    }
+    pub async fn begin_device_authorization_with_cancel(
+        &self,
+        scopes: &[&str],
+        cancel: Option<&CancellationFlag>,
+    ) -> Result<DeviceAuthorization, ProviderError> {
         post_form(
             &self.client,
             &self.cfg.device_endpoint,
@@ -259,6 +267,7 @@ impl GitHubProvider {
                 ("client_id", self.cfg.client_id.as_str()),
                 ("scope", &scopes.join(" ")),
             ],
+            cancel,
         )
         .await
     }
@@ -274,6 +283,15 @@ impl GitHubProvider {
         device_code: &str,
         interval: u64,
     ) -> Result<DevicePollState, ProviderError> {
+        self.poll_device_authorization_with_interval_and_cancel(device_code, interval, None)
+            .await
+    }
+    pub async fn poll_device_authorization_with_interval_and_cancel(
+        &self,
+        device_code: &str,
+        interval: u64,
+        cancel: Option<&CancellationFlag>,
+    ) -> Result<DevicePollState, ProviderError> {
         poll_token(
             &self.client,
             &self.cfg.token_endpoint,
@@ -283,10 +301,18 @@ impl GitHubProvider {
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ],
             interval,
+            cancel,
         )
         .await
     }
     pub async fn refresh(&self, refresh_token: &SecretToken) -> Result<TokenSet, ProviderError> {
+        self.refresh_with_cancel(refresh_token, None).await
+    }
+    pub async fn refresh_with_cancel(
+        &self,
+        refresh_token: &SecretToken,
+        cancel: Option<&CancellationFlag>,
+    ) -> Result<TokenSet, ProviderError> {
         token_response(
             &self.client,
             &self.cfg.token_endpoint,
@@ -295,6 +321,7 @@ impl GitHubProvider {
                 ("refresh_token", refresh_token.expose_secret()),
                 ("grant_type", "refresh_token"),
             ],
+            cancel,
         )
         .await
     }
@@ -302,7 +329,14 @@ impl GitHubProvider {
         &self,
         token: &SecretToken,
     ) -> Result<Vec<Repository>, ProviderError> {
-        list_github_repos(&self.client, &self.cfg.api_base, token).await
+        self.list_repositories_with_cancel(token, None).await
+    }
+    pub async fn list_repositories_with_cancel(
+        &self,
+        token: &SecretToken,
+        cancel: Option<&CancellationFlag>,
+    ) -> Result<Vec<Repository>, ProviderError> {
+        list_github_repos(&self.client, &self.cfg.api_base, token, cancel).await
     }
     pub fn validate_required_scopes(
         &self,
@@ -331,7 +365,14 @@ impl GitHubProvider {
         }
     }
     pub async fn revoke_remote(&self, token: &SecretToken) -> Result<(), ProviderError> {
-        revoke(&self.client, &self.cfg, token).await
+        self.revoke_remote_with_cancel(token, None).await
+    }
+    pub async fn revoke_remote_with_cancel(
+        &self,
+        token: &SecretToken,
+        cancel: Option<&CancellationFlag>,
+    ) -> Result<(), ProviderError> {
+        revoke(&self.client, &self.cfg, token, cancel).await
     }
 }
 impl HuggingFaceProvider {
@@ -348,6 +389,14 @@ impl HuggingFaceProvider {
         &self,
         scopes: &[&str],
     ) -> Result<DeviceAuthorization, ProviderError> {
+        self.begin_device_authorization_with_cancel(scopes, None)
+            .await
+    }
+    pub async fn begin_device_authorization_with_cancel(
+        &self,
+        scopes: &[&str],
+        cancel: Option<&CancellationFlag>,
+    ) -> Result<DeviceAuthorization, ProviderError> {
         post_form(
             &self.client,
             &self.cfg.device_endpoint,
@@ -355,6 +404,7 @@ impl HuggingFaceProvider {
                 ("client_id", self.cfg.client_id.as_str()),
                 ("scope", &scopes.join(" ")),
             ],
+            cancel,
         )
         .await
     }
@@ -370,6 +420,15 @@ impl HuggingFaceProvider {
         device_code: &str,
         interval: u64,
     ) -> Result<DevicePollState, ProviderError> {
+        self.poll_device_authorization_with_interval_and_cancel(device_code, interval, None)
+            .await
+    }
+    pub async fn poll_device_authorization_with_interval_and_cancel(
+        &self,
+        device_code: &str,
+        interval: u64,
+        cancel: Option<&CancellationFlag>,
+    ) -> Result<DevicePollState, ProviderError> {
         poll_token(
             &self.client,
             &self.cfg.token_endpoint,
@@ -379,10 +438,18 @@ impl HuggingFaceProvider {
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ],
             interval,
+            cancel,
         )
         .await
     }
     pub async fn refresh(&self, refresh_token: &SecretToken) -> Result<TokenSet, ProviderError> {
+        self.refresh_with_cancel(refresh_token, None).await
+    }
+    pub async fn refresh_with_cancel(
+        &self,
+        refresh_token: &SecretToken,
+        cancel: Option<&CancellationFlag>,
+    ) -> Result<TokenSet, ProviderError> {
         token_response(
             &self.client,
             &self.cfg.token_endpoint,
@@ -391,6 +458,7 @@ impl HuggingFaceProvider {
                 ("refresh_token", refresh_token.expose_secret()),
                 ("grant_type", "refresh_token"),
             ],
+            cancel,
         )
         .await
     }
@@ -398,7 +466,14 @@ impl HuggingFaceProvider {
         &self,
         token: &SecretToken,
     ) -> Result<Vec<Repository>, ProviderError> {
-        list_hf_repos(&self.client, &self.cfg.api_base, token).await
+        self.list_repositories_with_cancel(token, None).await
+    }
+    pub async fn list_repositories_with_cancel(
+        &self,
+        token: &SecretToken,
+        cancel: Option<&CancellationFlag>,
+    ) -> Result<Vec<Repository>, ProviderError> {
+        list_hf_repos(&self.client, &self.cfg.api_base, token, cancel).await
     }
     pub fn clone_spec(
         &self,
@@ -420,7 +495,14 @@ impl HuggingFaceProvider {
         }
     }
     pub async fn revoke_remote(&self, token: &SecretToken) -> Result<(), ProviderError> {
-        revoke(&self.client, &self.cfg, token).await
+        self.revoke_remote_with_cancel(token, None).await
+    }
+    pub async fn revoke_remote_with_cancel(
+        &self,
+        token: &SecretToken,
+        cancel: Option<&CancellationFlag>,
+    ) -> Result<(), ProviderError> {
+        revoke(&self.client, &self.cfg, token, cancel).await
     }
 }
 
@@ -428,7 +510,9 @@ async fn post_form<T: for<'de> Deserialize<'de>>(
     client: &reqwest::Client,
     url: &str,
     form: &[(&str, &str)],
+    cancel: Option<&CancellationFlag>,
 ) -> Result<T, ProviderError> {
+    check_cancelled(cancel)?;
     let body = form
         .iter()
         .map(|(k, v)| {
@@ -451,12 +535,14 @@ async fn post_form<T: for<'de> Deserialize<'de>>(
             url: url.into(),
             message: e.to_string(),
         })?;
+    check_cancelled(cancel)?;
     let status = r.status();
     let headers = r.headers().clone();
     let bytes = r.bytes().await.map_err(|e| ProviderError::Transport {
         url: url.into(),
         message: e.to_string(),
     })?;
+    check_cancelled(cancel)?;
     if !status.is_success() {
         if let Ok(v) = serde_json::from_slice::<T>(&bytes) {
             return Ok(v);
@@ -470,8 +556,9 @@ async fn poll_token(
     url: &str,
     form: &[(&str, &str)],
     interval: u64,
+    cancel: Option<&CancellationFlag>,
 ) -> Result<DevicePollState, ProviderError> {
-    let v: serde_json::Value = post_form(client, url, form).await?;
+    let v: serde_json::Value = post_form(client, url, form, cancel).await?;
     if let Some(e) = v.get("error").and_then(|x| x.as_str()) {
         return Ok(match e {
             "authorization_pending" => DevicePollState::Pending {
@@ -496,8 +583,9 @@ async fn token_response(
     client: &reqwest::Client,
     url: &str,
     form: &[(&str, &str)],
+    cancel: Option<&CancellationFlag>,
 ) -> Result<TokenSet, ProviderError> {
-    let v: serde_json::Value = post_form(client, url, form).await?;
+    let v: serde_json::Value = post_form(client, url, form, cancel).await?;
     parse_token(v)
 }
 fn parse_token(v: serde_json::Value) -> Result<TokenSet, ProviderError> {
@@ -548,7 +636,9 @@ async fn get_json<T: for<'de> Deserialize<'de>>(
     client: &reqwest::Client,
     url: &str,
     token: &SecretToken,
+    cancel: Option<&CancellationFlag>,
 ) -> Result<JsonWithHeaders<T>, ProviderError> {
+    check_cancelled(cancel)?;
     let r = client
         .get(url)
         .bearer_auth(token.expose_secret())
@@ -558,6 +648,7 @@ async fn get_json<T: for<'de> Deserialize<'de>>(
             url: url.into(),
             message: e.to_string(),
         })?;
+    check_cancelled(cancel)?;
     let status = r.status();
     let headers = r.headers().clone();
     if !status.is_success() {
@@ -588,22 +679,29 @@ fn parse_rate_limit(headers: &HeaderMap) -> Option<RateLimitState> {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<i64>().ok())
         .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok());
-    let hf_reset = headers
+    let hf_ratelimit = headers
         .get("ratelimit")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| {
-            s.split(';')
-                .find_map(|p| p.trim().strip_prefix("w=")?.parse::<i64>().ok())
-        })
-        .map(|s| OffsetDateTime::now_utc() + Duration::seconds(s));
+        .map(str::to_string);
+    let hf_reset = hf_ratelimit
+        .as_deref()
+        .and_then(|s| header_param(s, "t").or_else(|| header_param(s, "w")))
+        .map(|s| OffsetDateTime::now_utc() + Duration::seconds(s.try_into().unwrap_or(i64::MAX)));
     let limit = headers
         .get("x-ratelimit-limit")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok());
+        .and_then(|s| s.parse().ok())
+        .or_else(|| {
+            headers
+                .get("ratelimit-policy")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| header_param(s, "q"))
+        });
     let remaining = headers
         .get("x-ratelimit-remaining")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok());
+        .and_then(|s| s.parse().ok())
+        .or_else(|| hf_ratelimit.as_deref().and_then(|s| header_param(s, "r")));
     if retry_after_seconds.is_some()
         || gh_reset.is_some()
         || hf_reset.is_some()
@@ -619,6 +717,10 @@ fn parse_rate_limit(headers: &HeaderMap) -> Option<RateLimitState> {
     } else {
         None
     }
+}
+fn header_param(s: &str, key: &str) -> Option<u64> {
+    s.split(';')
+        .find_map(|p| p.trim().strip_prefix(&format!("{key}="))?.parse().ok())
 }
 fn next_link(headers: &HeaderMap) -> Option<String> {
     headers
@@ -639,20 +741,19 @@ async fn list_github_repos(
     client: &reqwest::Client,
     api: &str,
     token: &SecretToken,
+    cancel: Option<&CancellationFlag>,
 ) -> Result<Vec<Repository>, ProviderError> {
     let mut url = format!("{api}/user/repos?per_page=100&page=1");
     let mut out = Vec::new();
     loop {
-        let got: JsonWithHeaders<Vec<serde_json::Value>> = get_json(client, &url, token).await?;
+        let got: JsonWithHeaders<Vec<serde_json::Value>> =
+            get_json(client, &url, token, cancel).await?;
+        check_cancelled(cancel)?;
         for v in got.value {
             out.push(parse_github_repo(v)?);
         }
         if let Some(next) = next_link(&got.headers) {
-            url = if next.starts_with("http") {
-                next
-            } else {
-                format!("{}{}", api.trim_end_matches('/'), next)
-            };
+            url = resolve_next_url(&url, &next)?;
         } else {
             break;
         }
@@ -684,12 +785,24 @@ async fn list_hf_repos(
     client: &reqwest::Client,
     api: &str,
     token: &SecretToken,
+    cancel: Option<&CancellationFlag>,
 ) -> Result<Vec<Repository>, ProviderError> {
+    let who: JsonWithHeaders<serde_json::Value> =
+        get_json(client, &format!("{api}/api/whoami-v2"), token, cancel).await?;
+    let author = who
+        .value
+        .get("name")
+        .or_else(|| who.value.get("user").and_then(|u| u.get("name")))
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| ProviderError::Protocol("malformed Hugging Face identity".into()))?;
     let mut out = Vec::new();
     for kind in ["models", "datasets", "spaces"] {
-        let mut url = format!("{api}/api/{kind}?limit=100&full=false");
+        let author: String = url::form_urlencoded::byte_serialize(author.as_bytes()).collect();
+        let mut url = format!("{api}/api/{kind}?limit=100&full=false&author={author}");
         loop {
-            let got: JsonWithHeaders<serde_json::Value> = get_json(client, &url, token).await?;
+            let got: JsonWithHeaders<serde_json::Value> =
+                get_json(client, &url, token, cancel).await?;
+            check_cancelled(cancel)?;
             let arr = got
                 .value
                 .as_array()
@@ -700,17 +813,23 @@ async fn list_hf_repos(
                 out.push(parse_hf_repo(item, kind)?);
             }
             if let Some(next) = next_link(&got.headers) {
-                url = if next.starts_with("http") {
-                    next
-                } else {
-                    format!("{}{}", api.trim_end_matches('/'), next)
-                };
+                url = resolve_next_url(&url, &next)?;
             } else {
                 break;
             }
         }
     }
     Ok(out)
+}
+fn resolve_next_url(current_url: &str, next: &str) -> Result<String, ProviderError> {
+    if next.starts_with("http://") || next.starts_with("https://") {
+        return Ok(next.to_string());
+    }
+    let base = url::Url::parse(current_url)
+        .map_err(|_| ProviderError::Protocol("invalid pagination URL".into()))?;
+    base.join(next)
+        .map(|u| u.to_string())
+        .map_err(|_| ProviderError::Protocol("invalid pagination Link URL".into()))
 }
 fn parse_hf_repo(item: serde_json::Value, kind: &str) -> Result<Repository, ProviderError> {
     let id = item
@@ -752,10 +871,30 @@ fn validate_repo(repo: &Repository, kind: ProviderKind) -> Result<(), ProviderEr
         || u.username() != ""
         || u.password().is_some()
         || u.host_str().is_none()
+        || u.port().is_some()
         || u.query().is_some()
         || u.fragment().is_some()
     {
         return Err(ProviderError::Protocol("unsafe clone URL".into()));
+    }
+    let exact_prefix = match kind {
+        ProviderKind::GitHub => "https://github.com/",
+        ProviderKind::HuggingFace => "https://huggingface.co/",
+    };
+    if !repo.https_url.starts_with(exact_prefix) {
+        return Err(ProviderError::Protocol(
+            "unapproved clone URL authority".into(),
+        ));
+    }
+    if kind == ProviderKind::GitHub && u.host_str() != Some("github.com") {
+        return Err(ProviderError::Protocol(
+            "unapproved GitHub clone host".into(),
+        ));
+    }
+    if kind == ProviderKind::HuggingFace && u.host_str() != Some("huggingface.co") {
+        return Err(ProviderError::Protocol(
+            "unapproved Hugging Face clone host".into(),
+        ));
     }
     if kind == ProviderKind::GitHub
         && !u
@@ -781,7 +920,9 @@ async fn revoke(
     client: &reqwest::Client,
     cfg: &PublicClientConfig,
     token: &SecretToken,
+    cancel: Option<&CancellationFlag>,
 ) -> Result<(), ProviderError> {
+    check_cancelled(cancel)?;
     let Some(conf) = &cfg.confidential else {
         return Err(match cfg.kind {
             ProviderKind::GitHub => ProviderError::MissingConfidentialClient,
@@ -815,6 +956,7 @@ async fn revoke(
         url: conf.revoke_endpoint.clone(),
         message: e.to_string(),
     })?;
+    check_cancelled(cancel)?;
     if r.status().is_success() {
         Ok(())
     } else {
@@ -823,6 +965,14 @@ async fn revoke(
             r.status().as_u16(),
             r.headers(),
         ))
+    }
+}
+
+fn check_cancelled(cancel: Option<&CancellationFlag>) -> Result<(), ProviderError> {
+    if cancel.is_some_and(CancellationFlag::is_cancelled) {
+        Err(ProviderError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
