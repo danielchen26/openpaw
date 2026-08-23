@@ -112,14 +112,22 @@ public struct SettingsSearchResult: Identifiable, Hashable, Sendable {
 
 public enum SettingsSearchIndex {
     public static let entries: [SettingsSearchResult] = [
+        .init(title: "Theme", subtitle: "Appearance", category: .appearance, destination: .init(category: .appearance, controlID: SettingsControl.terminalGround.id), keywords: ["theme", "ground", "appearance", "chrome", "slate", "deep", "warm"]),
         .init(title: "Require Face ID", subtitle: "Security", category: .security, destination: .init(category: .security, controlID: SettingsControl.biometricGate.id), keywords: ["face id", "touch id", "biometric", "passcode", "lock"]),
         .init(title: "Dictation language", subtitle: "Voice & Dictation", category: .voice, destination: .init(category: .voice, controlID: SettingsControl.dictationLanguage.id), keywords: ["language", "locale", "voice", "speech"]),
         .init(title: "Recogniser", subtitle: "Voice & Dictation", category: .voice, destination: .init(category: .voice, controlID: SettingsControl.dictationRecogniser.id), keywords: ["recogniser", "recognizer", "engine", "model", "qwen", "parakeet"]),
+        .init(title: "Default dictation destination", subtitle: "Voice & Dictation", category: .voice, destination: .init(category: .voice, controlID: SettingsControl.dictationDestination.id), keywords: ["destination", "draft", "composer", "terminal", "dictation"]),
         .init(title: "Cell size", subtitle: "Terminal", category: .terminal, destination: .init(category: .terminal, controlID: SettingsControl.terminalCellSize.id), keywords: ["font", "cell", "terminal", "size"]),
+        .init(title: "Application cursor keys", subtitle: "Terminal", category: .terminal, destination: .init(category: .terminal, controlID: SettingsControl.cursorKeys.id), keywords: ["cursor", "arrow", "esc", "application", "terminal"]),
+        .init(title: "Shortcut bar", subtitle: "Terminal", category: .terminal, destination: .init(category: .terminal, controlID: SettingsControl.shortcutBar.id), keywords: ["shortcut", "bar", "escape", "touch", "keyboard", "terminal"]),
+        .init(title: "Scrollback", subtitle: "Terminal", category: .terminal, destination: .init(category: .terminal, controlID: SettingsControl.scrollback.id), keywords: ["scrollback", "lines", "history", "terminal"]),
         .init(title: "Preview port", subtitle: "Connections", category: .connection, destination: .init(category: .connection, controlID: SettingsControl.previewPort.id), keywords: ["preview", "port", "connection", "forward"]),
+        .init(title: "Manage hosts", subtitle: "Connections", category: .connection, destination: .init(category: .connection, controlID: SettingsControl.manageHosts.id), keywords: ["host", "hosts", "ssh", "manage", "connection"]),
+        .init(title: "Diagnostics", subtitle: "Connections", category: .connection, destination: .init(category: .connection, controlID: SettingsControl.diagnostics.id), keywords: ["diagnostics", "health", "audit", "logs", "troubleshooting"]),
         .init(title: "Event budget", subtitle: "Sessions & Budgets", category: .sessions, destination: .init(category: .sessions, controlID: SettingsControl.eventBudget.id), keywords: ["event", "budget", "session", "memory"]),
         .init(title: "Provider connections", subtitle: "Repositories & Providers", category: .repositories, destination: .init(category: .repositories), keywords: ["github", "hugging face", "provider", "repository", "repo", "import"]),
         .init(title: "Export JSON", subtitle: "Data", category: .data, destination: .init(category: .data, controlID: SettingsControl.exportJSON.id), keywords: ["export", "json", "backup", "data"]),
+        .init(title: "Import JSON", subtitle: "Data", category: .data, destination: .init(category: .data, controlID: SettingsControl.importJSON.id), keywords: ["import", "json", "restore", "data"]),
     ]
 
     public static func results(for query: String) -> [SettingsSearchResult] {
@@ -140,23 +148,39 @@ public enum SettingsPresentationPolicy {
     }
 }
 
+public enum SettingsSelectionPolicy {
+    public static let defaultDestination = SettingsDestination(category: .security)
+
+    public static func selection(afterSelecting destination: SettingsDestination) -> SettingsDestination {
+        destination
+    }
+}
+
 public struct SettingsHomeView: View {
     private let searchText: String
+    private let selectedDestination: SettingsDestination?
+    private let onSelect: ((SettingsDestination) -> Void)?
 
-    public init(searchText: String = "") { self.searchText = searchText }
+    public init(
+        searchText: String = "",
+        selectedDestination: SettingsDestination? = nil,
+        onSelect: ((SettingsDestination) -> Void)? = nil
+    ) {
+        self.searchText = searchText
+        self.selectedDestination = selectedDestination
+        self.onSelect = onSelect
+    }
 
     public var body: some View {
         List {
             if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 ForEach(SettingsCategory.allCases) { category in
-                    NavigationLink(value: SettingsDestination(category: category)) {
-                        SettingsCategoryRow(category: category)
-                    }
+                    destinationRow(SettingsDestination(category: category)) { SettingsCategoryRow(category: category) }
                     .accessibilityIdentifier(category.accessibilityIdentifier)
                 }
             } else {
                 ForEach(SettingsSearchIndex.results(for: searchText)) { result in
-                    NavigationLink(value: result.destination) {
+                    destinationRow(result.destination) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(result.title)
                             Text(result.subtitle).font(.caption).foregroundStyle(.secondary)
@@ -171,6 +195,21 @@ public struct SettingsHomeView: View {
         .background(OpenPawTheme.ink)
         .tint(OpenPawTheme.textPrimary)
         .accessibilityIdentifier("settings.home")
+    }
+
+    @ViewBuilder
+    private func destinationRow<Label: View>(_ destination: SettingsDestination, @ViewBuilder label: () -> Label) -> some View {
+        if let onSelect {
+            Button { onSelect(destination) } label: { label().frame(maxWidth: .infinity, alignment: .leading) }
+                .buttonStyle(.plain)
+                .listRowBackground(selectionBackground(for: destination))
+        } else {
+            NavigationLink(value: destination) { label() }
+        }
+    }
+
+    private func selectionBackground(for destination: SettingsDestination) -> Color {
+        selectedDestination?.category == destination.category ? OpenPawTheme.panel.opacity(0.7) : .clear
     }
 }
 

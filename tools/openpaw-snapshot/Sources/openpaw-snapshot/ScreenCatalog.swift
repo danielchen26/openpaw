@@ -279,6 +279,23 @@ enum ScreenCatalog {
             unavailableReason: ""
         ),
         Screen(
+            name: "SettingsView-regular-selected-detail",
+            build: { model, _ in
+                AnyView(
+                    SettingsView(
+                        model: model,
+                        settings: OpenPawSettings.preview(),
+                        initialDestination: SettingsDestination(
+                            category: .voice,
+                            controlID: SettingsControl.dictationDestination.id
+                        )
+                    )
+                    .environment(\.horizontalSizeClass, .regular)
+                )
+            },
+            unavailableReason: ""
+        ),
+        Screen(
             name: "WorkspaceHomeView-empty",
             build: { _, _ in
                 return AnyView(

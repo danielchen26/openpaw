@@ -381,13 +381,18 @@ public struct SettingsView: View {
     @State private var isImporting = false
     @State private var exportDocument = ShellJSONDocument(data: Data())
     @State private var transferError: String?
-    @State private var selectedDestination: SettingsDestination? = SettingsDestination(category: .security)
+    @State private var selectedDestination: SettingsDestination?
     @State private var searchText = ""
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
-    public init(model: OpenPawModel, settings: OpenPawSettings) {
+    public init(
+        model: OpenPawModel,
+        settings: OpenPawSettings,
+        initialDestination: SettingsDestination = SettingsSelectionPolicy.defaultDestination
+    ) {
         self.model = model
         self.settings = settings
+        _selectedDestination = State(initialValue: initialDestination)
     }
 
     public var body: some View {
@@ -397,17 +402,29 @@ public struct SettingsView: View {
                 NavigationStack {
                     SettingsHomeView(searchText: searchText)
                         .navigationDestination(for: SettingsDestination.self) { destination in
-                            categoryView(destination.category)
+                            categoryView(destination)
                         }
                         .searchable(text: $searchText, prompt: "Search settings")
                 }
             case .split:
-                NavigationSplitView {
-                    SettingsHomeView(searchText: searchText)
-                        .searchable(text: $searchText, prompt: "Search settings")
-                } detail: {
-                    categoryView(selectedDestination?.category ?? .security)
+                HStack(spacing: 0) {
+                    SettingsHomeView(
+                        searchText: searchText,
+                        selectedDestination: selectedDestination,
+                        onSelect: { selectedDestination = SettingsSelectionPolicy.selection(afterSelecting: $0) }
+                    )
+                    .searchable(text: $searchText, prompt: "Search settings")
+                    .frame(width: 340)
+                    .background(OpenPawTheme.ink)
+
+                    Rectangle()
+                        .fill(OpenPawTheme.line)
+                        .frame(width: OpenPawTheme.hairline)
+
+                    categoryView(selectedDestination ?? SettingsSelectionPolicy.defaultDestination)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+                .background(OpenPawTheme.ink)
             }
         }
         .background(OpenPawTheme.ink)
@@ -427,16 +444,16 @@ public struct SettingsView: View {
     }
 
     @ViewBuilder
-    private func categoryView(_ category: SettingsCategory) -> some View {
+    private func categoryView(_ destination: SettingsDestination) -> some View {
+        let category = destination.category
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: OpenPawTheme.Space.large) {
                     switch category {
                     case .appearance:
-                        terminal
+                        appearance
                     case .terminal:
                         terminal
-                        budgets
                     case .voice:
                         dictation
                     case .connection:
@@ -444,7 +461,6 @@ public struct SettingsView: View {
                         connection
                     case .sessions:
                         budgets
-                        sessionOwnership
                     case .agents:
                         agents
                     case .repositories:
@@ -467,7 +483,12 @@ public struct SettingsView: View {
             .navigationTitle(category.title)
             .accessibilityIdentifier("settings.detail.\(category.id)")
             .onAppear {
-                if let controlID = selectedDestination?.controlID {
+                if let controlID = destination.controlID {
+                    proxy.scrollTo(controlID, anchor: .center)
+                }
+            }
+            .onChange(of: destination) { _, newDestination in
+                if let controlID = newDestination.controlID {
                     proxy.scrollTo(controlID, anchor: .center)
                 }
             }
@@ -541,6 +562,8 @@ public struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
+                    .id(SettingsControl.dictationDestination.id)
+                    .accessibilityIdentifier(SettingsControl.dictationDestination.accessibilityIdentifier)
                     Text(dictationExplanation)
                         .font(OpenPawTheme.Human.caption)
                         .foregroundStyle(OpenPawTheme.textTertiary)
@@ -728,6 +751,27 @@ public struct SettingsView: View {
 
     // MARK: Terminal
 
+    private var appearance: some View {
+        Panel(label: "Appearance") {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+                Text("Theme").microLabel()
+                Picker("Theme", selection: bind(\.terminalTheme)) {
+                    ForEach(TerminalTheme.allCases, id: \.self) { theme in
+                        Text(theme.displayName).tag(theme)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .id(SettingsControl.terminalGround.id)
+                .accessibilityIdentifier(SettingsControl.terminalGround.accessibilityIdentifier)
+                Text("Sets the app chrome and terminal ground preview from the same theme tokens.")
+                    .font(OpenPawTheme.Human.caption)
+                    .foregroundStyle(OpenPawTheme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     private var terminal: some View {
         Panel(label: "Terminal") {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
@@ -743,27 +787,15 @@ public struct SettingsView: View {
                     .accessibilityIdentifier(SettingsControl.terminalCellSize.accessibilityIdentifier)
                 }
 
-                VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
-                    Text("Ground").microLabel()
-                    Picker("Ground", selection: bind(\.terminalTheme)) {
-                        ForEach(TerminalTheme.allCases, id: \.self) { theme in
-                            Text(theme.displayName).tag(theme)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .id(SettingsControl.terminalGround.id)
-                    .accessibilityIdentifier(SettingsControl.terminalGround.accessibilityIdentifier)
-                    Text(verbatim: "$ cargo build --workspace")
-                        .font(.system(size: settings.terminalFontSize, design: .monospaced))
-                        .foregroundStyle(settings.terminalTheme.foreground)
-                        .padding(OpenPawTheme.Space.small)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(settings.terminalTheme.background)
-                        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
-                        .accessibilityLabel("Sample of the \(settings.terminalTheme.displayName) ground")
-                }
+                Text(verbatim: "$ cargo build --workspace")
+                    .font(.system(size: settings.terminalFontSize, design: .monospaced))
+                    .foregroundStyle(settings.terminalTheme.foreground)
+                    .padding(OpenPawTheme.Space.small)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(settings.terminalTheme.background)
+                    .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(OpenPawTheme.line, lineWidth: OpenPawTheme.hairline))
+                    .accessibilityLabel("Sample of the \(settings.terminalTheme.displayName) ground")
 
                 Toggle(isOn: bind(\.applicationCursorKeys)) {
                     Text("Application cursor keys")
@@ -777,6 +809,15 @@ public struct SettingsView: View {
                     .font(OpenPawTheme.Human.caption)
                     .foregroundStyle(OpenPawTheme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Toggle(isOn: bind(\.isShortcutBarVisible)) {
+                    Text("Shortcut bar")
+                        .font(OpenPawTheme.Machine.body)
+                        .foregroundStyle(OpenPawTheme.textPrimary)
+                }
+                .frame(minHeight: 44)
+                .id(SettingsControl.shortcutBar.id)
+                .accessibilityIdentifier(SettingsControl.shortcutBar.accessibilityIdentifier)
             }
         }
     }
