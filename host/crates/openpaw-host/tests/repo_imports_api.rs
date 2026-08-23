@@ -211,7 +211,7 @@ async fn register_rejects_non_git_dirs_and_import_id_guards_hold() {
     let unknown = h
         .signed(
             reqwest::Method::GET,
-            "/v1/repo-imports/import-missing",
+            "/v1/repo-imports/import-00000000000000000000000000000000",
             json!({}),
             &h.operator,
         )
@@ -231,7 +231,7 @@ async fn register_rejects_non_git_dirs_and_import_id_guards_hold() {
     let cancelled = h
         .signed(
             reqwest::Method::DELETE,
-            "/v1/repo-imports/import-missing",
+            "/v1/repo-imports/import-00000000000000000000000000000000",
             json!({}),
             &h.operator,
         )

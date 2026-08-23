@@ -86,15 +86,16 @@ impl AppState {
     pub fn new(
         config: Config,
         store: state::Store,
-        _roots: openpaw_files::Roots,
+        roots: openpaw_files::Roots,
         home: PathBuf,
     ) -> AppState {
         let audit = audit::Audit::new(store.state_dir());
         let proxy = openpaw_preview::Proxy::new(config.preview_policy());
         let bus = bus::Bus::new(config.ring_capacity);
         bus.hydrate_dismissed(store.dismissed_inbox_ids());
+        let configured_roots = roots.all().iter().map(|root| root.path.clone()).collect();
         let workspace_registry = Arc::new(
-            workspaces::WorkspaceRegistry::open(store.state_dir(), config.repos.clone())
+            workspaces::WorkspaceRegistry::open(store.state_dir(), configured_roots)
                 .expect("workspace registry"),
         );
         let provider_manager = Arc::new(api::providers::ProviderManager::new(

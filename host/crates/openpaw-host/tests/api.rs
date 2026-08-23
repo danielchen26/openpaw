@@ -2665,8 +2665,16 @@ async fn provider_and_repo_contract_routes_have_exact_capability_guards() {
                 "requested_name": "owner-name"
             })),
         ),
-        (reqwest::Method::GET, "/v1/repo-imports/imp_123", None),
-        (reqwest::Method::DELETE, "/v1/repo-imports/imp_123", None),
+        (
+            reqwest::Method::GET,
+            "/v1/repo-imports/import-00000000000000000000000000000000",
+            None,
+        ),
+        (
+            reqwest::Method::DELETE,
+            "/v1/repo-imports/import-00000000000000000000000000000000",
+            None,
+        ),
         (
             reqwest::Method::POST,
             "/v1/repos/register",
@@ -2716,8 +2724,16 @@ async fn provider_and_repo_contract_routes_have_exact_capability_guards() {
                 "requested_name": "owner-name"
             })),
         ),
-        (reqwest::Method::GET, "/v1/repo-imports/imp_123", None),
-        (reqwest::Method::DELETE, "/v1/repo-imports/imp_123", None),
+        (
+            reqwest::Method::GET,
+            "/v1/repo-imports/import-00000000000000000000000000000000",
+            None,
+        ),
+        (
+            reqwest::Method::DELETE,
+            "/v1/repo-imports/import-00000000000000000000000000000000",
+            None,
+        ),
         (
             reqwest::Method::POST,
             "/v1/repos/register",
@@ -2730,9 +2746,13 @@ async fn provider_and_repo_contract_routes_have_exact_capability_guards() {
             .await;
         let expected = if path == "/v1/repo-imports" || path == "/v1/repos/register" {
             200
-        } else if path == "/v1/repo-imports/imp_123" && method == reqwest::Method::GET {
+        } else if path == "/v1/repo-imports/import-00000000000000000000000000000000"
+            && method == reqwest::Method::GET
+        {
             404
-        } else if path == "/v1/repo-imports/imp_123" && method == reqwest::Method::DELETE {
+        } else if path == "/v1/repo-imports/import-00000000000000000000000000000000"
+            && method == reqwest::Method::DELETE
+        {
             200
         } else if path.starts_with("/v1/providers/github/authorizations/auth_123") {
             404

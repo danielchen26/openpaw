@@ -21,6 +21,7 @@ use crate::api::ApiError;
 const MAX_PROGRESS: usize = 128;
 const MAX_ID_LEN: usize = 128;
 const MAX_MESSAGE_LEN: usize = 160;
+const MAX_RECOVERY_BYTES: u64 = 1024 * 1024;
 const RECOVERY_FILE: &str = "repo-imports-recovery.json";
 const SECRET_MODE: u32 = 0o600;
 
@@ -123,7 +124,7 @@ impl RepoImportManager {
 
     /// Return current progress for an import id.
     pub fn get(&self, id: &str) -> anyhow::Result<Option<RepoImportProgress>> {
-        validate_identifier(id)?;
+        validate_import_id(id)?;
         Ok(self
             .imports
             .lock()
@@ -135,7 +136,7 @@ impl RepoImportManager {
 
     /// Cancel idempotently. Unknown ids return a stable cancelled tombstone.
     pub fn cancel(&self, id: &str) -> anyhow::Result<RepoImportProgress> {
-        validate_identifier(id)?;
+        validate_import_id(id)?;
         let mut imports = self.imports.lock().expect("repo imports poisoned");
         let Some(position) = imports.iter().position(|entry| entry.record.id == id) else {
             return Ok(cancelled_tombstone(id));
@@ -198,9 +199,13 @@ pub async fn cancel_import(
     State(app): State<AppState>,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<RepoImportProgress>, ApiError> {
-    Ok(Json(app.repo_imports.cancel(&id).map_err(|_| {
-        ApiError::bad_request("invalid repository import id")
-    })?))
+    match app.repo_imports.cancel(&id) {
+        Ok(progress) => Ok(Json(progress)),
+        Err(err) if err.to_string().contains("invalid") => {
+            Err(ApiError::bad_request("invalid repository import id"))
+        }
+        Err(err) => Err(ApiError::internal(err)),
+    }
 }
 
 /// `POST /v1/repos/register`.
@@ -283,10 +288,24 @@ fn sanitize_repo_name(repo_id: &str) -> String {
 
 fn validate_record(record: &RepoImportRecoveryRecord) -> anyhow::Result<()> {
     validate_identifier(&record.id)?;
+    validate_import_id(&record.id)?;
     validate_identifier(&record.repo_id)?;
     validate_identifier(&record.repo_name)?;
     validate_identifier(&record.destination_name)?;
     anyhow::ensure!(record.generation < u64::MAX, "invalid import generation");
+    Ok(())
+}
+
+fn validate_import_id(value: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(value.len() == "import-".len() + 32, "invalid import id");
+    let Some(hex) = value.strip_prefix("import-") else {
+        anyhow::bail!("invalid import id");
+    };
+    anyhow::ensure!(
+        hex.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+        "invalid import id"
+    );
     Ok(())
 }
 
@@ -322,11 +341,22 @@ impl IfEmpty for String {
 
 fn load_recovery(state_dir: &Path) -> anyhow::Result<Vec<RepoImportRecoveryRecord>> {
     let path = state_dir.join(RECOVERY_FILE);
-    match std::fs::read(&path) {
-        Ok(bytes) => Ok(serde_json::from_slice::<RecoveryFile>(&bytes)?.imports),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(err) => Err(err.into()),
-    }
+    let Some(bytes) = bounded_read(&path, MAX_RECOVERY_BYTES)? else {
+        return Ok(Vec::new());
+    };
+    let imports = serde_json::from_slice::<RecoveryFile>(&bytes)?.imports;
+    anyhow::ensure!(imports.len() <= MAX_PROGRESS, "too many recovery records");
+    Ok(imports)
+}
+
+fn bounded_read(path: &Path, max_bytes: u64) -> anyhow::Result<Option<Vec<u8>>> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    anyhow::ensure!(metadata.len() <= max_bytes, "state file is too large");
+    Ok(Some(std::fs::read(path)?))
 }
 
 fn persist_recovery(
@@ -434,7 +464,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = RepoImportManager::open(dir.path()).unwrap();
         assert!(manager.get("../bad").is_err());
+        assert!(
+            manager
+                .get("import-ABC00000000000000000000000000000")
+                .is_err()
+        );
         assert!(manager.cancel("../bad").is_err());
         assert!(!dir.path().join(RECOVERY_FILE).exists());
+    }
+
+    #[test]
+    fn oversized_recovery_file_is_rejected_on_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(RECOVERY_FILE),
+            vec![b' '; (MAX_RECOVERY_BYTES + 1) as usize],
+        )
+        .unwrap();
+        assert!(RepoImportManager::open(dir.path()).is_err());
     }
 }
