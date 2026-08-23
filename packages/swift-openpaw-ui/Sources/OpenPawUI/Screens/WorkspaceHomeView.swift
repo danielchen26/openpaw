@@ -21,6 +21,7 @@ public struct WorkspaceHomeView: View {
     private let onOpenRepository: (String) -> Void
     @State private var isAdding = false
     @State private var isShowingProviderImport = false
+    @Environment(\.scenePhase) private var scenePhase
 
     public init(
         model: OpenPawModel,
@@ -56,6 +57,8 @@ public struct WorkspaceHomeView: View {
         .sheet(isPresented: $isShowingProviderImport) {
             NavigationStack { ProviderImportView(model: model) }
         }
+        .task { model.refreshHomeTailnetBootstrap() }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { model.refreshHomeTailnetBootstrap() } }
     }
 
     private var populatedHome: some View {
@@ -63,6 +66,7 @@ public struct WorkspaceHomeView: View {
         return ScrollView {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.xl) {
                 networkSummary
+                tailnetBootstrapPanel
                 deviceGrid
                 remoteCatalogTransfer
                 if !presentation.agentSessions.isEmpty { agentSessions(presentation.agentSessions) }
@@ -125,6 +129,49 @@ public struct WorkspaceHomeView: View {
 
     private var remoteCatalogActionDisabled: Bool {
         model.connection.isConnected && model.canListProviders != .available
+    }
+
+    private var tailnetBootstrapPanel: some View {
+        let state = model.homeTailnetBootstrap
+        return Panel {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                Text("tailnet / local identity / candidates")
+                    .font(OpenPawTheme.Machine.label)
+                    .foregroundStyle(OpenPawTheme.signal)
+                Text("Tailnet discovery")
+                    .font(OpenPawTheme.Human.title)
+                    .foregroundStyle(OpenPawTheme.textPrimary)
+                Text(tailnetBootstrapDetail(state))
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(state.candidateCount > 0 ? "Review \(state.candidateCount) candidate\(state.candidateCount == 1 ? "" : "s")" : "Review candidates") {
+                    isAdding = true
+                }
+                .disabled(state.phase == .loading)
+                .frame(minHeight: 44)
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Tailnet discovery")
+        .accessibilityValue(tailnetBootstrapDetail(state))
+    }
+
+    private func tailnetBootstrapDetail(_ state: HomeTailnetBootstrapState) -> String {
+        let identity = state.localIdentity.flatMap { identity in
+            let account = identity.profile?.displayName ?? identity.profile?.loginName ?? "signed-in local profile"
+            let tailnet = identity.tailnetName ?? identity.domainName ?? "unknown tailnet"
+            return "Local identity: \(account) on \(tailnet)."
+        } ?? "Local identity unavailable. iOS cannot read the Tailscale app Keychain or account database. Quad100 may be unavailable on some clients."
+        let candidates = "Discovered \(state.candidateCount) candidate\(state.candidateCount == 1 ? "" : "s") from \(state.source.rawValue). Candidates are not trusted, saved, or connected automatically."
+        switch state.phase {
+        case .idle: return identity + " Ready to check saved OpenPaw credentials or a connected host."
+        case .loading: return identity + " Loading saved administrator credentials or connected-host discovery."
+        case .loaded: return identity + " " + candidates
+        case .unavailable: return identity + " Full peer enumeration requires saved OpenPaw API authorization or a connected OpenPaw host."
+        case .failed(let message): return identity + " " + message
+        }
     }
 
     private var networkSummary: some View {
@@ -249,6 +296,7 @@ public struct WorkspaceHomeView: View {
                     VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) { SignalOrb(.discovering, size: 72).accessibilityLabel("Waiting for a device you control"); homeHeroText }
                 }
                 Panel { VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) { Text(WorkspaceHomeCopy.message).font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary); Text(WorkspaceHomeCopy.localControl).font(OpenPawTheme.Machine.body).foregroundStyle(OpenPawTheme.textPrimary) } }
+                tailnetBootstrapPanel
                 addDeviceButton
             }
             .padding(OpenPawTheme.Space.xl).frame(maxWidth: 760, alignment: .leading)

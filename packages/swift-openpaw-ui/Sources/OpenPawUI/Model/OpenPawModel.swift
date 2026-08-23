@@ -150,15 +150,19 @@ public final class OpenPawModel {
     public private(set) var tailscaleAdminConnection: TailscaleAdminConnectionState = .disconnected
     public private(set) var connectionPreflightReport: ConnectionPreflightReport?
     public private(set) var isConnectionPreflightRunning = false
+    public private(set) var homeTailnetBootstrap = HomeTailnetBootstrapState()
 
     private var tailscaleDiscoveryTask: Task<Void, Never>?
     private var tailscaleDiscoveryGeneration = 0
     private var tailscaleDiscoveryOwner: TailscaleDiscoveryFlowID?
     @ObservationIgnored private let tailscaleRouteHintSource: any TailscaleRoutePathSourcing
     @ObservationIgnored private let tailscaleAdminConnector: (any TailscaleAdminConnecting)?
+    @ObservationIgnored private let tailscaleLocalIdentityConnector: (any TailscaleLocalIdentityConnecting)?
     @ObservationIgnored private let connectionPreflightRunner: (any ConnectionPreflightRunning)?
     @ObservationIgnored private let now: @Sendable () -> Date
     private var tailscaleAdminGeneration = 0
+    private var homeTailnetBootstrapGeneration = 0
+    private var homeTailnetBootstrapTask: Task<Void, Never>?
     private var connectionPreflightGeneration = 0
     private var hostSelectionGeneration = 0
     /// Host teardown may suspend inside a structured tunnel or terminal. Every
@@ -201,6 +205,7 @@ public final class OpenPawModel {
         dictationEngineFactory: (any DictationEngineMaking)? = nil,
         tailscaleRouteHintSource: any TailscaleRoutePathSourcing = SystemTailscaleRoutePathSource(),
         tailscaleAdminConnector: (any TailscaleAdminConnecting)? = nil,
+        tailscaleLocalIdentityConnector: (any TailscaleLocalIdentityConnecting)? = nil,
         connectionPreflightRunner: (any ConnectionPreflightRunning)? = nil,
         settings: OpenPawSettings = OpenPawSettings(),
         now: @escaping @Sendable () -> Date = { Date() }
@@ -212,6 +217,7 @@ public final class OpenPawModel {
         self.dictationEngineFactory = dictationEngineFactory
         self.tailscaleRouteHintSource = tailscaleRouteHintSource
         self.tailscaleAdminConnector = tailscaleAdminConnector
+        self.tailscaleLocalIdentityConnector = tailscaleLocalIdentityConnector
         self.connectionPreflightRunner = connectionPreflightRunner
         self.settings = settings
         self.now = now
@@ -729,6 +735,86 @@ public final class OpenPawModel {
                     self.tailscaleDiscovery = .failure(message: "Tailscale discovery failed. Retry or add SSH details manually.")
                 }
             }
+        }
+    }
+
+    public func refreshHomeTailnetBootstrap() {
+        homeTailnetBootstrapGeneration += 1
+        let generation = homeTailnetBootstrapGeneration
+        let hostID = selectedHostID
+        let connectionGeneration = connectionGeneration
+        let connectedBackend = connection.isConnected && structuredBackendReady ? backend : nil
+        homeTailnetBootstrapTask?.cancel()
+        homeTailnetBootstrap.phase = .loading
+        homeTailnetBootstrap.candidates = []
+        homeTailnetBootstrapTask = Task { [weak self, tailscaleRouteHintSource, tailscaleLocalIdentityConnector, tailscaleAdminConnector, connectedBackend, now] in
+            let hint = await TailscaleRouteHintResolver(source: tailscaleRouteHintSource).currentHint()
+            var identity: TailscaleLocalIdentity?
+            var candidates: [AddDeviceCandidate] = []
+            var source: HomeTailnetBootstrapState.Source = .none
+            var failure: String?
+
+            if hint == .likelyAvailable, let tailscaleLocalIdentityConnector {
+                do { identity = try await tailscaleLocalIdentityConnector.localIdentity(); source = .localIdentity }
+                catch is CancellationError { return }
+                catch { /* local identity can be unavailable on some clients */ }
+            }
+
+            if let tailscaleAdminConnector {
+                do {
+                    let devices = try await tailscaleAdminConnector.fetchSavedDevices()
+                    candidates.append(contentsOf: devices.map(AddDeviceCandidate.from))
+                    source = source == .none || source == .localIdentity ? .savedAdministrator : .merged
+                } catch is CancellationError { return }
+                catch TailscaleAdminConnectionError.missingCredentials { }
+                catch { failure = Self.tailscaleAdminFailureMessage(error) }
+            }
+
+            if candidates.isEmpty, let connectedBackend {
+                do {
+                    let response = try await connectedBackend.tailscaleDevices()
+                    candidates.append(contentsOf: response.candidates.map(AddDeviceCandidate.from))
+                    if !candidates.isEmpty { source = source == .none || source == .localIdentity ? .pairedHost : .merged }
+                } catch is CancellationError { return }
+                catch { if failure == nil { failure = "Paired host Tailscale discovery failed. Retry or add SSH details manually." } }
+            }
+
+            let deduped = Self.dedupeHomeTailnetCandidates(candidates)
+            await MainActor.run {
+                guard let self, self.homeTailnetBootstrapGeneration == generation, self.selectedHostID == hostID, self.connectionGeneration == connectionGeneration else { return }
+                self.homeTailnetBootstrap.routeHint = hint
+                self.homeTailnetBootstrap.localIdentity = identity
+                self.homeTailnetBootstrap.candidates = deduped
+                self.homeTailnetBootstrap.source = deduped.isEmpty ? (identity == nil ? .none : .localIdentity) : source
+                self.homeTailnetBootstrap.refreshedAt = now()
+                if !deduped.isEmpty || identity != nil { self.homeTailnetBootstrap.phase = .loaded }
+                else if let failure { self.homeTailnetBootstrap.phase = .failed(failure) }
+                else { self.homeTailnetBootstrap.phase = .unavailable }
+            }
+        }
+    }
+
+    public func cancelHomeTailnetBootstrap() {
+        homeTailnetBootstrapGeneration += 1
+        homeTailnetBootstrapTask?.cancel()
+        homeTailnetBootstrapTask = nil
+        homeTailnetBootstrap.phase = .idle
+    }
+
+    public var suggestedAdministratorTailnet: String? {
+        homeTailnetBootstrap.localIdentity?.tailnetName ?? homeTailnetBootstrap.localIdentity?.domainName
+    }
+
+    private static func dedupeHomeTailnetCandidates(_ candidates: [AddDeviceCandidate]) -> [AddDeviceCandidate] {
+        var seen = Set<String>()
+        return candidates.sorted { lhs, rhs in
+            let lp = lhs.source == .tailscaleAdministrator ? 0 : 1
+            let rp = rhs.source == .tailscaleAdministrator ? 0 : 1
+            if lp != rp { return lp < rp }
+            return lhs.hostname.localizedStandardCompare(rhs.hostname) == .orderedAscending
+        }.filter { candidate in
+            let key = ([candidate.dnsName, candidate.hostname] + candidate.tailscaleIPs).compactMap { $0?.lowercased() }.joined(separator: "|")
+            return seen.insert(key.isEmpty ? candidate.id : key).inserted
         }
     }
 

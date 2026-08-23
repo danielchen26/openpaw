@@ -356,6 +356,7 @@ public struct AddDeviceFlow: View {
                 TextField("Tailnet, for example example.ts.net", text: $adminTailnet)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("addDevice.tailscaleAdmin.tailnet")
+                    .onAppear { if adminTailnet.isEmpty, let suggested = model.suggestedAdministratorTailnet { adminTailnet = suggested } }
                 Button("Connect administrator source") {
                     let credentials = TailscaleAdminCredentials(
                         clientID: adminClientID,

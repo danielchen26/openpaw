@@ -263,3 +263,71 @@ struct KeychainTailscaleAdminCredentialStore: TailscaleAdminCredentialStore {
         }
     }
 }
+final class Quad100TailscaleLocalIdentityConnector: NSObject, TailscaleLocalIdentityConnecting, URLSessionTaskDelegate, @unchecked Sendable {
+    private let endpoint = URL(string: "http://100.100.100.100/api/data")!
+    private let maxBytes: Int
+    private let decoder = JSONDecoder()
+
+    init(maxBytes: Int = 64 * 1024) { self.maxBytes = maxBytes }
+
+    func localIdentity() async throws -> TailscaleLocalIdentity {
+        var configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 1.5
+        configuration.timeoutIntervalForResource = 2.0
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await session.data(for: request)
+            try Task.checkCancellation()
+            guard let http = response as? HTTPURLResponse else { throw TailscaleLocalIdentityError.malformedJSON }
+            guard http.statusCode == 200 else { throw TailscaleLocalIdentityError.unavailable }
+            guard data.count <= maxBytes else { throw TailscaleLocalIdentityError.responseTooLarge }
+            return try decode(data)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as TailscaleLocalIdentityError {
+            throw error
+        } catch {
+            throw TailscaleLocalIdentityError.networkUnavailable
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest) async -> URLRequest? { nil }
+
+    private func decode(_ data: Data) throws -> TailscaleLocalIdentity {
+        do {
+            let raw = try decoder.decode(RawIdentity.self, from: data)
+            return TailscaleLocalIdentity(
+                profile: raw.profile.map { TailscaleLocalProfile(loginName: $0.loginName, displayName: $0.displayName) },
+                status: raw.status,
+                deviceName: raw.deviceName,
+                os: raw.os,
+                ipv4: raw.ipv4,
+                ipv6: raw.ipv6,
+                id: raw.id,
+                domainName: raw.domainName,
+                tailnetName: raw.tailnetName
+            )
+        } catch { throw TailscaleLocalIdentityError.malformedJSON }
+    }
+
+    private struct RawIdentity: Decodable {
+        var profile: RawProfile?
+        var status: String?
+        var deviceName: String?
+        var os: String?
+        var ipv4: String?
+        var ipv6: String?
+        var id: String?
+        var domainName: String?
+        var tailnetName: String?
+        enum CodingKeys: String, CodingKey { case profile = "Profile", status = "Status", deviceName = "DeviceName", os = "OS", ipv4 = "IPv4", ipv6 = "IPv6", id = "ID", domainName = "DomainName", tailnetName = "TailnetName" }
+    }
+    private struct RawProfile: Decodable { var loginName: String?; var displayName: String?; enum CodingKeys: String, CodingKey { case loginName = "LoginName", displayName = "DisplayName" } }
+}

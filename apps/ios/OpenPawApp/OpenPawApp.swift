@@ -389,6 +389,7 @@ final class AppWiring {
         #endif
         let hostAPI = HostAPIBackend(forwarder: forwarder)
         let tailscaleAdmin = TailscaleAdminConnector()
+        let tailscaleLocalIdentity = Quad100TailscaleLocalIdentityConnector()
         let asrModels = LocalASRModelStore()
         let appleSpeech = SpeechDictation()
         let settings = OpenPawSettings()
@@ -405,6 +406,7 @@ final class AppWiring {
                     dictationModels: asrModels,
                     dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech),
                     tailscaleAdminConnector: tailscaleAdmin,
+                    tailscaleLocalIdentityConnector: tailscaleLocalIdentity,
                     connectionPreflightRunner: connectionPreflight,
                     settings: settings
                 )
@@ -418,6 +420,7 @@ final class AppWiring {
                 dictationModels: asrModels,
                 dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech),
                 tailscaleAdminConnector: tailscaleAdmin,
+                tailscaleLocalIdentityConnector: tailscaleLocalIdentity,
                 connectionPreflightRunner: connectionPreflight,
                 settings: settings
             )
