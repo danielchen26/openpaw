@@ -88,6 +88,9 @@ pub enum GitError {
     /// git emitted more output than the typed byte policy allows.
     #[error("git output exceeded byte policy")]
     OutputLimit,
+    /// The clone destination exceeded its configured repository byte policy.
+    #[error("git repository exceeded byte policy")]
+    RepositorySizeLimit,
 }
 
 /// Compact repository state for a list view.

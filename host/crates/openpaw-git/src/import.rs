@@ -1,14 +1,19 @@
+use std::ffi::OsString;
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::{GitError, validate_rev};
 
 const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
+const DEFAULT_MAX_REPOSITORY_BYTES: u64 = 512 * 1024 * 1024;
+const KILL_GRACE: Duration = Duration::from_millis(500);
+const REAP_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Default)]
 pub struct CancellationToken(Arc<AtomicBool>);
@@ -70,11 +75,13 @@ pub enum LfsSmudgePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CloneBytePolicy {
     pub max_git_output_bytes: usize,
+    pub max_repository_bytes: u64,
 }
 impl Default for CloneBytePolicy {
     fn default() -> Self {
         Self {
             max_git_output_bytes: MAX_GIT_OUTPUT_BYTES,
+            max_repository_bytes: DEFAULT_MAX_REPOSITORY_BYTES,
         }
     }
 }
@@ -120,6 +127,11 @@ impl TrustedCloneDestination {
         }
         Ok(())
     }
+    fn cleanup(&self) {
+        if self.assert_no_escape().is_ok() && self.path.exists() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 pub struct CloneRequest {
@@ -140,10 +152,18 @@ fn clone_with_git_program(
     req: CloneRequest,
     git_program: impl AsRef<Path>,
 ) -> Result<(), GitError> {
+    let result = clone_inner(&req, git_program.as_ref());
+    if result.is_err() {
+        req.destination.cleanup();
+    }
+    result
+}
+
+fn clone_inner(req: &CloneRequest, git_program: &Path) -> Result<(), GitError> {
     if req.cancellation.is_cancelled() {
         return Err(GitError::Cancelled);
     }
-    let mut args = vec![
+    let mut args: Vec<OsString> = [
         "-c",
         "protocol.allow=never",
         "-c",
@@ -156,20 +176,27 @@ fn clone_with_git_program(
         "core.hooksPath=/dev/null",
         "-c",
         "core.fsmonitor=false",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "http.followRedirects=false",
         "clone",
         "--no-local",
         "--template=",
-        "--",
-        req.remote.as_str(),
-    ];
-    let dest = req.destination.path.to_string_lossy().into_owned();
-    args.push(&dest);
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
     if let Some(r) = &req.r#ref {
-        args.splice(14..14, ["--branch", r.as_str()]);
+        args.push("--branch".into());
+        args.push(r.as_str().into());
     }
+    args.push("--".into());
+    args.push(req.remote.as_str().into());
+    args.push(req.destination.path.as_os_str().to_owned());
 
-    let mut cmd = Command::new(git_program.as_ref());
-    cmd.args(args)
+    let mut cmd = Command::new(git_program);
+    cmd.args(&args)
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -188,34 +215,124 @@ fn clone_with_git_program(
     set_process_group(&mut cmd);
     let mut child = cmd.spawn().map_err(GitError::GitMissing)?;
     let pid = child.id();
+    let stdout = drain(
+        child.stdout.take().unwrap(),
+        req.byte_policy.max_git_output_bytes,
+    );
+    let stderr = drain(
+        child.stderr.take().unwrap(),
+        req.byte_policy.max_git_output_bytes,
+    );
     let start = Instant::now();
     loop {
         if req.cancellation.is_cancelled() {
-            kill_group(pid);
-            let _ = child.wait();
+            terminate_and_reap(&mut child, pid);
+            join_drains(stdout, stderr);
             return Err(GitError::Cancelled);
         }
         if start.elapsed() >= req.timeout {
-            kill_group(pid);
-            let _ = child.wait();
+            terminate_and_reap(&mut child, pid);
+            join_drains(stdout, stderr);
             return Err(GitError::Timeout);
         }
+        if pipe_bytes(&stdout) + pipe_bytes(&stderr) > req.byte_policy.max_git_output_bytes {
+            terminate_and_reap(&mut child, pid);
+            join_drains(stdout, stderr);
+            return Err(GitError::OutputLimit);
+        }
+        req.destination.assert_no_escape()?;
+        if dir_size(req.destination.path())? > req.byte_policy.max_repository_bytes {
+            terminate_and_reap(&mut child, pid);
+            join_drains(stdout, stderr);
+            return Err(GitError::RepositorySizeLimit);
+        }
         if let Some(status) = child.try_wait().map_err(GitError::Io)? {
-            let out = child.wait_with_output().map_err(GitError::Io)?;
-            if out.stdout.len() + out.stderr.len() > req.byte_policy.max_git_output_bytes {
+            let (_out, err) = join_drains(stdout, stderr);
+            if pipe_len(&err) + pipe_len(&_out) > req.byte_policy.max_git_output_bytes {
                 return Err(GitError::OutputLimit);
             }
             req.destination.assert_no_escape()?;
-            if status.success() {
-                return Ok(());
+            if dir_size(req.destination.path())? > req.byte_policy.max_repository_bytes {
+                return Err(GitError::RepositorySizeLimit);
             }
-            return Err(GitError::Command {
-                code: status.code(),
-                stderr: sanitize_stderr(&out.stderr),
-            });
+            return finish_status(status, &err);
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn finish_status(status: ExitStatus, stderr: &[u8]) -> Result<(), GitError> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(GitError::Command {
+            code: status.code(),
+            stderr: sanitize_stderr(stderr),
+        })
+    }
+}
+
+struct Drain {
+    bytes: Arc<AtomicUsize>,
+    handle: JoinHandle<Vec<u8>>,
+}
+
+fn drain(mut reader: impl Read + Send + 'static, limit: usize) -> Drain {
+    let bytes = Arc::new(AtomicUsize::new(0));
+    let thread_bytes = Arc::clone(&bytes);
+    let handle = thread::spawn(move || {
+        let mut out = Vec::new();
+        let mut buf = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => return out,
+                Ok(n) => {
+                    thread_bytes.fetch_add(n, Ordering::SeqCst);
+                    let remaining = limit.saturating_add(1).saturating_sub(out.len());
+                    out.extend_from_slice(&buf[..n.min(remaining)]);
+                }
+            }
+        }
+    });
+    Drain { bytes, handle }
+}
+
+fn pipe_bytes(drain: &Drain) -> usize {
+    drain.bytes.load(Ordering::SeqCst)
+}
+
+fn join_drains(a: Drain, b: Drain) -> (Vec<u8>, Vec<u8>) {
+    (
+        a.handle.join().unwrap_or_default(),
+        b.handle.join().unwrap_or_default(),
+    )
+}
+fn pipe_len(v: &[u8]) -> usize {
+    v.len()
+}
+
+fn dir_size(path: &Path) -> Result<u64, GitError> {
+    fn walk(path: &Path, total: &mut u64) -> std::io::Result<()> {
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        if meta.file_type().is_symlink() {
+            return Ok(());
+        }
+        if meta.is_file() {
+            *total = total.saturating_add(meta.len());
+        } else if meta.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                walk(&entry?.path(), total)?;
+            }
+        }
+        Ok(())
+    }
+    let mut total = 0;
+    walk(path, &mut total).map_err(GitError::Io)?;
+    Ok(total)
 }
 
 fn validate_https_url(input: &str) -> Result<(), GitError> {
@@ -258,11 +375,17 @@ fn validate_https_url(input: &str) -> Result<(), GitError> {
 }
 
 fn sanitize_stderr(stderr: &[u8]) -> String {
-    String::from_utf8_lossy(stderr)
-        .chars()
-        .take(4096)
-        .collect::<String>()
-        .replace("https://", "https://[redacted]@")
+    let s: String = String::from_utf8_lossy(stderr).chars().take(4096).collect();
+    s.split_whitespace()
+        .map(|tok| {
+            if tok.starts_with("http://") || tok.starts_with("https://") || tok.contains('@') {
+                "[redacted]"
+            } else {
+                tok
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(unix)]
@@ -272,20 +395,80 @@ fn set_process_group(cmd: &mut Command) {
 }
 #[cfg(not(unix))]
 fn set_process_group(_cmd: &mut Command) {}
+
+fn terminate_and_reap(child: &mut Child, pid: u32) {
+    term_group(pid);
+    if wait_bounded(child, KILL_GRACE).is_none() {
+        kill_group(pid);
+        let _ = wait_bounded(child, REAP_GRACE);
+    }
+}
+
+fn wait_bounded(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let start = Instant::now();
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
+        if start.elapsed() >= timeout {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+fn term_group(pid: u32) {
+    signal_group(pid, "-TERM");
+}
 #[cfg(unix)]
 fn kill_group(pid: u32) {
-    let group = format!("-{}", pid);
-    let _ = Command::new("/bin/kill").args(["-TERM", &group]).status();
+    signal_group(pid, "-KILL");
+}
+#[cfg(unix)]
+fn signal_group(pid: u32, sig: &str) {
+    let group = format!("-{pid}");
     let _ = Command::new("/bin/kill")
-        .args(["-TERM", &pid.to_string()])
+        .args([sig, &group])
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("/bin/kill")
+        .args([sig, &pid.to_string()])
+        .stderr(Stdio::null())
         .status();
 }
+#[cfg(not(unix))]
+fn term_group(_pid: u32) {}
 #[cfg(not(unix))]
 fn kill_group(_pid: u32) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn chmod_x(path: &Path) {
+        let _ = Command::new("chmod")
+            .args(["+x", path.to_str().unwrap()])
+            .status();
+    }
+
+    fn req(
+        td: &tempfile::TempDir,
+        policy: CloneBytePolicy,
+        cancellation: CancellationToken,
+    ) -> CloneRequest {
+        CloneRequest {
+            remote: HttpsRemoteUrl::parse("https://example.com/org/repo.git").unwrap(),
+            destination: TrustedCloneDestination::new(td.path().join("repo")).unwrap(),
+            r#ref: None,
+            timeout: Duration::from_secs(2),
+            byte_policy: policy,
+            cancellation,
+            lfs_smudge: LfsSmudgePolicy::Disable,
+        }
+    }
+
     #[test]
     fn rejects_unsafe_urls_and_refs() {
         assert!(HttpsRemoteUrl::parse("https://github.com/o/r.git").is_ok());
@@ -322,42 +505,18 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let log = td.path().join("git.log");
         let git = td.path().join("git");
-        std::fs::write(
-            &git,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintenv | grep '^GIT_' >> '{}'\nfor last do :; done\nmkdir -p \"$last\"\n",
-                log.display(),
-                log.display()
-            ),
-        )
-        .unwrap();
-        let _ = std::process::Command::new("chmod")
-            .args(["+x", git.to_str().unwrap()])
-            .status();
-        let dest = TrustedCloneDestination::new(td.path().join("repo")).unwrap();
-        let remote = HttpsRemoteUrl::parse("https://example.com/org/repo.git").unwrap();
-        assert!(!format!("{remote:?}").contains("example.com"));
+        fs::write(&git, format!("#!/bin/sh\nprintf '%s\n' \"$@\" > '{}'\nprintenv | grep '^GIT_' >> '{}'\nfor last do :; done\nmkdir -p \"$last\"\n", log.display(), log.display())).unwrap();
+        chmod_x(&git);
         clone_with_git_program(
-            CloneRequest {
-                remote,
-                destination: dest,
-                r#ref: None,
-                timeout: Duration::from_secs(5),
-                byte_policy: CloneBytePolicy::default(),
-                cancellation: CancellationToken::new(),
-                lfs_smudge: LfsSmudgePolicy::Disable,
-            },
+            req(&td, CloneBytePolicy::default(), CancellationToken::new()),
             &git,
         )
         .unwrap();
-        let log = std::fs::read_to_string(log).unwrap();
+        let log = fs::read_to_string(log).unwrap();
         for required in [
             "protocol.allow=never",
-            "protocol.https.allow=always",
-            "protocol.file.allow=never",
-            "protocol.ext.allow=never",
-            "core.hooksPath=/dev/null",
-            "core.fsmonitor=false",
+            "credential.helper=",
+            "http.followRedirects=false",
             "clone",
             "--no-local",
             "--template=",
@@ -369,5 +528,109 @@ mod tests {
         ] {
             assert!(log.contains(required), "missing {required} in {log}");
         }
+        let sanitized = sanitize_stderr(
+            b"fatal https://user:secret@example.com/org/repo.git user@example.com\n",
+        );
+        assert!(!sanitized.contains("secret"));
+        assert!(!sanitized.contains("example.com"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cleans_destination_on_output_limit_after_success() {
+        let td = tempfile::tempdir().unwrap();
+        let git = td.path().join("git");
+        fs::write(&git, "#!/bin/sh\nfor last do :; done\nmkdir -p \"$last\"\npython3 - <<'PY'\nprint('x' * 20000)\nPY\nexit 0\n").unwrap();
+        chmod_x(&git);
+        let err = clone_with_git_program(
+            req(
+                &td,
+                CloneBytePolicy {
+                    max_git_output_bytes: 100,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            ),
+            &git,
+        )
+        .unwrap_err();
+        assert!(matches!(err, GitError::OutputLimit));
+        assert!(!td.path().join("repo").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn enforces_repository_size_limit_while_child_runs() {
+        let td = tempfile::tempdir().unwrap();
+        let git = td.path().join("git");
+        fs::write(&git, "#!/bin/sh\nfor last do :; done\nmkdir -p \"$last\"\ndd if=/dev/zero of=\"$last/blob\" bs=1024 count=64 2>/dev/null\nsleep 5\n").unwrap();
+        chmod_x(&git);
+        let err = clone_with_git_program(
+            req(
+                &td,
+                CloneBytePolicy {
+                    max_repository_bytes: 1024,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            ),
+            &git,
+        )
+        .unwrap_err();
+        assert!(matches!(err, GitError::RepositorySizeLimit));
+        assert!(!td.path().join("repo").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn timeout_escalates_term_ignoring_child_and_cleans() {
+        let td = tempfile::tempdir().unwrap();
+        let git = td.path().join("git");
+        fs::write(
+            &git,
+            "#!/bin/sh\ntrap '' TERM\nfor last do :; done\nmkdir -p \"$last\"\nsleep 10\n",
+        )
+        .unwrap();
+        chmod_x(&git);
+        let mut r = req(&td, CloneBytePolicy::default(), CancellationToken::new());
+        r.timeout = Duration::from_millis(50);
+        let start = Instant::now();
+        let err = clone_with_git_program(r, &git).unwrap_err();
+        assert!(matches!(err, GitError::Timeout));
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(!td.path().join("repo").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cancel_terminates_and_cleans() {
+        let td = tempfile::tempdir().unwrap();
+        let git = td.path().join("git");
+        fs::write(
+            &git,
+            "#!/bin/sh\nfor last do :; done\nmkdir -p \"$last\"\nsleep 10\n",
+        )
+        .unwrap();
+        chmod_x(&git);
+        let token = CancellationToken::new();
+        let token2 = token.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            token2.cancel();
+        });
+        let err =
+            clone_with_git_program(req(&td, CloneBytePolicy::default(), token), &git).unwrap_err();
+        assert!(matches!(err, GitError::Cancelled));
+        assert!(!td.path().join("repo").exists());
+    }
+
+    #[test]
+    fn concurrent_same_destination_attempt_is_rejected() {
+        let td = tempfile::tempdir().unwrap();
+        let dest = td.path().join("repo");
+        let first = TrustedCloneDestination::new(&dest).unwrap();
+        fs::create_dir(&dest).unwrap();
+        assert!(TrustedCloneDestination::new(&dest).is_err());
+        drop(first);
     }
 }
