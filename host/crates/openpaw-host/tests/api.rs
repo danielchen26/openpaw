@@ -2656,10 +2656,22 @@ async fn provider_and_repo_contract_routes_have_exact_capability_guards() {
             None,
         ),
         (reqwest::Method::DELETE, "/v1/providers/github", None),
-        (reqwest::Method::POST, "/v1/repo-imports", Some(json!({}))),
+        (
+            reqwest::Method::POST,
+            "/v1/repo-imports",
+            Some(json!({
+                "provider": "github",
+                "repo_id": "owner-name",
+                "requested_name": "owner-name"
+            })),
+        ),
         (reqwest::Method::GET, "/v1/repo-imports/imp_123", None),
         (reqwest::Method::DELETE, "/v1/repo-imports/imp_123", None),
-        (reqwest::Method::POST, "/v1/repos/register", Some(json!({}))),
+        (
+            reqwest::Method::POST,
+            "/v1/repos/register",
+            Some(json!({ "root_id": "known", "requested_name": "known" })),
+        ),
     ];
     for (method, path, body) in observer_blocked {
         let response = harness.signed(method, path, body, &harness.observer).await;
@@ -2669,6 +2681,14 @@ async fn provider_and_repo_contract_routes_have_exact_capability_guards() {
             "{path} should be blocked before handler"
         );
     }
+
+    let known_repo = harness.app.store.state_dir().join("repos/known");
+    std::fs::create_dir_all(&known_repo).expect("known repo dir");
+    std::process::Command::new("git")
+        .arg("init")
+        .arg(&known_repo)
+        .status()
+        .expect("git init known repo");
 
     let operator_stubs = [
         (
@@ -2687,19 +2707,39 @@ async fn provider_and_repo_contract_routes_have_exact_capability_guards() {
             None,
         ),
         (reqwest::Method::DELETE, "/v1/providers/github", None),
-        (reqwest::Method::POST, "/v1/repo-imports", Some(json!({}))),
+        (
+            reqwest::Method::POST,
+            "/v1/repo-imports",
+            Some(json!({
+                "provider": "github",
+                "repo_id": "owner-name",
+                "requested_name": "owner-name"
+            })),
+        ),
         (reqwest::Method::GET, "/v1/repo-imports/imp_123", None),
         (reqwest::Method::DELETE, "/v1/repo-imports/imp_123", None),
-        (reqwest::Method::POST, "/v1/repos/register", Some(json!({}))),
+        (
+            reqwest::Method::POST,
+            "/v1/repos/register",
+            Some(json!({ "root_id": "known", "requested_name": "known" })),
+        ),
     ];
     for (method, path, body) in operator_stubs {
-        let response = harness.signed(method, path, body, &harness.operator).await;
-        let expected = if path.starts_with("/v1/providers/github/authorizations/auth_123") {
+        let response = harness
+            .signed(method.clone(), path, body, &harness.operator)
+            .await;
+        let expected = if path == "/v1/repo-imports" || path == "/v1/repos/register" {
+            200
+        } else if path == "/v1/repo-imports/imp_123" && method == reqwest::Method::GET {
+            404
+        } else if path == "/v1/repo-imports/imp_123" && method == reqwest::Method::DELETE {
+            200
+        } else if path.starts_with("/v1/providers/github/authorizations/auth_123") {
             404
         } else if path.starts_with("/v1/providers/") {
             503
         } else {
-            501
+            unreachable!("unexpected guarded route {path}")
         };
         assert_eq!(
             response.status(),
