@@ -152,12 +152,12 @@ pub enum Capability {
     ApprovalsWrite,
     /// Read git status, diffs and trees.
     ReposRead,
-    /// Manage registered repositories and imports.
-    ReposManage,
     /// Read provider connections and repository listings.
     ProvidersRead,
     /// Manage provider connections and authorizations.
     ProvidersManage,
+    /// Manage registered repositories and imports.
+    ReposManage,
     /// Read file contents.
     FilesRead,
     /// Proxy to allowlisted loopback ports.
@@ -195,9 +195,9 @@ impl Capability {
             Capability::InboxWrite => "inbox.write",
             Capability::ApprovalsWrite => "approvals.write",
             Capability::ReposRead => "repos.read",
-            Capability::ReposManage => "repos.manage",
             Capability::ProvidersRead => "providers.read",
             Capability::ProvidersManage => "providers.manage",
+            Capability::ReposManage => "repos.manage",
             Capability::FilesRead => "files.read",
             Capability::PreviewProxy => "preview.proxy",
             Capability::DevicesRead => "devices.read",

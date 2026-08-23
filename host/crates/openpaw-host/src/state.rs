@@ -26,7 +26,7 @@ use openpaw_protocol::{InboxId, SessionId};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::auth::{Capability, Profile, constant_time_eq, sha256_hex};
+use crate::auth::{Profile, constant_time_eq, sha256_hex};
 
 /// Directory mode: owner-only. Nothing else needs to traverse it.
 const DIR_MODE: u32 = 0o700;
@@ -71,26 +71,13 @@ impl Device {
 
     /// Current grants after profile-based legacy migration.
     pub fn effective_capabilities(&self) -> Vec<String> {
-        if self.profile.is_some() || self.legacy_has_operator_only_capability() {
+        if self.profile.is_some() || self.has_exact_legacy_operator_grants() {
             return self.effective_profile().capability_names();
         }
-        let mut capabilities = self.capabilities.clone();
-        let old_observer = [
-            "sessions.read",
-            "events.read",
-            "inbox.read",
-            "repos.read",
-            "files.read",
-            "devices.read",
-        ];
-        if old_observer
-            .iter()
-            .all(|capability| capabilities.iter().any(|c| c == capability))
-            && !capabilities.iter().any(|c| c == "providers.read")
-        {
-            capabilities.push("providers.read".to_owned());
+        if self.has_exact_legacy_observer_grants() {
+            return Profile::Observer.capability_names();
         }
-        capabilities
+        self.capabilities.clone()
     }
 
     /// Infer legacy rows without widening read-only observers.
@@ -98,28 +85,48 @@ impl Device {
         if let Some(profile) = self.profile {
             return profile;
         }
-        let observer = Profile::Observer.capability_names();
-        if self.capabilities.iter().all(|c| observer.contains(c)) {
+        if self.has_exact_legacy_observer_grants() {
             return Profile::Observer;
         }
-        if self.legacy_has_operator_only_capability() {
+        if self.has_exact_legacy_operator_grants() {
             return Profile::Operator;
         }
         Profile::Observer
     }
 
-    fn legacy_has_operator_only_capability(&self) -> bool {
-        let operator_only = [
-            Capability::InboxWrite,
-            Capability::ApprovalsWrite,
-            Capability::PreviewProxy,
-            Capability::UploadsWrite,
-        ];
-        operator_only
-            .iter()
-            .any(|capability| self.capabilities.iter().any(|c| c == capability.as_str()))
+    fn has_exact_legacy_observer_grants(&self) -> bool {
+        self.has_exact_capability_set(&[
+            "sessions.read",
+            "events.read",
+            "inbox.read",
+            "repos.read",
+            "files.read",
+            "devices.read",
+        ])
     }
 
+    fn has_exact_legacy_operator_grants(&self) -> bool {
+        self.has_exact_capability_set(&[
+            "sessions.read",
+            "events.read",
+            "inbox.read",
+            "inbox.write",
+            "approvals.write",
+            "repos.read",
+            "repos.manage",
+            "files.read",
+            "preview.proxy",
+            "devices.read",
+            "uploads.write",
+        ])
+    }
+
+    fn has_exact_capability_set(&self, expected: &[&str]) -> bool {
+        self.capabilities.len() == expected.len()
+            && expected
+                .iter()
+                .all(|capability| self.capabilities.iter().any(|c| c == capability))
+    }
     /// Decode the device's HMAC key.
     pub fn hmac_key(&self) -> Result<Vec<u8>> {
         use base64::Engine as _;
@@ -589,6 +596,105 @@ mod tests {
             paired_at: OffsetDateTime::UNIX_EPOCH,
             last_seen: None,
         }
+    }
+
+    fn legacy_device(capabilities: &[&str]) -> Device {
+        Device {
+            capabilities: capabilities
+                .iter()
+                .map(|capability| capability.to_string())
+                .collect(),
+            profile: None,
+            ..device("legacy", "token")
+        }
+    }
+
+    #[test]
+    fn exact_legacy_profile_grants_are_upgraded_without_ordering_the_state_file() {
+        let observer = legacy_device(&[
+            "events.read",
+            "sessions.read",
+            "inbox.read",
+            "repos.read",
+            "files.read",
+            "devices.read",
+        ]);
+        assert_eq!(observer.effective_profile(), Profile::Observer);
+        assert_eq!(
+            observer.effective_capabilities(),
+            Profile::Observer.capability_names()
+        );
+
+        let operator = legacy_device(&[
+            "uploads.write",
+            "sessions.read",
+            "events.read",
+            "inbox.read",
+            "inbox.write",
+            "approvals.write",
+            "repos.read",
+            "repos.manage",
+            "files.read",
+            "preview.proxy",
+            "devices.read",
+        ]);
+        assert_eq!(operator.effective_profile(), Profile::Operator);
+        assert_eq!(
+            operator.effective_capabilities(),
+            Profile::Operator.capability_names()
+        );
+    }
+
+    #[test]
+    fn legacy_migration_does_not_widen_custom_grant_sets() {
+        for capabilities in [
+            vec!["sessions.read", "approvals.write"],
+            vec![
+                "sessions.read",
+                "events.read",
+                "inbox.read",
+                "repos.read",
+                "files.read",
+            ],
+            vec![
+                "sessions.read",
+                "events.read",
+                "inbox.read",
+                "repos.read",
+                "files.read",
+                "devices.read",
+                "uploads.write",
+            ],
+            vec![
+                "sessions.read",
+                "events.read",
+                "inbox.read",
+                "inbox.write",
+                "approvals.write",
+                "repos.read",
+                "repos.manage",
+                "files.read",
+                "preview.proxy",
+                "devices.read",
+                "uploads.write",
+                "unknown.custom",
+            ],
+        ] {
+            let device = legacy_device(&capabilities);
+            assert_eq!(device.effective_capabilities(), capabilities);
+            assert_eq!(device.effective_profile(), Profile::Observer);
+        }
+    }
+
+    #[test]
+    fn explicit_stored_profile_still_controls_effective_capabilities() {
+        let mut device = legacy_device(&["sessions.read", "approvals.write"]);
+        device.profile = Some(Profile::Operator);
+        assert_eq!(device.effective_profile(), Profile::Operator);
+        assert_eq!(
+            device.effective_capabilities(),
+            Profile::Operator.capability_names()
+        );
     }
 
     struct PersistHookReset;
