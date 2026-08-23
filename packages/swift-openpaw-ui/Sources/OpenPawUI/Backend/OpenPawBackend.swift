@@ -17,6 +17,7 @@ public protocol OpenPawBackend: Sendable {
         answer: String?,
         detailAcknowledged: Bool
     ) async throws -> ResolveResult
+    func dismiss(item: InboxItem) async throws -> InboxDismissResult
     func events(session: String?, afterSeq: UInt64?) -> AsyncThrowingStream<Event, any Error>
     func repos() async throws -> [RepoSummary]
     func repoStatus(_ repo: String) async throws -> RepoStatus
@@ -29,6 +30,13 @@ public protocol OpenPawBackend: Sendable {
     func previewURL(port: Int, path: String) throws -> URL
     func tailscaleDevices() async throws -> TailscaleDevicesResponse
     func audit(limit: Int) async throws -> [AuditEntry]
+}
+
+public extension OpenPawBackend {
+    /// Keeps specialized test and preview backends source-compatible while making unsupported dismissal fail closed.
+    func dismiss(item: InboxItem) async throws -> InboxDismissResult {
+        throw HostClientError.badRequest("This backend does not support durable inbox dismissal.")
+    }
 }
 
 /// The PTY side. Kept separate from `OpenPawBackend` because the terminal is authoritative for execution and

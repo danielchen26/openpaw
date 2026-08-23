@@ -18,6 +18,7 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use openpaw_agents::Cursor;
@@ -31,6 +32,7 @@ use crate::auth::{constant_time_eq, sha256_hex};
 const DIR_MODE: u32 = 0o700;
 /// File mode for anything holding secret material.
 const SECRET_MODE: u32 = 0o600;
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A paired device. One row per phone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,25 +190,30 @@ impl Store {
 
     /// Record a newly paired device.
     pub fn insert_device(&self, device: Device) -> Result<()> {
-        {
-            let mut guard = self.lock();
-            guard.devices.retain(|d| d.device_id != device.device_id);
-            guard.devices.push(device);
-        }
-        self.persist()
+        let mut guard = self.lock();
+        let mut snapshot = guard.clone();
+        snapshot.devices.retain(|d| d.device_id != device.device_id);
+        snapshot.devices.push(device);
+        self.persist_snapshot(&snapshot)?;
+        *guard = snapshot;
+        Ok(())
     }
 
     /// Stamp `last_seen`. Best effort: a failed stamp must never fail a request.
     pub fn touch_device(&self, device_id: &str, now: OffsetDateTime) {
+        let mut guard = self.lock();
+        let mut snapshot = guard.clone();
+        if let Some(device) = snapshot
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id)
         {
-            let mut guard = self.lock();
-            match guard.devices.iter_mut().find(|d| d.device_id == device_id) {
-                Some(device) => device.last_seen = Some(now),
-                None => return,
+            device.last_seen = Some(now);
+            if let Err(err) = self.persist_snapshot(&snapshot) {
+                tracing::warn!(%err, "could not persist device last_seen");
+                return;
             }
-        }
-        if let Err(err) = self.persist() {
-            tracing::warn!(%err, "could not persist device last_seen");
+            *guard = snapshot;
         }
     }
 
@@ -229,13 +236,14 @@ impl Store {
         if updated.is_empty() {
             return Ok(());
         }
-        {
-            let mut guard = self.lock();
-            for (session, cursor) in updated {
-                guard.cursors.insert(session.as_ref().to_owned(), cursor);
-            }
+        let mut guard = self.lock();
+        let mut snapshot = guard.clone();
+        for (session, cursor) in updated {
+            snapshot.cursors.insert(session.as_ref().to_owned(), cursor);
         }
-        self.persist()
+        self.persist_snapshot(&snapshot)?;
+        *guard = snapshot;
+        Ok(())
     }
 
     /// Persist an informational inbox dismissal tombstone before in-memory mutation.
@@ -245,25 +253,22 @@ impl Store {
         device_id: &str,
         at: OffsetDateTime,
     ) -> Result<bool> {
-        let mut inserted = false;
-        {
-            let mut guard = self.lock();
-            if !guard.dismissed_inbox.contains_key(id.as_ref()) {
-                guard.dismissed_inbox.insert(
-                    id.as_ref().to_owned(),
-                    DismissedInboxItem {
-                        inbox_id: id.as_ref().to_owned(),
-                        device_id: device_id.to_owned(),
-                        dismissed_at: at,
-                    },
-                );
-                inserted = true;
-            }
+        let mut guard = self.lock();
+        if guard.dismissed_inbox.contains_key(id.as_ref()) {
+            return Ok(false);
         }
-        if inserted {
-            self.persist()?;
-        }
-        Ok(inserted)
+        let item = DismissedInboxItem {
+            inbox_id: id.as_ref().to_owned(),
+            device_id: device_id.to_owned(),
+            dismissed_at: at,
+        };
+        let mut snapshot = guard.clone();
+        snapshot
+            .dismissed_inbox
+            .insert(id.as_ref().to_owned(), item.clone());
+        self.persist_snapshot(&snapshot)?;
+        guard.dismissed_inbox.insert(id.as_ref().to_owned(), item);
+        Ok(true)
     }
 
     /// True when an inbox item id has a durable local dismissal tombstone.
@@ -289,10 +294,9 @@ impl Store {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Serialize and replace `state.json` atomically at mode 0600.
-    fn persist(&self) -> Result<()> {
-        let snapshot = self.lock().clone();
-        let bytes = serde_json::to_vec_pretty(&snapshot)?;
+    fn persist_snapshot(&self, snapshot: &StateFile) -> Result<()> {
+        before_persist_write_for_tests(&self.path);
+        let bytes = serde_json::to_vec_pretty(snapshot)?;
         write_private_atomic(&self.path, &bytes)
     }
 }
@@ -331,15 +335,59 @@ pub fn ensure_private_file(path: &Path) -> Result<()> {
 /// Write `bytes` to `path` via a same-directory temporary file, so a crash can
 /// never leave a half-written state file, and never at a mode wider than 0600.
 pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    match write_private_atomic_with_commit(path, bytes)? {
+        AtomicWriteResult::Committed | AtomicWriteResult::CommittedWithWarning(_) => Ok(()),
+    }
+}
+
+/// A post-rename anomaly. The new file is authoritative and callers must not
+/// restore a consumed token, but an API response can still tell the operator
+/// which property the host could not confirm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicWriteWarning {
+    /// The destination was renamed, but syncing the containing directory failed.
+    DurabilityNotConfirmed,
+    /// The destination was renamed, but the final 0600 verification failed.
+    PermissionsNotConfirmed,
+}
+
+impl AtomicWriteWarning {
+    /// Stable API spelling. Never includes a path or operating-system error.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::DurabilityNotConfirmed => "decision_durability_not_confirmed",
+            Self::PermissionsNotConfirmed => "decision_permissions_not_confirmed",
+        }
+    }
+}
+
+/// Result boundary for atomic writes. Errors returned by this function are
+/// guaranteed to be pre-commit: the destination path was not renamed into place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicWriteResult {
+    /// The destination path has been replaced and its directory and mode were confirmed.
+    Committed,
+    /// The destination path has been replaced, but one post-commit confirmation
+    /// failed. Externally visible authority is still spent and must not be rolled back.
+    CommittedWithWarning(AtomicWriteWarning),
+}
+
+/// Write `bytes` to `path` atomically. If this returns `Err`, the rename did not
+/// commit. Once the rename commits, post-rename failures are logged and the call
+/// returns `Committed` so callers never confuse a committed handoff with a
+/// pre-commit failure.
+pub fn write_private_atomic_with_commit(path: &Path, bytes: &[u8]) -> Result<AtomicWriteResult> {
     let dir = path
         .parent()
         .context("state file must have a parent directory")?;
+    let unique = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!(
-        ".{}.tmp-{}",
+        ".{}.tmp-{}-{}",
         path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("openpaw"),
-        std::process::id()
+        std::process::id(),
+        unique
     ));
     {
         let mut file = std::fs::OpenOptions::new()
@@ -355,8 +403,97 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             .with_context(|| format!("fsync {}", tmp.display()))?;
     }
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
-    ensure_private_file(path)
+    if let Some(err) = forced_post_rename_atomic_write_failure_for_tests(path) {
+        tracing::warn!(path = %path.display(), %err, "forced post-rename atomic write failure after commit");
+        return Ok(AtomicWriteResult::CommittedWithWarning(
+            AtomicWriteWarning::DurabilityNotConfirmed,
+        ));
+    }
+    if let Err(err) = std::fs::File::open(dir)
+        .with_context(|| format!("opening {}", dir.display()))
+        .and_then(|dir_file| {
+            dir_file
+                .sync_all()
+                .with_context(|| format!("fsync {}", dir.display()))
+        })
+    {
+        tracing::warn!(path = %path.display(), %err, "post-rename directory durability was not confirmed");
+        return Ok(AtomicWriteResult::CommittedWithWarning(
+            AtomicWriteWarning::DurabilityNotConfirmed,
+        ));
+    }
+    if let Err(err) = ensure_private_file(path) {
+        tracing::warn!(path = %path.display(), %err, "post-rename file permissions were not confirmed");
+        return Ok(AtomicWriteResult::CommittedWithWarning(
+            AtomicWriteWarning::PermissionsNotConfirmed,
+        ));
+    }
+    Ok(AtomicWriteResult::Committed)
 }
+
+#[cfg(debug_assertions)]
+type ForcedAtomicFailure = std::sync::Arc<PathBuf>;
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub struct ForcedAtomicFailureGuard;
+
+#[cfg(debug_assertions)]
+impl Drop for ForcedAtomicFailureGuard {
+    fn drop(&mut self) {
+        *forced_atomic_failure_for_tests().lock().unwrap() = None;
+    }
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn force_post_rename_atomic_write_failure_for_tests(path: PathBuf) -> ForcedAtomicFailureGuard {
+    *forced_atomic_failure_for_tests().lock().unwrap() = Some(std::sync::Arc::new(path));
+    ForcedAtomicFailureGuard
+}
+
+#[cfg(debug_assertions)]
+fn forced_post_rename_atomic_write_failure_for_tests(path: &Path) -> Option<anyhow::Error> {
+    let guard = forced_atomic_failure_for_tests().lock().unwrap();
+    guard
+        .as_ref()
+        .filter(|forced| forced.as_path() == path)
+        .map(|_| anyhow::anyhow!("forced post-rename failure for test"))
+}
+
+#[cfg(not(debug_assertions))]
+fn forced_post_rename_atomic_write_failure_for_tests(_path: &Path) -> Option<anyhow::Error> {
+    None
+}
+
+#[cfg(debug_assertions)]
+fn forced_atomic_failure_for_tests() -> &'static Mutex<Option<ForcedAtomicFailure>> {
+    use std::sync::OnceLock;
+
+    static FAILURE: OnceLock<Mutex<Option<ForcedAtomicFailure>>> = OnceLock::new();
+    FAILURE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+type PersistWriteHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
+
+#[cfg(test)]
+fn before_persist_write_for_tests(path: &Path) {
+    if let Some(hook) = persist_write_hook_for_tests().lock().unwrap().clone() {
+        hook(path);
+    }
+}
+
+#[cfg(test)]
+fn persist_write_hook_for_tests() -> &'static Mutex<Option<PersistWriteHook>> {
+    use std::sync::OnceLock;
+
+    static HOOK: OnceLock<Mutex<Option<PersistWriteHook>>> = OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(not(test))]
+fn before_persist_write_for_tests(_path: &Path) {}
 
 /// Read `hook-token`, minting one at mode 0600 if it does not exist.
 fn load_or_create_hook_token(path: &Path) -> Result<String> {
@@ -382,6 +519,7 @@ fn load_or_create_hook_token(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     fn device(id: &str, token: &str) -> Device {
         Device {
@@ -394,6 +532,102 @@ mod tests {
             paired_at: OffsetDateTime::UNIX_EPOCH,
             last_seen: None,
         }
+    }
+
+    struct PersistHookReset;
+
+    impl Drop for PersistHookReset {
+        fn drop(&mut self) {
+            *persist_write_hook_for_tests().lock().unwrap() = None;
+        }
+    }
+
+    fn install_persist_write_hook(hook: PersistWriteHook) -> PersistHookReset {
+        *persist_write_hook_for_tests().lock().unwrap() = Some(hook);
+        PersistHookReset
+    }
+
+    #[test]
+    fn concurrent_store_mutation_cannot_overwrite_returned_dismissal_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        let store = Arc::new(Store::open(&root).unwrap());
+        store.insert_device(device("dev_a", "right")).unwrap();
+        let id: InboxId = "inb_1123456789abcdef01234567".parse().unwrap();
+        let session: SessionId = "sess_cc-concurrent".parse().unwrap();
+
+        let first_writer_entered = Arc::new(Barrier::new(2));
+        let release_first_writer = Arc::new(Barrier::new(2));
+        let first_call = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let tested_path = root.join("state.json");
+        let _reset = install_persist_write_hook({
+            let first_writer_entered = Arc::clone(&first_writer_entered);
+            let release_first_writer = Arc::clone(&release_first_writer);
+            let first_call = Arc::clone(&first_call);
+            Arc::new(move |path| {
+                if path == tested_path && first_call.swap(false, Ordering::SeqCst) {
+                    first_writer_entered.wait();
+                    release_first_writer.wait();
+                }
+            })
+        });
+
+        let cursor_store = Arc::clone(&store);
+        let cursor_thread = std::thread::spawn(move || {
+            cursor_store
+                .save_cursors(vec![(session, Cursor::default())])
+                .unwrap();
+        });
+        first_writer_entered.wait();
+
+        let dismiss_store = Arc::clone(&store);
+        let dismissed_id = id.clone();
+        let dismiss_thread = std::thread::spawn(move || {
+            dismiss_store
+                .insert_dismissed_inbox(&dismissed_id, "dev_a", OffsetDateTime::UNIX_EPOCH)
+                .unwrap()
+        });
+
+        release_first_writer.wait();
+        cursor_thread.join().unwrap();
+        assert!(dismiss_thread.join().unwrap());
+        drop(store);
+
+        let reopened = Store::open(&root).unwrap();
+        assert!(
+            reopened.is_inbox_dismissed(&id),
+            "a stale concurrent snapshot must not overwrite a successfully returned dismissal"
+        );
+    }
+
+    #[test]
+    fn concurrent_atomic_writes_do_not_collide_on_pid_only_temp_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let writers = 24;
+        let ready = Arc::new(Barrier::new(writers));
+
+        let threads: Vec<_> = (0..writers)
+            .map(|i| {
+                let path = path.clone();
+                let ready = Arc::clone(&ready);
+                std::thread::spawn(move || {
+                    let bytes = format!("{{\"writer\":{i}}}");
+                    ready.wait();
+                    write_private_atomic(&path, bytes.as_bytes())
+                })
+            })
+            .collect();
+
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -417,6 +651,40 @@ mod tests {
         let reopened = Store::open(&root).unwrap();
         assert!(reopened.is_inbox_dismissed(&id));
         assert_eq!(reopened.dismissed_inbox_ids(), vec![id]);
+    }
+
+    #[test]
+    fn dismissed_inbox_insert_is_failure_atomic_and_retry_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        let state_path = root.join("state.json");
+        let id: InboxId = "inb_0123456789abcdef01234568".parse().unwrap();
+        let store = Store::open(&root).unwrap();
+        store.insert_device(device("dev_a", "right")).unwrap();
+
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir(&state_path).unwrap();
+        assert!(
+            store
+                .insert_dismissed_inbox(&id, "dev_a", OffsetDateTime::UNIX_EPOCH)
+                .is_err(),
+            "persistence failure is surfaced"
+        );
+        assert!(
+            !store.is_inbox_dismissed(&id),
+            "failed persistence must not mutate memory"
+        );
+
+        std::fs::remove_dir(&state_path).unwrap();
+        assert!(
+            store
+                .insert_dismissed_inbox(&id, "dev_a", OffsetDateTime::UNIX_EPOCH)
+                .unwrap()
+        );
+        drop(store);
+
+        let reopened = Store::open(&root).unwrap();
+        assert!(reopened.is_inbox_dismissed(&id));
     }
 
     #[test]

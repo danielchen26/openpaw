@@ -20,7 +20,7 @@ use axum::extract::{Path as UrlPath, State};
 use axum::{Extension, Json};
 use openpaw_protocol::{
     ActionId, Body, DecidedBy, Event, InboxCategory, InboxId, InboxItem, InboxStatus,
-    PermissionResolved, QuestionAnswered,
+    PermissionResolved, QuestionAnswered, QuestionRequested,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,8 +30,8 @@ use crate::AppState;
 use crate::api::ApiError;
 use crate::audit::AuditEntry;
 use crate::auth::AuthedDevice;
-use crate::bus::ClaimError;
 use crate::bus::DismissError;
+use crate::bus::{ClaimError, PendingItem};
 
 /// Schema version of a decision file.
 pub const DECISION_VERSION: &str = "1";
@@ -71,6 +71,10 @@ pub struct ResolveResponse {
     /// Id of the event published as a result. `null` for a dismissal, which
     /// produces no agent-visible fact.
     pub event_id: Option<String>,
+    /// Stable warning code when the decision was committed and authority spent,
+    /// but the host could not confirm a post-rename durability property.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// Response of `POST /v1/inbox/{id}/dismiss`.
@@ -170,14 +174,34 @@ pub fn decision_filename(request_id: &str) -> String {
     format!("{safe}.json")
 }
 
-/// Write a decision atomically at mode 0600 and return its path.
-pub async fn write_decision(dir: &Path, decision: &Decision) -> anyhow::Result<PathBuf> {
+/// Result of committing one decision file.
+#[derive(Debug)]
+pub struct DecisionWriteOutcome {
+    /// Committed decision-file path.
+    pub path: PathBuf,
+    /// Stable warning code for a post-rename confirmation failure.
+    pub warning: Option<String>,
+}
+
+/// Write a decision atomically at mode 0600 and return its committed outcome.
+pub async fn write_decision(
+    dir: &Path,
+    decision: &Decision,
+) -> anyhow::Result<DecisionWriteOutcome> {
     let path = dir.join(decision_filename(&decision.request_id));
     let bytes = serde_json::to_vec_pretty(decision)?;
     let target = path.clone();
-    tokio::task::spawn_blocking(move || crate::state::write_private_atomic(&target, &bytes))
-        .await??;
-    Ok(path)
+    let committed = tokio::task::spawn_blocking(move || {
+        crate::state::write_private_atomic_with_commit(&target, &bytes)
+    })
+    .await??;
+    let warning = match committed {
+        crate::state::AtomicWriteResult::Committed => None,
+        crate::state::AtomicWriteResult::CommittedWithWarning(warning) => {
+            Some(warning.code().to_owned())
+        }
+    };
+    Ok(DecisionWriteOutcome { path, warning })
 }
 
 /// Read a decision for `request_id`, if one has been written.
@@ -280,6 +304,42 @@ pub async fn resolve(
         )));
     }
 
+    let Some(request_id) = pending.request_id().map(str::to_owned) else {
+        return Err(ApiError::conflict(
+            "informational inbox items must be dismissed with /v1/inbox/{id}/dismiss",
+        ));
+    };
+
+    if !pending.item.actions.contains(&request.action) {
+        return Err(ApiError::bad_request(format!(
+            "action {action} is not available for this inbox item"
+        )));
+    }
+
+    if pending.item.action_token.as_deref().is_some_and(|token| {
+        !crate::auth::constant_time_eq(token.as_bytes(), request.action_token.as_bytes())
+    }) {
+        return Err(ApiError::forbidden(ClaimError::BadToken.to_string()));
+    }
+
+    if let Some(question) = question_request(&pending)? {
+        validate_question_answer(&request, &question)?;
+    }
+
+    app.audit
+        .append(&AuditEntry::now(
+            &device.device_id,
+            "inbox.resolve",
+            id.as_ref(),
+            if request.detail_acknowledged {
+                format!("requested {action} (detail acknowledged)")
+            } else {
+                format!("requested {action}")
+            },
+        ))
+        .await
+        .map_err(ApiError::internal)?;
+
     let claimed = app
         .bus
         .claim(&id, &request.action_token, &action)
@@ -291,25 +351,6 @@ pub async fn resolve(
                 ClaimError::AlreadyResolved => ApiError::conflict(err.to_string()),
             }
         })?;
-
-    let request_id = claimed.request_id().map(str::to_owned);
-    let Some(request_id) = request_id else {
-        // Informational item (a completion, a context warning): there is nothing
-        // to tell the agent, so acknowledging it is a local dismissal.
-        app.audit
-            .append(&AuditEntry::now(
-                &device.device_id,
-                "inbox.dismiss",
-                id.as_ref(),
-                &action,
-            ))
-            .await
-            .map_err(ApiError::internal)?;
-        return Ok(Json(ResolveResponse {
-            status: "dismissed".to_owned(),
-            event_id: None,
-        }));
-    };
 
     let decision = Decision {
         version: DECISION_VERSION.to_owned(),
@@ -329,8 +370,8 @@ pub async fn resolve(
     // The decision file is the agent-visible effect, so it is written before the
     // item is reported resolved. If it fails, the claim is rolled back: the phone
     // must not show "approved" while the terminal still waits.
-    let path = match write_decision(&app.store.decisions_dir(), &decision).await {
-        Ok(path) => path,
+    let write = match write_decision(&app.store.decisions_dir(), &decision).await {
+        Ok(write) => write,
         Err(err) => {
             app.bus.restore(claimed);
             let _ = app
@@ -345,6 +386,17 @@ pub async fn resolve(
             return Err(ApiError::internal(err));
         }
     };
+    if let Some(warning) = write.warning.as_deref() {
+        let _ = app
+            .audit
+            .append(&AuditEntry::now(
+                &device.device_id,
+                "inbox.resolve",
+                id.as_ref(),
+                format!("committed with warning: {warning}"),
+            ))
+            .await;
+    }
 
     let body = resolution_body(&claimed.item, &request, &request_id, &device.device_id);
     let event = Event::new(
@@ -360,30 +412,17 @@ pub async fn resolve(
     );
     let (published, _item) = app.publish(event);
 
-    app.audit
-        .append(&AuditEntry::now(
-            &device.device_id,
-            "inbox.resolve",
-            id.as_ref(),
-            if request.detail_acknowledged {
-                format!("{action} (detail acknowledged)")
-            } else {
-                action.clone()
-            },
-        ))
-        .await
-        .map_err(ApiError::internal)?;
-
     tracing::info!(
         inbox = %id,
         request = %request_id,
         %action,
-        decision_file = %path.display(),
+        decision_file = %write.path.display(),
         "decision recorded"
     );
     Ok(Json(ResolveResponse {
         status: "resolved".to_owned(),
         event_id: Some(published.event_id.as_ref().to_owned()),
+        warning: write.warning,
     }))
 }
 
@@ -406,25 +445,34 @@ pub async fn dismiss(
         ));
     }
 
-    let inserted = app
-        .store
+    app.audit
+        .append(&AuditEntry::now(
+            &device.device_id,
+            "inbox.dismiss",
+            id.as_ref(),
+            "dismiss requested",
+        ))
+        .await
+        .map_err(ApiError::internal)?;
+
+    if app.store.is_inbox_dismissed(&id) {
+        let item = app.bus.dismiss(&id).map_err(|err| match err {
+            DismissError::Unknown => ApiError::not_found("unknown inbox item"),
+            DismissError::Actionable => ApiError::conflict(err.to_string()),
+        })?;
+        return Ok(Json(DismissResponse {
+            status: "dismissed".to_owned(),
+            item,
+        }));
+    }
+
+    app.store
         .insert_dismissed_inbox(&id, &device.device_id, OffsetDateTime::now_utc())
         .map_err(ApiError::internal)?;
     let item = app.bus.dismiss(&id).map_err(|err| match err {
         DismissError::Unknown => ApiError::not_found("unknown inbox item"),
         DismissError::Actionable => ApiError::conflict(err.to_string()),
     })?;
-    if inserted {
-        app.audit
-            .append(&AuditEntry::now(
-                &device.device_id,
-                "inbox.dismiss",
-                id.as_ref(),
-                "dismissed",
-            ))
-            .await
-            .map_err(ApiError::internal)?;
-    }
     Ok(Json(DismissResponse {
         status: "dismissed".to_owned(),
         item,
@@ -454,6 +502,39 @@ fn resolution_body(
             decided_by: DecidedBy::Device,
             device_id: Some(device_id.to_owned()),
         }),
+    }
+}
+
+fn question_request(pending: &PendingItem) -> Result<Option<QuestionRequested>, ApiError> {
+    if pending.item.category != InboxCategory::Question {
+        return Ok(None);
+    }
+    match &pending.source.body {
+        Body::QuestionRequested(question) => Ok(Some(question.clone())),
+        _ => Err(ApiError::conflict(
+            "question authority details are no longer available",
+        )),
+    }
+}
+
+fn validate_question_answer(
+    request: &ResolveRequest,
+    question: &QuestionRequested,
+) -> Result<(), ApiError> {
+    if request.action != ActionId::Answer {
+        return Ok(());
+    }
+    let Some(answer) = request.answer.as_deref().filter(|s| !s.trim().is_empty()) else {
+        return Err(ApiError::bad_request(
+            "answer is required for question items",
+        ));
+    };
+    if question.allows_free_text || question.choices.iter().any(|choice| choice == answer) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(
+            "answer must be one of the question choices",
+        ))
     }
 }
 
@@ -569,8 +650,9 @@ mod tests {
     async fn decisions_round_trip_through_the_filesystem() {
         let dir = tempfile::tempdir().unwrap();
         let written = decision("req-1", ActionId::ApproveOnce);
-        let path = write_decision(dir.path(), &written).await.unwrap();
-        assert!(path.ends_with("req-1.json"));
+        let outcome = write_decision(dir.path(), &written).await.unwrap();
+        assert!(outcome.path.ends_with("req-1.json"));
+        assert!(outcome.warning.is_none());
 
         let read = read_decision(dir.path(), "req-1").await.unwrap();
         assert_eq!(read, written);

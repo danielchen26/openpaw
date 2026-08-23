@@ -183,6 +183,10 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, PairedHo
         )
     }
 
+    func dismiss(item: InboxItem) async throws -> InboxDismissResult {
+        try await state.requireClient().dismiss(itemID: item.id)
+    }
+
     func events(session: String?, afterSeq: UInt64?) -> AsyncThrowingStream<Event, any Error> {
         AsyncThrowingStream { continuation in
             let task = Task { [state] in

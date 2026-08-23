@@ -205,7 +205,7 @@ final class RootTabSwipeUITests: XCTestCase {
         )
         row.swipeLeft()
         XCTAssertTrue(app.buttons["Deny"].waitForExistence(timeout: 5), "row swipe did not expose Deny")
-        XCTAssertTrue(app.buttons["Dismiss"].exists, "row swipe did not expose Dismiss")
+        XCTAssertFalse(app.buttons["Dismiss"].exists, "an actionable row exposed the informational archive action")
         XCTAssertTrue(row.exists, "a full swipe executed an Inbox decision instead of only exposing its actions")
         assertCurrent("Inbox", in: app)
     }

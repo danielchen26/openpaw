@@ -95,8 +95,9 @@ reconnect that overlaps cannot duplicate a row. See `docs/protocol/README.md`.
 
 ### `GET /v1/inbox?status=` — `inbox.read`
 
-Array of inbox items (`protocol/json-schema/inbox-item.schema.json`). Each pending item carries a single-use
-`action_token` with a 10-minute TTL. Tokens exist only here, over the tunnel — never in a push payload.
+Array of inbox items (`protocol/json-schema/inbox-item.schema.json`). Each pending permission or question request
+carries a single-use `action_token` with a 10-minute TTL. Informational items never receive a token. Tokens exist
+only here, over the tunnel — never in a push payload.
 
 ### `POST /v1/inbox/{id}/resolve` — `approvals.write`
 
@@ -106,10 +107,20 @@ Array of inbox items (`protocol/json-schema/inbox-item.schema.json`). Each pendi
 
 - `400` when the item's `risk.requires_detail_expansion` is true and `detail_acknowledged` is not. The host
   enforces the gate; the app does too. Neither trusts the other.
-- `401` when the action token is missing, expired, or already used.
-- `403` when the device lacks `approvals.write`.
+- `403` when the action token is missing, wrong, or expired, or the device lacks `approvals.write`.
+- `409` when the action token was already used.
 - `200` `{"status": "resolved", "event_id": "evt_…"}`, plus an audit line, a `permission.resolved` event on the
   stream, and a decision file at `<state_dir>/decisions/<request_id>.json` that the agent's hook reads back.
+- A `200` may also include `"warning": "decision_durability_not_confirmed"` or
+  `"decision_permissions_not_confirmed"`. The decision file was renamed into place and the one-time authority is
+  spent, so the client must not retry. It should tell the operator to verify the waiting agent and inspect host
+  diagnostics.
+
+### `POST /v1/inbox/{id}/dismiss` — `inbox.write`
+
+Dismisses only informational items. No `action_token` is accepted or required. The host persists a tombstone before
+changing the in-memory projection, records `inbox.dismiss`, and returns the updated item. Repeating the request is
+idempotent. Permission and question requests return `409` and retain their original decision authority.
 
 ### Repository inspection — `repos.read`, blobs need `files.read`
 

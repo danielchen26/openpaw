@@ -1,10 +1,11 @@
-import OpenPawTerminalCore
-import XCTest
+#if DEBUG && targetEnvironment(simulator)
+    import OpenPawTerminalCore
+    import XCTest
 
-@testable import OpenPawApp
+    @testable import OpenPawApp
 
-@MainActor
-final class DebugScenarioTests: XCTestCase {
+    @MainActor
+    final class DebugScenarioTests: XCTestCase {
     func testRecognisesEverySupportedScenarioFromLaunchArguments() {
         for scenario in DebugScenario.allCases {
             XCTAssertEqual(
@@ -72,4 +73,5 @@ final class DebugScenarioTests: XCTestCase {
         await model.connectSelectedHost()
         XCTAssertEqual(model.connection, .connected(.ssh))
     }
-}
+    }
+#endif

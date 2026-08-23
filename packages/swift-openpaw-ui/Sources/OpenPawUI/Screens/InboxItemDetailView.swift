@@ -2,6 +2,20 @@ import Foundation
 import OpenPawProtocol
 import SwiftUI
 
+struct InboxDetailControlPlan: Equatable {
+    let offersDurableDismiss: Bool
+    let preRevealActions: [ActionID]
+    let closingActions: [ActionID]
+
+    init(item: InboxItem, detailAcknowledged: Bool) {
+        offersDurableDismiss = item.isDismissible
+        let actions = [ActionID.acknowledge, .deny, .denyAlways, .stop]
+            .filter { item.actions.contains($0) }
+        closingActions = item.isDismissible ? [] : actions
+        preRevealActions = detailAcknowledged ? [] : closingActions.filter { !$0.isApproval }
+    }
+}
+
 /// One inbox item in full: what was asked, by which agent, out of which session, and on what evidence.
 ///
 /// This screen never grants anything. Every approval in the product goes through `ApprovalSheet`, so the gate is
@@ -290,7 +304,20 @@ public struct InboxItemDetailView: View {
             WorkingIndicator(label: "Sending your decision")
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: 48)
+        } else if controlPlan.offersDurableDismiss {
+            DecisionButton(title: "Dismiss", glyph: "archivebox", emphasis: .primary) {
+                dismissItem()
+            }
         } else if !model.isDetailAcknowledged(item) {
+            ForEach(controlPlan.preRevealActions, id: \.self) { action in
+                DecisionButton(
+                    title: InboxCopy.title(for: action),
+                    glyph: InboxCopy.glyph(for: action),
+                    emphasis: .secondary
+                ) {
+                    decide(action)
+                }
+            }
             RevealCommandButton(action: reveal)
         } else if hasApproval {
             DecisionButton(title: "Review and decide", glyph: "checkmark.shield", emphasis: .primary) {
@@ -300,7 +327,7 @@ public struct InboxItemDetailView: View {
             if showsAnswerField {
                 answerField
             }
-            ForEach(closingActions, id: \.self) { action in
+            ForEach(controlPlan.closingActions, id: \.self) { action in
                 DecisionButton(
                     title: InboxCopy.title(for: action),
                     glyph: InboxCopy.glyph(for: action),
@@ -380,9 +407,8 @@ public struct InboxItemDetailView: View {
         item.actions.contains(.answer) && (facts.allowsFreeText || facts.choices.isEmpty)
     }
 
-    /// Everything this screen may settle on its own, in a fixed order so the bar does not reshuffle between items.
-    private var closingActions: [ActionID] {
-        [.acknowledge, .deny, .denyAlways, .stop].filter { item.actions.contains($0) }
+    private var controlPlan: InboxDetailControlPlan {
+        InboxDetailControlPlan(item: item, detailAcknowledged: model.isDetailAcknowledged(item))
     }
 
     private var trimmedAnswer: String {
@@ -427,6 +453,15 @@ public struct InboxItemDetailView: View {
             let sent = await model.resolve(item, action: action, answer: text)
             isDeciding = false
             if sent { answer = "" }
+        }
+    }
+
+    private func dismissItem() {
+        isDeciding = true
+        Task {
+            model.lastError = nil
+            _ = await model.dismiss(item)
+            isDeciding = false
         }
     }
 }

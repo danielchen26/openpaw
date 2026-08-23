@@ -179,6 +179,12 @@ impl Harness {
     async fn audit_entries(&self) -> Vec<AuditEntry> {
         self.app.audit.tail(100).await.expect("audit tail")
     }
+
+    fn break_audit_path(&self) {
+        let path = self.app.audit.path().to_path_buf();
+        let _ = std::fs::remove_file(&path);
+        std::fs::create_dir(&path).expect("audit path as directory");
+    }
 }
 
 /// Register a device the way pairing would, and keep the secrets the phone keeps.
@@ -273,6 +279,21 @@ fn completion_event(unique: &str) -> Event {
 fn seed(harness: &Harness, event: Event) -> InboxItem {
     let (_stored, item) = harness.app.publish(event);
     item.expect("the event must project to an inbox item")
+}
+
+async fn resolve_item(harness: &Harness, item: &InboxItem, action: ActionId) -> reqwest::Response {
+    harness
+        .signed(
+            reqwest::Method::POST,
+            &format!("/v1/inbox/{}/resolve", item.id.as_ref()),
+            Some(json!({
+                "action": action,
+                "action_token": item.action_token.clone().unwrap_or_default(),
+                "detail_acknowledged": true,
+            })),
+            &harness.operator,
+        )
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -623,8 +644,8 @@ async fn informational_inbox_item_can_be_dismissed_idempotently_and_audited() {
     let item = seed(&harness, completion_event("dismiss"));
     assert!(item.request_id.is_none());
     assert!(
-        item.action_token.is_some(),
-        "legacy acknowledge token may exist before dismiss endpoint implementation"
+        item.action_token.is_none(),
+        "informational items must not carry action authority"
     );
 
     let path = format!("/v1/inbox/{}/dismiss", item.id);
@@ -667,9 +688,41 @@ async fn informational_inbox_item_can_be_dismissed_idempotently_and_audited() {
         .iter()
         .filter(|entry| entry.action == "inbox.dismiss")
         .collect();
-    assert_eq!(dismisses.len(), 1, "only the first dismiss is audited");
-    assert_eq!(dismisses[0].device_id, harness.operator.device_id);
-    assert_eq!(dismisses[0].target, item.id.as_ref());
+    assert_eq!(dismisses.len(), 2, "each valid dismiss attempt is audited");
+    for dismiss in &dismisses {
+        assert_eq!(dismiss.device_id, harness.operator.device_id);
+        assert_eq!(dismiss.target, item.id.as_ref());
+        assert_eq!(dismiss.result, "dismiss requested");
+    }
+}
+
+#[tokio::test]
+async fn dismiss_audit_failure_leaves_no_durable_or_bus_dismissal() {
+    let harness = Harness::boot().await;
+    let item = seed(&harness, completion_event("audit-failure"));
+    let path = format!("/v1/inbox/{}/dismiss", item.id);
+    harness.break_audit_path();
+
+    let response = harness
+        .signed(
+            reqwest::Method::POST,
+            &path,
+            Some(json!({})),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(response.status(), 500);
+
+    assert!(
+        !harness.app.store.is_inbox_dismissed(&item.id),
+        "failed audit must not leave a durable tombstone"
+    );
+    let pending = harness
+        .app
+        .bus
+        .peek(&item.id)
+        .expect("failed audit must not dismiss from the bus");
+    assert_eq!(pending.item.status, openpaw_protocol::InboxStatus::Pending);
 }
 
 #[tokio::test]
@@ -736,6 +789,291 @@ async fn dismiss_requires_inbox_write_and_rejects_actionable_or_unknown_items() 
 // ---------------------------------------------------------------------------
 // the detail-expansion gate
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn resolve_rejects_action_not_offered_by_pending_item_without_consuming_token() {
+    let harness = Harness::boot().await;
+    let item = seed(&harness, destructive_permission());
+    let token = item.action_token.clone().unwrap();
+    assert!(!item.actions.contains(&ActionId::ApproveAlways));
+
+    let response = harness
+        .signed(
+            reqwest::Method::POST,
+            &format!("/v1/inbox/{}/resolve", item.id),
+            Some(json!({
+                "action": "approve_always",
+                "action_token": token,
+                "detail_acknowledged": true,
+            })),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(response.status(), 400);
+    assert!(
+        openpaw_host::api::inbox::read_decision(
+            &harness.app.store.decisions_dir(),
+            "req-destructive"
+        )
+        .await
+        .is_none(),
+        "an unavailable action must not write a decision"
+    );
+
+    let response = resolve_item(&harness, &item, ActionId::Deny).await;
+    assert_eq!(
+        response.status(),
+        200,
+        "rejecting an unavailable action must not consume the token"
+    );
+}
+
+#[tokio::test]
+async fn question_answers_must_match_choices_unless_free_text_is_allowed() {
+    let harness = Harness::boot().await;
+    let item = seed(
+        &harness,
+        Event::new(
+            &session(),
+            AgentKind::ClaudeCode,
+            "hook:question:strict",
+            OffsetDateTime::now_utc(),
+            Body::QuestionRequested(QuestionRequested {
+                request_id: "req-strict-question".to_owned(),
+                question: "Pick one".to_owned(),
+                choices: vec!["red".to_owned(), "blue".to_owned()],
+                allows_free_text: false,
+            }),
+        ),
+    );
+    let token = item.action_token.clone().unwrap();
+
+    let rejected = harness
+        .signed(
+            reqwest::Method::POST,
+            &format!("/v1/inbox/{}/resolve", item.id),
+            Some(json!({
+                "action": "answer",
+                "action_token": token,
+                "answer": "green",
+            })),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(rejected.status(), 400);
+    assert!(
+        openpaw_host::api::inbox::read_decision(
+            &harness.app.store.decisions_dir(),
+            "req-strict-question"
+        )
+        .await
+        .is_none(),
+        "an out-of-choice answer must not write a decision"
+    );
+
+    let padded = harness
+        .signed(
+            reqwest::Method::POST,
+            &format!("/v1/inbox/{}/resolve", item.id),
+            Some(json!({
+                "action": "answer",
+                "action_token": token,
+                "answer": " blue ",
+            })),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(
+        padded.status(),
+        400,
+        "strict choices prefer exact matching; padding must be rejected"
+    );
+    assert!(
+        openpaw_host::api::inbox::read_decision(
+            &harness.app.store.decisions_dir(),
+            "req-strict-question"
+        )
+        .await
+        .is_none(),
+        "a padded strict answer must not write a decision"
+    );
+
+    let accepted = harness
+        .signed(
+            reqwest::Method::POST,
+            &format!("/v1/inbox/{}/resolve", item.id),
+            Some(json!({
+                "action": "answer",
+                "action_token": token,
+                "answer": "blue",
+            })),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(accepted.status(), 200);
+    let decision = openpaw_host::api::inbox::read_decision(
+        &harness.app.store.decisions_dir(),
+        "req-strict-question",
+    )
+    .await
+    .expect("accepted exact choice writes decision");
+    assert_eq!(decision.answer.as_deref(), Some("blue"));
+
+    let free = seed(&harness, question());
+    let free_response = harness
+        .signed(
+            reqwest::Method::POST,
+            &format!("/v1/inbox/{}/resolve", free.id),
+            Some(json!({
+                "action": "answer",
+                "action_token": free.action_token.clone().unwrap(),
+                "answer": "bun",
+            })),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(free_response.status(), 200);
+}
+
+#[tokio::test]
+async fn post_rename_decision_write_failure_keeps_claim_spent() {
+    let harness = Harness::boot().await;
+    let item = seed(&harness, destructive_permission());
+    let token = item.action_token.clone().unwrap();
+    let decision_path = harness
+        .app
+        .store
+        .decisions_dir()
+        .join("req-destructive.json");
+    let _guard = openpaw_host::state::force_post_rename_atomic_write_failure_for_tests(
+        decision_path.clone(),
+    );
+
+    let first = resolve_item(&harness, &item, ActionId::ApproveOnce).await;
+    assert_eq!(
+        first.status(),
+        200,
+        "a failure after rename is already committed and must not be rolled back"
+    );
+    let body: Value = first.json().await.unwrap();
+    assert_eq!(body["status"], "resolved");
+    assert_eq!(
+        body["warning"], "decision_durability_not_confirmed",
+        "a committed response must disclose that directory durability was not confirmed"
+    );
+    assert!(
+        decision_path.exists(),
+        "the rename committed the decision file"
+    );
+
+    let second = harness
+        .signed(
+            reqwest::Method::POST,
+            &format!("/v1/inbox/{}/resolve", item.id),
+            Some(json!({
+                "action": "deny",
+                "action_token": token,
+            })),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(
+        second.status(),
+        409,
+        "the original token must not be restored after a committed decision write"
+    );
+}
+
+#[tokio::test]
+async fn refused_tokens_do_not_audit_completed_approval_or_denial() {
+    let harness = Harness::boot().await;
+    let item = seed(&harness, destructive_permission());
+    let path = format!("/v1/inbox/{}/resolve", item.id);
+
+    let invalid = harness
+        .signed(
+            reqwest::Method::POST,
+            &path,
+            Some(json!({
+                "action": "approve_once",
+                "action_token": "not-the-token",
+                "detail_acknowledged": true,
+            })),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(invalid.status(), 403);
+
+    let token = item.action_token.clone().unwrap();
+    let first = harness
+        .signed(
+            reqwest::Method::POST,
+            &path,
+            Some(json!({
+                "action": "deny",
+                "action_token": token,
+            })),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(first.status(), 200);
+
+    let replayed = harness
+        .signed(
+            reqwest::Method::POST,
+            &path,
+            Some(json!({
+                "action": "deny",
+                "action_token": item.action_token.clone().unwrap(),
+            })),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(replayed.status(), 409);
+
+    let expired = seed(
+        &harness,
+        Event::new(
+            &session(),
+            AgentKind::ClaudeCode,
+            "hook:pretooluse:expired",
+            OffsetDateTime::now_utc(),
+            Body::PermissionRequested(PermissionRequested {
+                request_id: "req-expired".to_owned(),
+                tool: "Bash".to_owned(),
+                summary: "echo expired".to_owned(),
+                command: Some("echo expired".to_owned()),
+                paths: vec![],
+                risk: Risk::classify_command("echo expired"),
+                actions: vec![ActionId::ApproveOnce, ActionId::Deny],
+                expires_at: Some(OffsetDateTime::now_utc() - time::Duration::seconds(1)),
+            }),
+        ),
+    );
+    let expired_response = resolve_item(&harness, &expired, ActionId::ApproveOnce).await;
+    assert_eq!(expired_response.status(), 403);
+
+    let entries = harness.audit_entries().await;
+    let completed_for_failed_attempts: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            [item.id.as_ref(), expired.id.as_ref()].contains(&entry.target.as_str())
+                && (entry.result == "approve_once"
+                    || entry.result == "approve_once (detail acknowledged)"
+                    || entry.result == "deny")
+        })
+        .collect();
+    assert!(
+        completed_for_failed_attempts.is_empty(),
+        "failed attempts must be audited as requested attempts, not completed outcomes: {entries:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.target == item.id.as_ref() && entry.result == "requested deny"),
+        "the successful denial is still audited as a requested attempt before claim: {entries:?}"
+    );
+}
 
 #[tokio::test]
 async fn a_gated_command_needs_detail_acknowledged_and_then_hands_off_the_decision() {
@@ -821,12 +1159,15 @@ async fn a_gated_command_needs_detail_acknowledged_and_then_hands_off_the_decisi
     let entries = harness.audit_entries().await;
     let approval = entries
         .iter()
-        .find(|entry| entry.result.starts_with("approve_once"))
-        .expect("an approval entry");
+        .find(|entry| entry.result.starts_with("requested approve_once"))
+        .expect("an approval attempt entry");
     assert_eq!(approval.action, "inbox.resolve");
     assert_eq!(approval.target, item.id.as_ref());
     assert_eq!(approval.device_id, harness.operator.device_id);
-    assert_eq!(approval.result, "approve_once (detail acknowledged)");
+    assert_eq!(
+        approval.result,
+        "requested approve_once (detail acknowledged)"
+    );
     assert!(
         entries
             .iter()
@@ -896,6 +1237,44 @@ async fn a_denial_is_never_blocked_by_the_detail_gate() {
     assert!(decision.halts());
     assert!(!decision.approves());
     assert!(!decision.detail_acknowledged);
+}
+
+#[tokio::test]
+async fn audit_failure_before_resolve_leaves_actionable_item_unclaimed() {
+    let harness = Harness::boot().await;
+    let item = seed(&harness, destructive_permission());
+    let token = item.action_token.clone().unwrap();
+    harness.break_audit_path();
+
+    let response = resolve_item(&harness, &item, ActionId::ApproveOnce).await;
+    assert_eq!(response.status(), 500);
+    assert!(
+        openpaw_host::api::inbox::read_decision(
+            &harness.app.store.decisions_dir(),
+            "req-destructive"
+        )
+        .await
+        .is_none(),
+        "audit failure must happen before the decision handoff"
+    );
+    let claimed = harness.app.bus.claim(&item.id, &token, "deny");
+    assert!(
+        claimed.is_ok(),
+        "the original token remains usable because no irreversible claim happened: {claimed:?}"
+    );
+}
+
+#[tokio::test]
+async fn legacy_resolve_rejects_informational_items_without_dismissing_them() {
+    let harness = Harness::boot().await;
+    let item = seed(&harness, completion_event("legacy-resolve"));
+    assert!(item.action_token.is_none());
+
+    let response = resolve_item(&harness, &item, ActionId::Acknowledge).await;
+    assert_eq!(response.status(), 409);
+    let pending = harness.app.bus.peek(&item.id).expect("item remains listed");
+    assert_eq!(pending.item.status, openpaw_protocol::InboxStatus::Pending);
+    assert!(pending.item.action_token.is_none());
 }
 
 #[tokio::test]

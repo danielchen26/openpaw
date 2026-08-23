@@ -1,6 +1,7 @@
 import Foundation
 import OpenPawProtocol
 import OpenPawTerminalCore
+import SwiftUI
 import Testing
 
 @testable import OpenPawUI
@@ -353,6 +354,48 @@ struct RootNavigationTests {
     }
 
     @MainActor
+    @Test("A newer host selection waits for an older suspended teardown")
+    func newerHostSelectionCannotBeDisconnectedByAnOlderTeardown() async {
+        let initial = HostRecord(nickname: "Initial", hostname: "initial", username: "dev", auth: .agentForwarding)
+        let first = HostRecord(nickname: "First", hostname: "first", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Second", hostname: "second", username: "dev", auth: .agentForwarding)
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(
+            hostStore: HostStore(hosts: [initial, first, second]),
+            backend: RecordingBackend(),
+            terminal: terminal)
+        await model.connectSelectedHost()
+        #expect(terminal.activeHostID == initial.id)
+
+        let gate = SuspendedLifecycleGate()
+        terminal.suspendedDisconnectNumber = terminal.disconnectCount + 1
+        terminal.disconnectGate = gate
+        let staleSelection = Task { @MainActor in await model.selectHost(first.id) }
+        await gate.waitUntilStarted()
+
+        let currentSelection = Task { @MainActor in await model.selectHost(second.id) }
+        for _ in 0..<100 where terminal.disconnectCount < 3 {
+            await Task.yield()
+        }
+
+        #expect(model.selectedHostID == second.id)
+        #expect(model.isSwitchingHost, "the current selection must wait for the older teardown to finish")
+        #expect(
+            terminal.disconnectCount == 2,
+            "a newer selection must not start a second teardown while the older one is suspended")
+
+        await gate.release()
+        await staleSelection.value
+        await currentSelection.value
+        let lease = await model.connectSelectedHost()
+
+        #expect(lease?.hostID == second.id)
+        #expect(terminal.activeHostID == second.id)
+        #expect(model.selectedHostID == second.id)
+        #expect(model.isSwitchingHost == false)
+    }
+
+    @MainActor
     @Test("Host changes clear every host-scoped shell route while keeping the root destination")
     func routerInvalidatesHostScopedRoutes() {
         let router = ShellRouter()
@@ -627,10 +670,499 @@ struct RootNavigationTests {
         #expect(router.destination == .inbox)
         #expect(router.approvalItemID == "inb_abc")
     }
+
+    @MainActor
+    @Test("An Inbox URL round-trips one exact paired host and item")
+    func inboxRouteRoundTripsStrictly() throws {
+        let hostID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let route = InboxRoute(hostID: hostID, itemID: InboxID(rawValue: "inb_0123456789abcdef01234567"))
+
+        #expect(InboxRoute(url: route.url) == route)
+        #expect(InboxRoute(url: URL(string: "https://inbox?host=\(hostID)&item=inb_0123456789abcdef01234567")!) == nil)
+        #expect(InboxRoute(url: URL(string: "openpaw://inbox?host=not-a-uuid&item=inb_0123456789abcdef01234567")!) == nil)
+        #expect(InboxRoute(url: URL(string: "openpaw://inbox?host=\(hostID)&item=")!) == nil)
+        #expect(
+            InboxRoute(
+                url: URL(string: "openpaw://inbox?host=\(hostID)&host=\(hostID)&item=inb_0123456789abcdef01234567")!)
+                == nil
+        )
+        #expect(InboxRoute(url: URL(string: "openpaw://inbox?host=\(hostID)&item=inb_0123456789ABCDEF01234567")!) == nil)
+        #expect(InboxRoute(url: URL(string: "openpaw://inbox?host=\(hostID)&item=inb_01234567-9abcdef01234567")!) == nil)
+        #expect(InboxRoute(url: URL(string: "openpaw://inbox?host=\(hostID)&item=inb_01234567_9abcdef01234567")!) == nil)
+        #expect(InboxRoute(url: URL(string: "openpaw://inbox?host=\(hostID)&item=inb_0123456789abcdef0123456")!) == nil)
+        #expect(InboxRoute(url: URL(string: "openpaw://inbox?host=\(hostID)&item=inb_0123456789abcdef012345678")!) == nil)
+    }
+
+    @MainActor
+    @Test("An Inbox route selects, connects, refreshes, and resolves the requested host item")
+    func inboxRouteConnectsTheRequestedHostBeforePresenting() async throws {
+        let first = hostRecord()
+        let target = HostRecord(
+            id: UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!,
+            nickname: "Target",
+            hostname: "target",
+            username: "dev",
+            auth: .agentForwarding
+        )
+        let item = inboxRouteItem(id: "inb_aaaaaaaaaaaaaaaaaaaaaaaa")
+        let backend = RecordingBackend()
+        backend.inboxItems = [item]
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(
+            hostStore: HostStore(hosts: [first, target]), backend: backend, terminal: terminal)
+
+        let resolution = await InboxRouteCoordinator.resolve(
+            InboxRoute(hostID: target.id, itemID: item.id), model: model)
+
+        #expect(resolution == .present(item))
+        #expect(model.selectedHostID == target.id)
+        #expect(terminal.connectedHosts == [target.id])
+        #expect(backend.callCount("inbox") == 1)
+    }
+
+    @MainActor
+    @Test("Inbox routes distinguish missing hosts, stale items, and completed decisions")
+    func inboxRouteReportsTypedTerminalStates() async throws {
+        let host = hostRecord()
+        let backend = RecordingBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        model.connection = .connected(.ssh)
+
+        let missingHost = await InboxRouteCoordinator.resolve(
+            InboxRoute(hostID: UUID(), itemID: InboxID(rawValue: "inb_bbbbbbbbbbbbbbbbbbbbbbbb")), model: model)
+        #expect(missingHost == .unknownHost)
+
+        let stale = await InboxRouteCoordinator.resolve(
+            InboxRoute(hostID: host.id, itemID: InboxID(rawValue: "inb_bbbbbbbbbbbbbbbbbbbbbbbb")), model: model)
+        #expect(stale == .stale)
+
+        var dismissed = inboxRouteItem(id: "inb_cccccccccccccccccccccccc")
+        dismissed.status = .dismissed
+        backend.inboxItems = [dismissed]
+        let resolved = await InboxRouteCoordinator.resolve(
+            InboxRoute(hostID: host.id, itemID: dismissed.id), model: model)
+        #expect(resolved == .resolved(.dismissed))
+    }
+
+    @MainActor
+    @Test("Changing hosts clears a presented host-scoped Inbox route")
+    func routerInvalidatesTheHostScopedInboxRoute() {
+        let router = ShellRouter()
+        let route = InboxRoute(hostID: UUID(), itemID: InboxID(rawValue: "inb_dddddddddddddddddddddddd"))
+        router.openInboxRoute(route)
+
+        router.invalidateHostScopedState()
+
+        #expect(router.approvalRoute == nil)
+        #expect(router.approvalItemID == nil)
+        #expect(router.inboxRoutePresentation == nil)
+    }
+
+    @MainActor
+    @Test("Informational Inbox routes open detail without an approval sheet")
+    func informationalInboxRouteUsesDetailPresentation() {
+        let router = ShellRouter()
+        let route = InboxRoute(hostID: UUID(), itemID: InboxID(rawValue: "inb_abababababababababababab"))
+
+        router.openInboxRoute(route, presentation: .detail)
+
+        #expect(router.destination == .inbox)
+        #expect(router.approvalRoute == route)
+        #expect(router.inboxRoutePresentation == .detail)
+        #expect(router.approvalItemID == nil)
+        #expect(router.inboxDetailItemID == route.itemID.rawValue)
+    }
+
+    @MainActor
+    @Test("Actionable Inbox routes still open approval")
+    func actionableInboxRouteUsesApprovalPresentation() {
+        let router = ShellRouter()
+        let route = InboxRoute(hostID: UUID(), itemID: InboxID(rawValue: "inb_acacacacacacacacacacacac"))
+
+        router.openInboxRoute(route, presentation: .approvalSheet)
+
+        #expect(router.destination == .inbox)
+        #expect(router.inboxRoutePresentation == .approvalSheet)
+        #expect(router.approvalItemID == route.itemID.rawValue)
+    }
+
+    @MainActor
+    @Test("A late same-host Inbox route cannot replace a newer completed route")
+    func competingInboxRouteKeepsOnlyNewestPresentation() async throws {
+        let host = hostRecord()
+        let firstItem = actionableInboxItem(id: "inb_010101010101010101010101", token: "tok_first")
+        let secondItem = inboxRouteItem(id: "inb_020202020202020202020202")
+        let firstGate = SuspendedLifecycleGate()
+        let backend = RecordingBackend()
+        backend.inboxGates = [firstGate]
+        backend.inboxItems = [firstItem]
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        model.connection = .connected(.ssh)
+        let root = RootView(model: model, terminalSurface: { AnyView(EmptyView()) })
+        let router = try shellRouter(from: root)
+        let firstRoute = InboxRoute(hostID: host.id, itemID: firstItem.id)
+        let secondRoute = InboxRoute(hostID: host.id, itemID: secondItem.id)
+
+        root.openInboxRoute(firstRoute)
+        await firstGate.waitUntilStarted()
+        backend.inboxItems = [secondItem]
+        root.openInboxRoute(secondRoute)
+        while router.approvalRoute != secondRoute { await Task.yield() }
+        await firstGate.release()
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(router.approvalRoute == secondRoute)
+        #expect(router.inboxRoutePresentation == .detail)
+        #expect(router.approvalItemID == nil)
+        #expect(router.inboxDetailItemID == secondRoute.itemID.rawValue)
+        #expect(model.lastError == nil)
+    }
+
+    @MainActor
+    @Test("Stale Inbox route errors cannot overwrite a newer route or host invalidation")
+    func staleInboxRouteErrorsAreIgnoredAfterNewerOwnership() async throws {
+        let host = hostRecord()
+        let firstGate = SuspendedLifecycleGate()
+        let backend = RecordingBackend()
+        backend.inboxGates = [firstGate]
+        backend.inboxItems = []
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        model.connection = .connected(.ssh)
+        let root = RootView(model: model, terminalSurface: { AnyView(EmptyView()) })
+        let router = try shellRouter(from: root)
+        let staleRoute = InboxRoute(hostID: host.id, itemID: InboxID(rawValue: "inb_030303030303030303030303"))
+        let currentItem = actionableInboxItem(id: "inb_040404040404040404040404", token: "tok_current")
+        let currentRoute = InboxRoute(hostID: host.id, itemID: currentItem.id)
+
+        root.openInboxRoute(staleRoute)
+        await firstGate.waitUntilStarted()
+        backend.inboxItems = [currentItem]
+        root.openInboxRoute(currentRoute)
+        while router.approvalRoute != currentRoute { await Task.yield() }
+        await firstGate.release()
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(router.approvalRoute == currentRoute)
+        #expect(router.inboxRoutePresentation == .approvalSheet)
+        #expect(router.approvalItemID == currentRoute.itemID.rawValue)
+        #expect(model.lastError == nil)
+
+        router.invalidateHostScopedState()
+        let unknownRoute = InboxRoute(hostID: UUID(), itemID: InboxID(rawValue: "inb_050505050505050505050505"))
+        root.openInboxRoute(unknownRoute)
+        router.invalidateHostScopedState()
+        for _ in 0..<10 { await Task.yield() }
+        #expect(model.lastError == nil)
+
+        var resolvedItem = actionableInboxItem(id: "inb_060606060606060606060606", token: "tok_done")
+        resolvedItem.status = .resolved
+        backend.inboxItems = [resolvedItem]
+        let resolvedRoute = InboxRoute(hostID: host.id, itemID: resolvedItem.id)
+        root.openInboxRoute(resolvedRoute)
+        router.invalidateHostScopedState()
+        for _ in 0..<10 { await Task.yield() }
+        #expect(model.lastError == nil)
+    }
+
+    @MainActor
+    @Test("A suspended cross-host Inbox route cannot retake host or presentation from a newer route")
+    func crossHostSuspendedInboxRouteCannotMutateAfterNewerRoute() async throws {
+        let first = HostRecord(nickname: "first", hostname: "first", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "second", hostname: "second", username: "dev", auth: .agentForwarding)
+        let firstItem = actionableInboxItem(id: "inb_070707070707070707070707", token: "tok_first")
+        let secondItem = inboxRouteItem(id: "inb_080808080808080808080808")
+        let firstGate = SuspendedLifecycleGate()
+        let backend = RecordingBackend()
+        backend.inboxGates = [firstGate]
+        backend.inboxItems = [firstItem]
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend, terminal: terminal)
+        model.selectedHostID = first.id
+        model.connection = .connected(.ssh)
+        let root = RootView(model: model, terminalSurface: { AnyView(EmptyView()) })
+        let router = try shellRouter(from: root)
+        let firstRoute = InboxRoute(hostID: first.id, itemID: firstItem.id)
+        let secondRoute = InboxRoute(hostID: second.id, itemID: secondItem.id)
+
+        root.openInboxRoute(firstRoute)
+        await firstGate.waitUntilStarted()
+        backend.inboxItems = [secondItem]
+        root.openInboxRoute(secondRoute)
+        while router.approvalRoute != secondRoute { await Task.yield() }
+        await firstGate.release()
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(model.selectedHostID == second.id)
+        #expect(terminal.connectedHosts == [second.id])
+        #expect(router.approvalRoute == secondRoute)
+        #expect(router.inboxRoutePresentation == .detail)
+        #expect(router.approvalItemID == nil)
+        #expect(model.lastError == nil)
+    }
+
+    @MainActor
+    @Test("Locking URL access cancels a suspended Inbox route before it can present or error")
+    func lockedURLAccessCancelsSuspendedInboxRoute() async throws {
+        let host = hostRecord()
+        let item = actionableInboxItem(id: "inb_090909090909090909090909", token: "tok_locked")
+        let gate = SuspendedLifecycleGate()
+        let backend = RecordingBackend()
+        backend.inboxGates = [gate]
+        backend.inboxItems = [item]
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        model.connection = .connected(.ssh)
+        let root = RootView(model: model, terminalSurface: { AnyView(EmptyView()) })
+        let router = try shellRouter(from: root)
+        let route = InboxRoute(hostID: host.id, itemID: item.id)
+
+        root.openInboxRoute(route)
+        await gate.waitUntilStarted()
+        root.cancelInboxRouteRequest()
+        await gate.release()
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(router.approvalRoute == nil)
+        #expect(router.inboxRoutePresentation == nil)
+        #expect(router.approvalItemID == nil)
+        #expect(model.lastError == nil)
+    }
+
+    @MainActor
+    @Test("Locking during a cross-host Inbox route removes the route connection and restores the prior selection")
+    func lockedCrossHostInboxRouteRollsBackItsHostMutation() async throws {
+        let first = HostRecord(nickname: "first", hostname: "first", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "second", hostname: "second", username: "dev", auth: .agentForwarding)
+        let item = actionableInboxItem(id: "inb_101010101010101010101010", token: "tok_locked")
+        let gate = SuspendedLifecycleGate()
+        let backend = RecordingBackend()
+        backend.inboxItems = [item]
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(
+            hostStore: HostStore(hosts: [first, second]),
+            backend: backend,
+            terminal: terminal)
+        await model.connectSelectedHost()
+        #expect(terminal.activeHostID == first.id)
+        backend.inboxGates = [gate]
+        let root = RootView(model: model, terminalSurface: { AnyView(EmptyView()) })
+        let router = try shellRouter(from: root)
+        let route = InboxRoute(hostID: second.id, itemID: item.id)
+
+        root.openInboxRoute(route)
+        await gate.waitUntilStarted()
+        #expect(model.selectedHostID == second.id)
+        #expect(terminal.activeHostID == second.id)
+        root.cancelInboxRouteRequest()
+        await gate.release()
+        for _ in 0..<1_000 where model.selectedHostID != first.id || model.isSwitchingHost || terminal.activeHostID != nil {
+            await Task.yield()
+        }
+
+        #expect(model.selectedHostID == first.id)
+        #expect(terminal.activeHostID == nil)
+        #expect(model.connection.isConnected == false)
+        #expect(router.approvalRoute == nil)
+        #expect(router.inboxRoutePresentation == nil)
+        #expect(model.lastError == nil)
+    }
+
+    @MainActor
+    @Test("A route-owned host selection preserves only that exact Inbox request")
+    func routeOwnedHostSelectionPreservesOnlyItsRequest() {
+        let router = ShellRouter()
+        let target = UUID()
+        let other = UUID()
+        let generation = router.beginInboxRouteRequest(targetHostID: target)
+
+        router.invalidateHostScopedState(preservingInboxRouteFor: target)
+        #expect(router.ownsInboxRouteRequest(generation))
+
+        router.invalidateHostScopedState(preservingInboxRouteFor: other)
+        #expect(!router.ownsInboxRouteRequest(generation))
+    }
+
+    @MainActor
+    @Test("Actionable SSE items hydrate their host token before resolving")
+    func actionableItemHydratesBeforeResolve() async throws {
+        let host = hostRecord()
+        let stale = actionableInboxItem(id: "inb_eeeeeeeeeeeeeeeeeeeeeeee", token: nil)
+        var fresh = stale
+        fresh.actionToken = "tok_fresh"
+        let backend = RecordingBackend()
+        backend.inboxItems = [fresh]
+        backend.resolveSucceeds = true
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        model.connection = .connected(.ssh)
+        model.inbox = [stale]
+
+        let sent = await model.resolve(stale, action: .deny)
+
+        #expect(sent)
+        #expect(backend.callNames == ["inbox", "resolve"])
+        #expect(backend.resolvedActionToken == "tok_fresh")
+    }
+
+    @MainActor
+    @Test("Actionable hydration failure does not resolve")
+    func actionableHydrationFailureBlocksResolve() async throws {
+        let host = hostRecord()
+        let item = actionableInboxItem(id: "inb_ffffffffffffffffffffffff", token: nil)
+        let backend = RecordingBackend()
+        backend.inboxItems = []
+        backend.resolveSucceeds = true
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        model.connection = .connected(.ssh)
+
+        let sent = await model.resolve(item, action: .deny)
+
+        #expect(!sent)
+        #expect(backend.callNames == ["inbox"])
+        #expect(model.lastError?.title == "Refresh this request first")
+    }
+
+    @MainActor
+    @Test("A committed decision warning resolves once and tells the operator not to retry")
+    func committedDecisionWarningIsPresentedAfterResolution() async {
+        let host = hostRecord()
+        let item = actionableInboxItem(id: "inb_787878787878787878787878", token: "tok_once")
+        let backend = RecordingBackend()
+        backend.resolveSucceeds = true
+        backend.resolveWarning = "decision_durability_not_confirmed"
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        model.connection = .connected(.ssh)
+        model.inbox = [item]
+
+        let sent = await model.resolve(item, action: .deny)
+
+        #expect(sent)
+        #expect(model.inbox.first?.status == .resolved)
+        #expect(model.lastError?.title == "Decision sent with a storage warning")
+        #expect(model.lastError?.detail.contains("Do not retry") == true)
+        #expect(model.lastError?.isRecoverable == false)
+    }
+
+    @MainActor
+    @Test("A host switch during action-token hydration cannot report or resolve stale work")
+    func actionableHydrationHostSwitchIsIgnored() async throws {
+        let first = HostRecord(
+            nickname: "first", hostname: "10.0.0.4", username: "chet", auth: .agentForwarding)
+        let second = HostRecord(
+            nickname: "second", hostname: "10.0.0.5", username: "chet", auth: .agentForwarding)
+        let item = actionableInboxItem(id: "inb_121212121212121212121212", token: nil)
+        var fresh = item
+        fresh.actionToken = "tok_first"
+        let backend = RecordingBackend()
+        backend.inboxItems = [fresh]
+        backend.resolveSucceeds = true
+        backend.refreshDelayNanoseconds = 50_000_000
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend)
+        model.connection = .connected(.ssh)
+        model.inbox = [item]
+
+        let resolving = Task { await model.resolve(item, action: .deny) }
+        try await Task.sleep(nanoseconds: 5_000_000)
+        await model.selectHost(second.id)
+        let sent = await resolving.value
+
+        #expect(!sent)
+        #expect(backend.callCount("resolve") == 0)
+        #expect(model.lastError?.title == nil)
+    }
+
+    @MainActor
+    @Test("A same-host reconnect during action-token hydration invalidates the old request")
+    func actionableHydrationSameHostReconnectIsIgnored() async throws {
+        let host = hostRecord()
+        let item = actionableInboxItem(id: "inb_343434343434343434343434", token: nil)
+        var fresh = item
+        fresh.actionToken = "tok_old_generation"
+        let backend = RecordingBackend()
+        backend.inboxItems = [fresh]
+        backend.resolveSucceeds = true
+        backend.refreshDelayNanoseconds = 50_000_000
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        model.connection = .connected(.ssh)
+        model.inbox = [item]
+
+        let resolving = Task { await model.resolve(item, action: .deny) }
+        try await Task.sleep(nanoseconds: 5_000_000)
+        model.connection = .disconnected(reason: "network changed")
+        model.connection = .connected(.ssh)
+        let sent = await resolving.value
+
+        #expect(!sent)
+        #expect(backend.callCount("resolve") == 0)
+        #expect(model.lastError?.title == nil)
+    }
+
+    @MainActor
+    @Test("A resolve failure after switching hosts cannot present a stale error")
+    func actionableResolveFailureAfterHostSwitchIsIgnored() async throws {
+        let first = HostRecord(
+            nickname: "first", hostname: "10.0.0.4", username: "chet", auth: .agentForwarding)
+        let second = HostRecord(
+            nickname: "second", hostname: "10.0.0.5", username: "chet", auth: .agentForwarding)
+        let item = actionableInboxItem(id: "inb_565656565656565656565656", token: "tok_first")
+        let gate = SuspendedLifecycleGate()
+        let backend = RecordingBackend()
+        backend.resolveGate = gate
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend)
+        model.connection = .connected(.ssh)
+        model.inbox = [item]
+
+        let resolving = Task { await model.resolve(item, action: .deny) }
+        await gate.waitUntilStarted()
+        await model.selectHost(second.id)
+        await gate.release()
+        let sent = await resolving.value
+
+        #expect(!sent)
+        #expect(model.lastError == nil)
+    }
 }
 
 private func hostRecord() -> HostRecord {
     HostRecord(nickname: "workshop", hostname: "10.0.0.4", username: "chet", auth: .agentForwarding)
+}
+
+private func inboxRouteItem(id: String) -> InboxItem {
+    InboxItem(
+        id: InboxID(rawValue: id),
+        sessionID: SessionID(rawValue: "sess_route"),
+        agent: .claudeCode,
+        category: .completion,
+        title: "Finished",
+        actions: [.acknowledge],
+        createdAt: Date(timeIntervalSince1970: 1_780_000_000),
+        status: .pending,
+        sourceEventID: EventID(rawValue: "evt_\(id)")
+    )
+}
+
+private func actionableInboxItem(id: String, token: String?) -> InboxItem {
+    InboxItem(
+        id: InboxID(rawValue: id),
+        sessionID: SessionID(rawValue: "sess_action"),
+        agent: .claudeCode,
+        category: .permission,
+        title: "Run command?",
+        detail: "rm -rf build",
+        command: "rm -rf build",
+        risk: Risk(riskClass: .localWrite, requiresDetailExpansion: true, reasons: ["modifies workspace"]),
+        actions: [.approveOnce, .deny],
+        requestID: "req_\(id)",
+        actionToken: token,
+        createdAt: Date(timeIntervalSince1970: 1_780_000_010),
+        status: .pending,
+        sourceEventID: EventID(rawValue: "evt_\(id)")
+    )
+}
+
+private func shellRouter(from root: RootView) throws -> ShellRouter {
+    for child in Mirror(reflecting: root).children where child.label == "router" {
+        if let router = child.value as? ShellRouter { return router }
+    }
+    throw RecordingBackendError.unexpectedCall
 }
 
 private enum RecordingBackendError: Error {
@@ -655,6 +1187,12 @@ private class RecordingBackend: OpenPawBackend, @unchecked Sendable {
     var tailscaleError: (any Error)?
     var tailscaleDelayNanoseconds: UInt64 = 0
     var refreshDelayNanoseconds: UInt64 = 0
+    var inboxGates: [SuspendedLifecycleGate] = []
+    var inboxItems: [InboxItem] = []
+    var resolveSucceeds = false
+    var resolveWarning: String?
+    var resolveGate: SuspendedLifecycleGate?
+    private(set) var resolvedActionToken: String?
 
     private func record(_ name: String) {
         lock.lock()
@@ -678,12 +1216,20 @@ private class RecordingBackend: OpenPawBackend, @unchecked Sendable {
 
     func inbox(status: InboxStatus?) async throws -> [InboxItem] {
         record("inbox")
+        let gate = lock.withLock { inboxGates.isEmpty ? nil : inboxGates.removeFirst() }
+        if let gate { await gate.suspend() }
         if refreshDelayNanoseconds > 0 { try await Task.sleep(nanoseconds: refreshDelayNanoseconds) }
-        return []
+        guard let status else { return inboxItems }
+        return inboxItems.filter { $0.status == status }
     }
 
     func resolve(item: InboxItem, action: ActionID, answer: String?, detailAcknowledged: Bool) async throws -> ResolveResult {
         record("resolve")
+        resolvedActionToken = item.actionToken
+        if let resolveGate { await resolveGate.suspend() }
+        if resolveSucceeds {
+            return ResolveResult(status: "resolved", eventID: nil, warning: resolveWarning)
+        }
         throw RecordingBackendError.unexpectedCall
     }
 
@@ -835,12 +1381,15 @@ private final class RecordingTerminalBackend: TerminalBackend, @unchecked Sendab
     let stateStream: AsyncStream<ConnectionState>
     let outputStream = AsyncStream<Data> { $0.finish() }
     private(set) var connectedHosts: [HostRecord.ID] = []
+    private(set) var activeHostID: HostRecord.ID?
     private(set) var disconnectCount = 0
     private(set) var sentTexts: [String] = []
     private(set) var runCommands: [String] = []
     var runResponses: [String: String] = [:]
     var failConnect = false
     var firstConnectGate: SuspendedLifecycleGate?
+    var disconnectGate: SuspendedLifecycleGate?
+    var suspendedDisconnectNumber = 1
     init() {
         var cont: AsyncStream<ConnectionState>.Continuation!
         stateStream = AsyncStream { cont = $0 }
@@ -858,9 +1407,15 @@ private final class RecordingTerminalBackend: TerminalBackend, @unchecked Sendab
             throw failConnectWith
         }
         if failConnect { throw RecordingBackendError.unexpectedCall }
+        activeHostID = host.id
         continuation.yield(.connected(.ssh))
     }
-    func disconnect() async { disconnectCount += 1; continuation.yield(.disconnected(reason: nil)) }
+    func disconnect() async {
+        disconnectCount += 1
+        if disconnectCount == suspendedDisconnectNumber, let disconnectGate { await disconnectGate.suspend() }
+        activeHostID = nil
+        continuation.yield(.disconnected(reason: nil))
+    }
     func send(text: String) async throws { sentTexts.append(text) }
     func send(chord: KeyChord, applicationCursorKeys: Bool) async throws {}
     func resize(columns: Int, rows: Int) async throws {}

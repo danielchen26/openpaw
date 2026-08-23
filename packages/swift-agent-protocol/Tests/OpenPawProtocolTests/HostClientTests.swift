@@ -387,7 +387,9 @@ final class HostClientTests: XCTestCase {
     }
 
     func testResolveSendsTheActionTokenAndAcknowledgement() async throws {
-        respond(status: 200, body: #"{"status":"resolved","event_id":"evt_abc"}"#)
+        respond(
+            status: 200,
+            body: #"{"status":"resolved","event_id":"evt_abc","warning":"decision_durability_not_confirmed"}"#)
         let result = try await makeClient().resolve(
             itemID: InboxID(rawValue: "inb_0123456789abcdef01234567"),
             action: .approveOnce,
@@ -396,6 +398,7 @@ final class HostClientTests: XCTestCase {
         )
         XCTAssertEqual(result.status, "resolved")
         XCTAssertEqual(result.eventID, "evt_abc")
+        XCTAssertEqual(result.warning, "decision_durability_not_confirmed")
 
         let request = try XCTUnwrap(StubResponder.shared.recorded.first)
         XCTAssertEqual(request.httpMethod, "POST")
@@ -410,6 +413,29 @@ final class HostClientTests: XCTestCase {
                 "detail_acknowledged": true,
             ]
         )
+    }
+
+    func testDismissUsesTheDedicatedTokenFreeInboxWriteRoute() async throws {
+        respond(
+            status: 200,
+            body: #"{"status":"dismissed","item":{"id":"inb_0123456789abcdef01234567","session_id":"sess_cc-6f7b","agent":"codex","category":"completion","title":"Agent completed","actions":["acknowledge"],"created_at":"2026-08-20T17:00:00Z","status":"dismissed","source_event_id":"evt_0123456789abcdef01234567"}}"#
+        )
+
+        let result = try await makeClient().dismiss(
+            itemID: InboxID(rawValue: "inb_0123456789abcdef01234567")
+        )
+
+        XCTAssertEqual(result.status, .dismissed)
+        XCTAssertEqual(result.item.id, InboxID(rawValue: "inb_0123456789abcdef01234567"))
+        XCTAssertEqual(result.item.status, .dismissed)
+        XCTAssertNil(result.item.actionToken)
+        let request = try XCTUnwrap(StubResponder.shared.recorded.first)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(
+            request.url?.path, "/v1/inbox/inb_0123456789abcdef01234567/dismiss"
+        )
+        XCTAssertEqual(request.httpBodyData ?? Data(), Data())
+        XCTAssertNil(request.value(forHTTPHeaderField: "X-OpenPaw-Action-Token"))
     }
 
     func testUploadSendsRawBytesAndTheFilenameHeader() async throws {

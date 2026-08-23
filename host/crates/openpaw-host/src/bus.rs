@@ -183,15 +183,24 @@ impl Bus {
             let item = existing.item.clone();
             return (stored, Some(item));
         }
-        let token = crate::auth::mint_secret();
         let mut item = projected;
-        item.action_token = Some(token.clone());
+        let token = if matches!(
+            stored.body,
+            Body::PermissionRequested(_) | Body::QuestionRequested(_)
+        ) {
+            let token = crate::auth::mint_secret();
+            item.action_token = Some(token.clone());
+            Some(token)
+        } else {
+            item.action_token = None;
+            None
+        };
         inner.inbox.insert(
             item.id.clone(),
             PendingItem {
                 item: item.clone(),
                 source: Arc::clone(&stored),
-                action_token: Some(token),
+                action_token: token,
                 issued: Instant::now(),
             },
         );
@@ -374,7 +383,7 @@ impl Bus {
             if pending.item.status != InboxStatus::Pending {
                 continue;
             }
-            let token_dead = pending.issued.elapsed() >= ttl;
+            let token_dead = pending.action_token.is_some() && pending.issued.elapsed() >= ttl;
             let deadline_passed = pending.item.expires_at.is_some_and(|at| at <= now);
             if token_dead || deadline_passed {
                 pending.item.status = InboxStatus::Expired;
@@ -546,6 +555,23 @@ mod tests {
             ClaimError::AlreadyResolved,
             "a spent token cannot be reused"
         );
+    }
+
+    #[test]
+    fn informational_inbox_items_do_not_get_action_tokens_or_token_ttl_expiry() {
+        let bus = Bus::with_token_ttl(8, Duration::from_millis(10));
+        let (_event, item) = bus.publish_with_inbox(completion());
+        let item = item.expect("completion is informational inbox item");
+        assert_eq!(item.status, InboxStatus::Pending);
+        assert!(
+            item.action_token.is_none(),
+            "informational items are not actionable"
+        );
+
+        std::thread::sleep(Duration::from_millis(20));
+        let listed = bus.inbox(None);
+        assert_eq!(listed[0].status, InboxStatus::Pending);
+        assert!(bus.inbox(Some(InboxStatus::Expired)).is_empty());
     }
 
     #[test]

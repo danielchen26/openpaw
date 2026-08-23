@@ -186,15 +186,20 @@ public struct PairingResult: Codable, Sendable, Hashable {
 public struct ResolveResult: Codable, Sendable, Hashable {
     public let status: String
     public let eventID: String?
+    /// Stable host warning code. The action is committed and its one-time token
+    /// is spent, but the operator may need to verify the agent observed it.
+    public let warning: String?
 
-    public init(status: String, eventID: String?) {
+    public init(status: String, eventID: String?, warning: String? = nil) {
         self.status = status
         self.eventID = eventID
+        self.warning = warning
     }
 
     enum CodingKeys: String, CodingKey {
         case status
         case eventID = "event_id"
+        case warning
     }
 }
 

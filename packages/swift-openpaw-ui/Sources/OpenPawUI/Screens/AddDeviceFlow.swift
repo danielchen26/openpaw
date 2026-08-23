@@ -144,14 +144,16 @@ public struct AddDeviceFlowState: Sendable, Hashable {
 public enum AddDeviceFlowCopy {
     public static let title = "Add a device"
     public static let tailscaleAction = "Tailscale devices"
-    public static let sshAction = "SSH / transport preference"
-    public static let adminAction = "Advanced Tailscale connector"
+    public static let sshAction = "Enter SSH details manually"
+    public static let adminAction = "Authorize with Tailnet administrator credentials"
     public static let adminRequirement = "Tailnet administrator credentials required. This is not normal Tailscale login."
     public static let honestDiscovery = "Find other tailnet devices from a connected OpenPaw host. Candidates are not trusted, saved, SSH-ready, or connected."
     public static let noCandidates = "No Tailscale devices were reported by the connected discovery host. Add SSH details to enter a device manually."
+    public static let activeRouteNoHostTitle = "A Tailscale-compatible route may be active"
+    public static let activeRouteNoHostExplanation = "OpenPaw found a VPN-style route that may be Tailscale. iOS does not share the signed-in Tailscale account or device list with OpenPaw. Automatic discovery needs a connected OpenPaw host to report tailnet devices, or you can authorize with Tailnet administrator credentials."
     public static let confirmation = "This is only a discovery candidate. OpenPaw will not trust it, save it, or connect until you review and save SSH details yourself."
     public static let entryActions = [tailscaleAction, sshAction, adminAction]
-    public static let onboardingCopy = [title, tailscaleAction, sshAction, adminAction, adminRequirement, honestDiscovery, noCandidates, confirmation]
+    public static let onboardingCopy = [title, tailscaleAction, sshAction, adminAction, adminRequirement, honestDiscovery, noCandidates, activeRouteNoHostTitle, activeRouteNoHostExplanation, confirmation]
 }
 
 @MainActor
@@ -301,8 +303,10 @@ public struct AddDeviceFlow: View {
                     discoveryStatusView
                         .font(OpenPawTheme.Human.prose)
                         .foregroundStyle(OpenPawTheme.textSecondary)
-                    actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
-                        draft = state.startManualSSH()
+                    if !(model.tailscaleDiscovery == .noConnectedHost && model.tailscaleRouteHint == .likelyAvailable) {
+                        actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
+                            draft = state.startManualSSH()
+                        }
                     }
                 } else {
                     ForEach(discovered) { candidate in
@@ -479,8 +483,12 @@ public struct AddDeviceFlow: View {
             Text(model.tailscaleDiscovery == .loading ? "Looking for Tailscale devices from the connected host…" : AddDeviceFlowCopy.honestDiscovery)
                 .font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary)
         case .noConnectedHost:
-            Text("No connected discovery host. Connect a saved OpenPaw host first, or add SSH details manually.")
-                .font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary)
+            if model.tailscaleRouteHint == .likelyAvailable {
+                activeRouteNoHostView
+            } else {
+                Text("No connected discovery host. Connect a saved OpenPaw host first, authorize with Tailnet administrator credentials, or enter SSH details manually.")
+                    .font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary)
+            }
         case .empty:
             Text(AddDeviceFlowCopy.noCandidates).font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary)
             Button("Retry") { model.retryTailscaleDiscovery(owner: discoveryOwner) }
@@ -492,9 +500,30 @@ public struct AddDeviceFlow: View {
         }
     }
 
+    private var activeRouteNoHostView: some View {
+        Panel(label: AddDeviceFlowCopy.activeRouteNoHostTitle) {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                Text(AddDeviceFlowCopy.activeRouteNoHostExplanation)
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                Text("Automatic discovery will stay host-mediated when a connected OpenPaw host is available. Manual SSH remains available.")
+                    .font(OpenPawTheme.Human.caption)
+                    .foregroundStyle(OpenPawTheme.textTertiary)
+                VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                    actionButton(AddDeviceFlowCopy.adminAction, glyph: "person.badge.key") {
+                        state.startTailscaleAdministrator()
+                    }
+                    actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
+                        draft = state.startManualSSH()
+                    }
+                }
+            }
+        }
+    }
+
     @ViewBuilder private var discoveryProvenance: some View {
         if model.tailscaleRouteHint == .likelyAvailable {
-            Label("Tailscale route detected. This is a connectivity hint, not account access.", systemImage: "point.3.connected.trianglepath.dotted")
+            Label("A VPN route compatible with Tailscale was detected. This is a connectivity hint, not account access.", systemImage: "point.3.connected.trianglepath.dotted")
                 .font(OpenPawTheme.Human.caption)
                 .foregroundStyle(OpenPawTheme.textSecondary)
         }

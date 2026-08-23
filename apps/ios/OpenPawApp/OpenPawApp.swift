@@ -37,6 +37,7 @@ struct AppShell: View {
                 // `openApproval(itemID:)`, so rebuilding it on every body evaluation would reset the router's state
                 // and drop a deep link mid-navigation.
                 wiring.rootView()
+                .onAppear { wiring.openPendingInboxRouteIfUnlocked() }
                 .sheet(item: $wiring.pastedDraft) { draft in
                     ImageAnnotationEditor(
                         draft: draft,
@@ -92,6 +93,7 @@ struct AppShell: View {
                 )
             }
         }
+        .onOpenURL { wiring.receiveInboxURL($0) }
         .task { await wiring.start() }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -223,6 +225,8 @@ final class AppWiring {
     var terminalTitle = ""
     var remoteDirectory = ""
     var pendingLink: URL?
+    /// Held while the biometric gate is locked. Inbox routing never selects or connects a host behind the lock.
+    var pendingInboxRoute: InboxRoute?
     var pastedDraft: AttachmentDraft?
     /// Remote paths of uploaded attachments, in the order they were attached, for the composer to reference.
     var attachedPaths: [String] = []
@@ -259,6 +263,26 @@ final class AppWiring {
         )
         cachedRoot = created
         return created
+    }
+
+    func receiveInboxURL(_ url: URL) {
+        guard let route = InboxRoute(url: url) else { return }
+        pendingInboxRoute = route
+        guard InboxURLAccessGate.refreshAndAllow(
+            gate,
+            onDenied: { [weak self] in self?.cancelActiveInboxRoute() }
+        ) else { return }
+        openPendingInboxRouteIfUnlocked()
+    }
+
+    func openPendingInboxRouteIfUnlocked() {
+        guard case .unlocked = gate.decision, let route = pendingInboxRoute else { return }
+        pendingInboxRoute = nil
+        rootView().openInboxRoute(route)
+    }
+
+    func cancelActiveInboxRoute() {
+        cachedRoot?.cancelInboxRouteRequest()
     }
 
     /// A binding to `terminalFontSize` for code that is not inside a view body. Pinch zoom writes through it, and the
@@ -553,7 +577,10 @@ final class AppWiring {
     /// Re-lock if the grace period expired, then repair the connection if it died while the app was suspended.
     func handleForeground() async {
         gate.handleForeground()
-        guard gate.decision == .unlocked else { return }
+        guard gate.decision == .unlocked else {
+            cancelActiveInboxRoute()
+            return
+        }
         await terminal.reconnectIfNeeded()
         guard model.canRefreshRemoteState else { return }
         await model.refresh()
@@ -733,6 +760,22 @@ struct HostStoreFile: Sendable {
 
 // MARK: - The lock
 
+@MainActor
+enum InboxURLAccessGate {
+    static func refreshAndAllow(
+        _ gate: GateController,
+        now: Date = Date(),
+        onDenied: () -> Void = {}
+    ) -> Bool {
+        gate.refresh(trigger: .launch, now: now)
+        guard case .unlocked = gate.decision else {
+            onDenied()
+            return false
+        }
+        return true
+    }
+}
+
 /// Owns the gate's inputs and the `LAContext` evaluation. The *decision* is `BiometricGate.decide`, which is pure and
 /// tested; this type only supplies it with timestamps and carries out what it says.
 @MainActor
@@ -773,6 +816,18 @@ final class GateController {
         refresh(trigger: .launch)
     }
 
+    init(policy: GatePolicy, lastUnlockedAt: Date?, leftForegroundAt: Date?, now: Date) {
+        self.policy = policy
+        self.lastUnlockedAt = lastUnlockedAt
+        self.leftForegroundAt = leftForegroundAt
+        decision = BiometricGate.decide(
+            policy: policy,
+            lastUnlockedAt: lastUnlockedAt,
+            leftForegroundAt: leftForegroundAt,
+            now: now
+        )
+    }
+
     /// Why this device cannot satisfy the gate, or `nil` when it can.
     ///
     /// The policy is `deviceOwnerAuthentication`, not `deviceOwnerAuthenticationWithBiometrics`, and that is the whole
@@ -795,13 +850,13 @@ final class GateController {
         }
     }
 
-    func refresh(trigger: GateTrigger) {
+    func refresh(trigger: GateTrigger, now: Date = Date()) {
         self.trigger = trigger
         decision = BiometricGate.decide(
             policy: policy,
             lastUnlockedAt: lastUnlockedAt,
             leftForegroundAt: leftForegroundAt,
-            now: Date()
+            now: now
         )
     }
 

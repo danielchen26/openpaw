@@ -49,12 +49,12 @@ final class ConnectFlowUITests: XCTestCase {
         add.tap()
 
         XCTAssertTrue(app.buttons["Tailscale devices"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["SSH / transport preference"].exists)
-        XCTAssertTrue(app.buttons["Advanced Tailscale connector"].exists)
+        XCTAssertTrue(app.buttons["Enter SSH details manually"].exists)
+        XCTAssertTrue(app.buttons["Authorize with Tailnet administrator credentials"].exists)
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Sign in with Tailscale")).firstMatch.exists)
 
         app.buttons["Tailscale devices"].tap()
-        XCTAssertTrue(app.staticTexts["Tailscale route detected. This is a connectivity hint, not account access."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["A VPN route compatible with Tailscale was detected. This is a connectivity hint, not account access."].waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)["addDevice.tailscale.provenance"].waitForExistence(timeout: 5))
         let candidate = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "not trusted or saved")).firstMatch
         XCTAssertTrue(candidate.waitForExistence(timeout: 5), app.debugDescription)
@@ -68,7 +68,7 @@ final class ConnectFlowUITests: XCTestCase {
         let add = app.buttons["Add a Tailscale or SSH device"].firstMatch
         XCTAssertTrue(add.waitForExistence(timeout: 10))
         add.tap()
-        app.buttons["Advanced Tailscale connector"].tap()
+        app.buttons["Authorize with Tailnet administrator credentials"].tap()
 
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Tailnet administrator credentials required")).firstMatch.waitForExistence(timeout: 5))
         app.textFields["addDevice.tailscaleAdmin.clientID"].tap()
@@ -99,15 +99,20 @@ final class ConnectFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Eternal Terminal"].exists)
     }
 
-    func testNoHostStateKeepsManualSSHUsable() {
+    func testActiveRouteWithoutHostExplainsAccountBoundaryAndKeepsManualSSHUsable() {
         let app = scenarioApp("noHosts")
         let add = app.buttons["Add a Tailscale or SSH device"].firstMatch
         XCTAssertTrue(add.waitForExistence(timeout: 10))
         add.tap()
         app.buttons["Tailscale devices"].tap()
 
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "No connected discovery host")).firstMatch.waitForExistence(timeout: 5))
-        app.buttons["SSH / transport preference"].tap()
+        XCTAssertTrue(app.staticTexts["A Tailscale-compatible route may be active"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "VPN-style route that may be Tailscale")).firstMatch.exists)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "iOS does not share the signed-in Tailscale account or device list with OpenPaw")).firstMatch.exists)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Automatic discovery will stay host-mediated")).firstMatch.exists)
+        XCTAssertTrue(app.buttons["Authorize with Tailnet administrator credentials"].exists)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Sign in with Tailscale")).firstMatch.exists)
+        app.buttons["Enter SSH details manually"].tap()
         XCTAssertTrue(app.textFields["Hostname"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["SSH"].exists)
         XCTAssertFalse(app.buttons["Mosh"].exists)

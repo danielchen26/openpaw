@@ -131,6 +131,28 @@ final class BiometricGateTests: XCTestCase {
         XCTAssertEqual(decision, .authenticate)
     }
 
+    @MainActor
+    func testInboxURLReevaluatesExpiredGraceBeforeOpeningTheRoute() {
+        let gate = GateController(
+            policy: policy(grace: 120),
+            lastUnlockedAt: epoch,
+            leftForegroundAt: epoch.addingTimeInterval(10),
+            now: epoch.addingTimeInterval(10 + 119)
+        )
+        XCTAssertEqual(gate.decision, .unlocked)
+
+        var cancellationCount = 0
+        let mayOpen = InboxURLAccessGate.refreshAndAllow(
+            gate,
+            now: epoch.addingTimeInterval(10 + 120),
+            onDenied: { cancellationCount += 1 }
+        )
+
+        XCTAssertFalse(mayOpen)
+        XCTAssertEqual(cancellationCount, 1)
+        XCTAssertEqual(gate.decision, .authenticate)
+    }
+
     func testPromptCopyNamesTheProtectedThing() {
         XCTAssertEqual(
             BiometricGate.prompt(for: .launch),

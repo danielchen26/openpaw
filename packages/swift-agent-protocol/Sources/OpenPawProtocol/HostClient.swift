@@ -122,6 +122,16 @@ public actor HostClient {
         return try decode(ResolveResult.self, from: try await send(request))
     }
 
+    /// Archives one informational inbox item on the authenticated host. This route deliberately carries no action
+    /// token because it cannot resolve a permission or question request.
+    public func dismiss(itemID: InboxID) async throws -> InboxDismissResult {
+        let request = try makeRequest(
+            method: "POST",
+            path: "/v1/inbox/\(escape(itemID.rawValue))/dismiss"
+        )
+        return try decode(InboxDismissResult.self, from: try await send(request))
+    }
+
     // MARK: Repositories
 
     public func repos() async throws -> [RepoSummary] {

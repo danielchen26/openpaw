@@ -151,6 +151,27 @@ public final class ShellRouter {
     public var diffMode: DiffMode = .workingTree
     /// `InboxItem.id.rawValue` of the item whose approval sheet should be open.
     public var approvalItemID: String?
+    /// The host that owns the presented item when navigation came from a notification or custom URL.
+    public var approvalRoute: InboxRoute?
+    public var inboxRoutePresentation: InboxRoutePresentation?
+    private var inboxRouteRequestGeneration = 0
+    private var inboxRouteRequestTask: Task<Void, Never>?
+    private var inboxRouteTargetHostID: HostID?
+    /// Generation whose route-owned host mutation may be rolled back after a privacy lock.
+    /// Starting a newer route or invalidating host state clears this marker, so stale work
+    /// can never restore an older host over a newer user action.
+    private var inboxRouteRollbackGeneration: Int?
+    public var inboxDetailItemID: String? {
+        get {
+            guard inboxRoutePresentation == .detail else { return nil }
+            return approvalRoute?.itemID.rawValue
+        }
+        set {
+            guard newValue == nil, inboxRoutePresentation == .detail else { return }
+            approvalRoute = nil
+            inboxRoutePresentation = nil
+        }
+    }
     /// Session the compact layout has pushed a transcript for.
     public var sessionID: String?
     /// Multiplexer session the Terminal destination is entering. Cleared at the host-generation boundary.
@@ -165,8 +186,66 @@ public final class ShellRouter {
     public init() {}
 
     public func openApproval(itemID: String) {
+        approvalRoute = nil
         approvalItemID = itemID
         destination = .inbox
+    }
+
+    public func openInboxRoute(_ route: InboxRoute) {
+        openInboxRoute(route, presentation: .approvalSheet)
+    }
+
+    public func openInboxRoute(_ route: InboxRoute, presentation: InboxRoutePresentation) {
+        approvalRoute = route
+        inboxRoutePresentation = presentation
+        approvalItemID = presentation == .approvalSheet ? route.itemID.rawValue : nil
+        destination = .inbox
+    }
+
+    public func beginInboxRouteRequest(targetHostID: HostID? = nil) -> Int {
+        inboxRouteRequestTask?.cancel()
+        inboxRouteRequestTask = nil
+        inboxRouteTargetHostID = targetHostID
+        inboxRouteRollbackGeneration = nil
+        inboxRouteRequestGeneration += 1
+        return inboxRouteRequestGeneration
+    }
+
+    public func trackInboxRouteRequest(_ task: Task<Void, Never>, generation: Int) {
+        guard ownsInboxRouteRequest(generation) else {
+            task.cancel()
+            return
+        }
+        inboxRouteRequestTask?.cancel()
+        inboxRouteRequestTask = task
+    }
+
+    public func ownsInboxRouteRequest(_ generation: Int) -> Bool {
+        generation == inboxRouteRequestGeneration
+    }
+
+    public func mayRollbackInboxRouteRequest(_ generation: Int) -> Bool {
+        inboxRouteRollbackGeneration == generation
+    }
+
+    public func finishInboxRouteRequest(_ generation: Int) {
+        guard ownsInboxRouteRequest(generation) else { return }
+        inboxRouteRequestTask = nil
+        inboxRouteTargetHostID = nil
+    }
+
+    /// Cancels only notification/deep-link work. A biometric lock must not erase
+    /// the user's selected Session, repository pane, or terminal attachment.
+    public func cancelInboxRouteRequest(rollbackHostMutation: Bool = false) {
+        let cancelledGeneration = inboxRouteRequestGeneration
+        inboxRouteRequestTask?.cancel()
+        inboxRouteRequestTask = nil
+        inboxRouteTargetHostID = nil
+        inboxRouteRollbackGeneration = rollbackHostMutation ? cancelledGeneration : nil
+        inboxRouteRequestGeneration += 1
+        approvalItemID = nil
+        approvalRoute = nil
+        inboxRoutePresentation = nil
     }
 
     public func perform(_ intent: SessionRootIntent, model: OpenPawModel) {
@@ -199,10 +278,12 @@ public final class ShellRouter {
     /// Clears navigation that names resources owned by one host while leaving the user's root tab in place.
     /// Future Preview and provider/import routes must join this one reset point rather than inventing another host
     /// generation boundary.
-    public func invalidateHostScopedState() {
+    public func invalidateHostScopedState(preservingInboxRouteFor hostID: HostID? = nil) {
         sessionID = nil
         invalidateConnectionScopedState()
-        approvalItemID = nil
+        if hostID == nil || inboxRouteTargetHostID != hostID {
+            cancelInboxRouteRequest(rollbackHostMutation: false)
+        }
         repoPane = .diff
         repoFocusPath = nil
         diffMode = .workingTree
@@ -212,6 +293,11 @@ public final class ShellRouter {
     public func invalidateConnectionScopedState() {
         attachedMultiplexerSession = nil
     }
+}
+
+public enum InboxRoutePresentation: Sendable, Hashable {
+    case detail
+    case approvalSheet
 }
 
 public enum SessionRootIntent: Sendable, Hashable {
@@ -327,6 +413,67 @@ public struct RootView: View {
         Task { await model.refresh() }
     }
 
+    /// Host-scoped deep-link entry point. The sheet is not named until the requested host owns a live connection and
+    /// the authenticated Inbox refresh returns the exact item.
+    public func openInboxRoute(_ route: InboxRoute) {
+        let generation = router.beginInboxRouteRequest(targetHostID: route.hostID)
+        let task = Task {
+            defer { router.finishInboxRouteRequest(generation) }
+            let ownsRoute: @MainActor @Sendable () -> Bool = { router.ownsInboxRouteRequest(generation) }
+            let mayRollback: @MainActor @Sendable () -> Bool = {
+                router.mayRollbackInboxRouteRequest(generation)
+            }
+            switch await InboxRouteCoordinator.resolve(
+                route,
+                model: model,
+                ownsRoute: ownsRoute,
+                mayRollback: mayRollback
+            ) {
+            case .present(let item):
+                guard ownsRoute() else { return }
+                router.openInboxRoute(route, presentation: item.isDismissible ? .detail : .approvalSheet)
+            case .unknownHost:
+                guard ownsRoute() else { return }
+                model.lastError = PresentedError(
+                    title: "This host is not on this device",
+                    detail: "Add or pair the host before opening this Inbox item.",
+                    isRecoverable: false
+                )
+            case .stale:
+                guard ownsRoute() else { return }
+                router.destination = .inbox
+                model.lastError = PresentedError(
+                    title: "This Inbox item is no longer available",
+                    detail: "The host restarted or no longer has this notification. Refresh the Inbox for current work.",
+                    isRecoverable: true
+                )
+            case .resolved(let status):
+                guard ownsRoute() else { return }
+                router.destination = .inbox
+                model.lastError = PresentedError(
+                    title: "This Inbox item is already \(status.rawValue)",
+                    detail: "Open the Inbox to review its recorded outcome.",
+                    isRecoverable: false
+                )
+            case .unavailable:
+                guard ownsRoute() else { return }
+                model.lastError = PresentedError(
+                    title: "Could not open this Inbox item",
+                    detail: "The requested host did not remain connected. Reconnect it and try the link again.",
+                    isRecoverable: true
+                )
+            }
+        }
+        router.trackInboxRouteRequest(task, generation: generation)
+    }
+
+    /// App-level privacy gates call this before removing the unlocked hierarchy.
+    /// It is deliberately narrower than host invalidation so locking the phone
+    /// does not discard unrelated workspace navigation.
+    public func cancelInboxRouteRequest() {
+        router.cancelInboxRouteRequest(rollbackHostMutation: true)
+    }
+
     /// True only where a size class exists and reports compact.
     private var isCompactSizeClass: Bool {
         #if os(iOS)
@@ -369,7 +516,7 @@ public struct RootView: View {
             await refreshSessionSpace()
         }
         .onChange(of: model.selectedHostID) { _, _ in
-            router.invalidateHostScopedState()
+            router.invalidateHostScopedState(preservingInboxRouteFor: model.selectedHostID)
             invalidateSessionSpace()
             Task {
                 if model.canRefreshRemoteState { await model.refresh() }
@@ -844,7 +991,14 @@ public struct RootView: View {
         case .sessions:
             sessions(width: width)
         case .inbox:
-            InboxView(model: model)
+            InboxView(
+                model: model,
+                routedItemID: Binding(
+                    get: { router.inboxDetailItemID },
+                    set: { router.inboxDetailItemID = $0 }
+                ),
+                bottomAccessoryInset: RootNavigationStyle.style(for: width) == .tabs ? deckInset : 0
+            )
         case .repo:
             repo
         case .settings:
@@ -1227,6 +1381,7 @@ public struct RootView: View {
                 guard newValue == nil else { return }
                 model.hostKeyPrompt = nil
                 router.approvalItemID = nil
+                router.approvalRoute = nil
                 requestedSheet = nil
             }
         )

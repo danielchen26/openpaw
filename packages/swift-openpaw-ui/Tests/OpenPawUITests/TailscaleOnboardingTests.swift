@@ -58,11 +58,42 @@ struct TailscaleAdministratorOnboardingTests {
     func truthfulCopy() {
         #expect(AddDeviceFlowCopy.entryActions == [
             "Tailscale devices",
-            "SSH / transport preference",
-            "Advanced Tailscale connector",
+            "Enter SSH details manually",
+            "Authorize with Tailnet administrator credentials",
         ])
         #expect(AddDeviceFlowCopy.adminRequirement.contains("Tailnet administrator credentials required"))
         #expect(!AddDeviceFlowCopy.onboardingCopy.joined(separator: " ").localizedCaseInsensitiveContains("Sign in with Tailscale"))
+    }
+
+    @Test("Active iPhone Tailscale without a connected host explains the iOS account boundary and next actions")
+    func activeRouteWithoutDiscoveryHostCopy() {
+        #expect(AddDeviceFlowCopy.activeRouteNoHostTitle == "A Tailscale-compatible route may be active")
+        #expect(AddDeviceFlowCopy.activeRouteNoHostExplanation.contains("VPN-style route that may be Tailscale"))
+        #expect(AddDeviceFlowCopy.activeRouteNoHostExplanation.contains("iOS does not share the signed-in Tailscale account or device list with OpenPaw"))
+        #expect(AddDeviceFlowCopy.activeRouteNoHostExplanation.contains("connected OpenPaw host"))
+        #expect(AddDeviceFlowCopy.adminAction == "Authorize with Tailnet administrator credentials")
+        #expect(AddDeviceFlowCopy.sshAction == "Enter SSH details manually")
+
+        let copy = AddDeviceFlowCopy.onboardingCopy.joined(separator: " ")
+        #expect(!copy.localizedCaseInsensitiveContains("Sign in with Tailscale"))
+        #expect(!copy.localizedCaseInsensitiveContains("reads account"))
+    }
+
+    @Test("Active route no-host actions enter administrator authorization or manual SSH")
+    func activeRouteNoHostNavigation() {
+        var state = AddDeviceFlowState(hosts: [])
+        state.startTailscaleDiscovery()
+
+        state.startTailscaleAdministrator()
+        #expect(state.step == .tailscaleAdministrator)
+        state.back()
+        #expect(state.step == .welcome)
+
+        state.startTailscaleDiscovery()
+        _ = state.startManualSSH()
+        #expect(state.step == .editDetails)
+        state.back()
+        #expect(state.step == .tailscaleCandidates)
     }
 
     @Test("Administrator credentials validate identifiers without ever echoing the secret")

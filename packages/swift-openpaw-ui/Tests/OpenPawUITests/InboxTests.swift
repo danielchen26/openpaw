@@ -1,5 +1,6 @@
 import Foundation
 import OpenPawProtocol
+import OpenPawTerminalCore
 import Testing
 
 @testable import OpenPawUI
@@ -32,6 +33,8 @@ struct InboxTests {
         command: String? = nil,
         risk: Risk? = nil,
         actions: [ActionID] = [.acknowledge],
+        requestID: String? = nil,
+        actionToken: String? = "tok_test",
         createdAt: Date = epoch,
         status: InboxStatus = .pending
     ) -> InboxItem {
@@ -45,8 +48,8 @@ struct InboxTests {
             command: command,
             risk: risk,
             actions: actions,
-            requestID: nil,
-            actionToken: "tok_test",
+            requestID: requestID,
+            actionToken: actionToken,
             createdAt: createdAt,
             expiresAt: nil,
             status: status,
@@ -301,6 +304,221 @@ struct InboxTests {
 
         #expect(InboxCopy.decision(for: resolved) == "Resolved: deny.")
         #expect(InboxCopy.outcome(for: resolved) == "resolved · deny")
-        #expect(InboxCopy.decision(for: dismissed) == "Dismissed on this device. The agent was not answered.")
+        #expect(InboxCopy.decision(for: dismissed) == "Dismissed on the host. The agent was not answered.")
     }
+
+    // MARK: - Durable dismissal
+
+    @Test("An informational item is archived remotely before local state changes")
+    func informationalDismissPersistsAcrossRefresh() async throws {
+        let item = Self.item(
+            id: "inb_notice_remote",
+            category: .completion,
+            title: "Suite is green",
+            actionToken: nil
+        )
+        let backend = InboxDismissBackend(items: [item])
+        let model = connectedModel(backend: backend)
+        model.inbox = [item]
+
+        let sent = await model.dismiss(item)
+
+        #expect(sent)
+        #expect(backend.dismissedIDs == [item.id])
+        #expect(model.inbox.first?.status == .dismissed)
+        await model.refresh()
+        #expect(model.inbox.first?.status == .dismissed)
+    }
+
+    @Test("A failed remote dismiss leaves the item pending and explains the failure")
+    func failedDismissDoesNotArchiveLocally() async throws {
+        let item = Self.item(
+            id: "inb_notice_failure",
+            category: .toolFailure,
+            title: "Tests failed",
+            actionToken: nil
+        )
+        let backend = InboxDismissBackend(items: [item])
+        backend.dismissError = InboxDismissTestError.refused
+        let model = connectedModel(backend: backend)
+        model.inbox = [item]
+
+        let sent = await model.dismiss(item)
+
+        #expect(!sent)
+        #expect(model.inbox.first?.status == .pending)
+        #expect(model.lastError?.title == "Failed while dismissing the inbox item")
+    }
+
+    @Test("A dismiss response owned by an old host cannot archive the new host's item")
+    func staleDismissCannotMutateANewerHost() async throws {
+        let first = HostRecord(
+            nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(
+            nickname: "Two", hostname: "two", username: "dev", auth: .agentForwarding)
+        let item = Self.item(
+            id: "inb_shared_id",
+            category: .completion,
+            title: "Old host finished",
+            actionToken: nil
+        )
+        let backend = InboxDismissBackend(items: [item])
+        backend.dismissDelayNanoseconds = 50_000_000
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend)
+        model.connection = .connected(.ssh)
+        model.inbox = [item]
+
+        let dismiss = Task { await model.dismiss(item) }
+        try await Task.sleep(nanoseconds: 5_000_000)
+        await model.selectHost(second.id)
+        model.connection = .connected(.ssh)
+        model.inbox = [item]
+        let sent = await dismiss.value
+
+        #expect(!sent)
+        #expect(model.selectedHostID == second.id)
+        #expect(model.inbox.first?.status == .pending)
+        #expect(model.lastError == nil)
+    }
+
+    @Test("Only informational items expose the archive action")
+    func onlyInformationalItemsCanBeDismissed() {
+        let notice = Self.item(
+            id: "inb_notice_policy",
+            category: .completion,
+            title: "Finished",
+            actionToken: nil
+        )
+        let permission = Self.item(
+            id: "inb_permission_policy",
+            category: .permission,
+            title: "Delete build output",
+            actions: [.approveOnce, .deny],
+            requestID: "req_permission_policy"
+        )
+
+        #expect(notice.isDismissible)
+        #expect(!permission.isDismissible)
+    }
+
+    @Test("Informational detail uses durable dismiss instead of legacy acknowledgement")
+    func informationalDetailUsesDurableDismiss() {
+        let notice = Self.item(
+            id: "inb_notice_detail",
+            category: .completion,
+            title: "Finished",
+            actions: [.acknowledge],
+            actionToken: nil
+        )
+
+        let plan = InboxDetailControlPlan(item: notice, detailAcknowledged: true)
+
+        #expect(plan.offersDurableDismiss)
+        #expect(plan.closingActions.isEmpty)
+        #expect(plan.preRevealActions.isEmpty)
+    }
+
+    @Test("A gated request keeps denial available before reveal")
+    func gatedRequestKeepsDenialBeforeReveal() {
+        let permission = Self.item(
+            id: "inb_permission_detail",
+            category: .permission,
+            title: "Delete build output",
+            risk: Self.destructive,
+            actions: [.approveOnce, .deny],
+            requestID: "req_permission_detail"
+        )
+
+        let plan = InboxDetailControlPlan(item: permission, detailAcknowledged: false)
+
+        #expect(!plan.offersDurableDismiss)
+        #expect(plan.preRevealActions == [.deny])
+    }
+
+    private func connectedModel(backend: InboxDismissBackend) -> OpenPawModel {
+        let host = HostRecord(
+            nickname: "Host", hostname: "host", username: "dev", auth: .agentForwarding)
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        model.connection = .connected(.ssh)
+        return model
+    }
+}
+
+private enum InboxDismissTestError: Error {
+    case refused
+}
+
+private final class InboxDismissBackend: OpenPawBackend, @unchecked Sendable {
+    private let base = PreviewBackend(.empty)
+    var items: [InboxItem]
+    var dismissedIDs: [InboxID] = []
+    var dismissDelayNanoseconds: UInt64 = 0
+    var dismissError: (any Error)?
+
+    init(items: [InboxItem]) {
+        self.items = items
+    }
+
+    func health() async throws -> HealthInfo { try await base.health() }
+    func sessions() async throws -> [SessionSummary] { try await base.sessions() }
+    func inbox(status: InboxStatus?) async throws -> [InboxItem] {
+        guard let status else { return items }
+        return items.filter { $0.status == status }
+    }
+    func resolve(
+        item: InboxItem,
+        action: ActionID,
+        answer: String?,
+        detailAcknowledged: Bool
+    ) async throws -> ResolveResult {
+        try await base.resolve(
+            item: item,
+            action: action,
+            answer: answer,
+            detailAcknowledged: detailAcknowledged
+        )
+    }
+    func dismiss(item: InboxItem) async throws -> InboxDismissResult {
+        if dismissDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: dismissDelayNanoseconds)
+        }
+        if let dismissError { throw dismissError }
+        dismissedIDs.append(item.id)
+        if let index = items.firstIndex(where: { $0.id == item.id }) {
+            items[index].status = .dismissed
+            items[index].actionToken = nil
+            return InboxDismissResult(status: .dismissed, item: items[index])
+        }
+        var dismissed = item
+        dismissed.status = .dismissed
+        dismissed.actionToken = nil
+        return InboxDismissResult(status: .dismissed, item: dismissed)
+    }
+    func events(session: String?, afterSeq: UInt64?) -> AsyncThrowingStream<Event, any Error> {
+        base.events(session: session, afterSeq: afterSeq)
+    }
+    func repos() async throws -> [RepoSummary] { try await base.repos() }
+    func repoStatus(_ repo: String) async throws -> RepoStatus { try await base.repoStatus(repo) }
+    func diff(repo: String, mode: DiffMode, path: String?) async throws -> Diff {
+        try await base.diff(repo: repo, mode: mode, path: path)
+    }
+    func tree(repo: String, ref: String, path: String) async throws -> [TreeEntry] {
+        try await base.tree(repo: repo, ref: ref, path: path)
+    }
+    func blob(repo: String, ref: String, path: String) async throws -> Blob {
+        try await base.blob(repo: repo, ref: ref, path: path)
+    }
+    func search(repo: String, query: String, path: String?) async throws -> [ContentMatch] {
+        try await base.search(repo: repo, query: query, path: path)
+    }
+    func upload(data: Data, filename: String) async throws -> UploadResult {
+        try await base.upload(data: data, filename: filename)
+    }
+    func previewURL(port: Int, path: String) throws -> URL {
+        try base.previewURL(port: port, path: path)
+    }
+    func tailscaleDevices() async throws -> TailscaleDevicesResponse {
+        try await base.tailscaleDevices()
+    }
+    func audit(limit: Int) async throws -> [AuditEntry] { try await base.audit(limit: limit) }
 }

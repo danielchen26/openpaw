@@ -20,6 +20,17 @@ public enum InboxStatus: String, Codable, Sendable, Hashable, CaseIterable {
     case expired
 }
 
+/// Durable host acknowledgement that one informational inbox item was archived without answering an agent request.
+public struct InboxDismissResult: Codable, Sendable, Hashable {
+    public let status: InboxStatus
+    public let item: InboxItem
+
+    public init(status: InboxStatus, item: InboxItem) {
+        self.status = status
+        self.item = item
+    }
+}
+
 /// Whether a client may render a single tap approval, or must first expand the full
 /// detail. `.requiresDetailExpansion` carries the specific triggers so the UI can name
 /// them instead of showing a generic warning.
@@ -147,6 +158,12 @@ public struct InboxItem: Codable, Sendable, Hashable, Identifiable {
     public func hasExpired(at now: Date) -> Bool {
         guard let expiresAt else { return false }
         return now >= expiresAt
+    }
+
+    /// Informational notifications may be archived. Permission and question requests must instead be answered or
+    /// denied, even if a malformed older host omitted their request identifier.
+    public var isDismissible: Bool {
+        requestID == nil && category != .permission && category != .question
     }
 }
 

@@ -135,6 +135,10 @@ public final class OpenPawModel {
     private var tailscaleAdminGeneration = 0
     private var connectionPreflightGeneration = 0
     private var hostSelectionGeneration = 0
+    /// Host teardown may suspend inside a structured tunnel or terminal. Every
+    /// newer selection waits for the previous teardown before it can finish, so a
+    /// late A selection cannot disconnect a connection that B established later.
+    private var hostSelectionOperation: Task<Void, Never>?
     private var connectionRequestID = 0
 
     private var eventTask: Task<Void, Never>?
@@ -656,12 +660,34 @@ public final class OpenPawModel {
             return false
         }
         let generation = connectionGeneration
+        let hostGeneration = generation
+        var resolvedItem = item
+        if item.actionToken == nil, !item.isDismissible {
+            do {
+                guard let hydrated = try await hydrateActionableItem(item, hostID: hostID, generation: hostGeneration) else {
+                    guard selectedHostID == hostID,
+                          connectionGeneration == hostGeneration,
+                          structuredBackendReady else { return false }
+                    lastError = PresentedError(
+                        title: "Refresh this request first",
+                        detail: "The host did not return a current action token for this request. Reconnect before deciding.",
+                        isRecoverable: true
+                    )
+                    return false
+                }
+                resolvedItem = hydrated
+            } catch {
+                guard selectedHostID == hostID, connectionGeneration == generation else { return false }
+                present(error, while: "refreshing the inbox item")
+                return false
+            }
+        }
         do {
-            _ = try await backend.resolve(
-                item: item,
+            let result = try await backend.resolve(
+                item: resolvedItem,
                 action: action,
                 answer: answer,
-                detailAcknowledged: isDetailAcknowledged(item)
+                detailAcknowledged: isDetailAcknowledged(resolvedItem)
             )
             guard selectedHostID == hostID, connectionGeneration == generation, structuredBackendReady else { return false }
             if let index = inbox.firstIndex(where: { $0.id == item.id }) {
@@ -669,16 +695,86 @@ public final class OpenPawModel {
                 inbox[index].resolution = action.rawValue
                 inbox[index].actionToken = nil
             }
+            if let warning = result.warning {
+                let detail: String
+                switch warning {
+                case "decision_durability_not_confirmed":
+                    detail = "The host committed this decision and spent its one-time token, but could not confirm the decision directory was fully synced. Do not retry. Verify that the waiting agent received the decision."
+                case "decision_permissions_not_confirmed":
+                    detail = "The host committed this decision and spent its one-time token, but could not confirm the decision file's private permissions. Do not retry. Check the host diagnostics before continuing."
+                default:
+                    detail = "The host committed this decision and spent its one-time token, but reported a storage warning. Do not retry. Verify the agent's state and check host diagnostics."
+                }
+                lastError = PresentedError(
+                    title: "Decision sent with a storage warning",
+                    detail: detail,
+                    isRecoverable: false)
+            }
             return true
         } catch {
+            guard selectedHostID == hostID, connectionGeneration == generation, structuredBackendReady else {
+                return false
+            }
             present(error, while: "sending the decision")
             return false
         }
     }
 
-    public func dismiss(_ item: InboxItem) {
-        guard let index = inbox.firstIndex(where: { $0.id == item.id }) else { return }
-        inbox[index].status = .dismissed
+    private func hydrateActionableItem(
+        _ item: InboxItem,
+        hostID: HostRecord.ID,
+        generation: Int
+    ) async throws -> InboxItem? {
+        guard canRefreshRemoteState, let backend else { return nil }
+        let loaded = try await backend.inbox(status: .pending)
+        guard selectedHostID == hostID, connectionGeneration == generation, structuredBackendReady else { return nil }
+        guard let hydrated = loaded.first(where: { $0.id == item.id && $0.actionToken != nil }) else { return nil }
+        if let index = inbox.firstIndex(where: { $0.id == item.id }) {
+            inbox[index] = hydrated
+        } else {
+            inbox.append(hydrated)
+        }
+        return hydrated
+    }
+
+    @discardableResult
+    public func dismiss(_ item: InboxItem) async -> Bool {
+        guard item.isDismissible else {
+            lastError = PresentedError(
+                title: "This item needs a decision",
+                detail: "Permission and question requests cannot be archived. Deny or answer the request instead.",
+                isRecoverable: false
+            )
+            return false
+        }
+        guard canRefreshRemoteState, connection.isConnected, let backend, let hostID = selectedHostID else {
+            lastError = PresentedError(
+                title: "Structured host features are unavailable",
+                detail: "Reconnect the host before dismissing this item so it stays archived after refresh.",
+                isRecoverable: true
+            )
+            return false
+        }
+        let generation = connectionGeneration
+        do {
+            let result = try await backend.dismiss(item: item)
+            guard selectedHostID == hostID, connectionGeneration == generation, structuredBackendReady else {
+                return false
+            }
+            guard result.item.id == item.id,
+                  result.status == .dismissed,
+                  result.item.status == .dismissed,
+                  result.item.actionToken == nil else {
+                throw HostClientError.decoding(InboxDismissResponseError())
+            }
+            guard let index = inbox.firstIndex(where: { $0.id == item.id }) else { return true }
+            inbox[index] = result.item
+            return true
+        } catch {
+            guard selectedHostID == hostID, connectionGeneration == generation else { return false }
+            present(error, while: "dismissing the inbox item")
+            return false
+        }
     }
 
     public func sendAgentPrompt(_ prompt: String) async -> Bool {
@@ -757,7 +853,10 @@ public final class OpenPawModel {
     /// The host id changes before the asynchronous teardown so every in-flight refresh and event stream becomes stale
     /// immediately. The caller must make a separate `connectSelectedHost()` request after this transaction finishes.
     public func selectHost(_ hostID: HostRecord.ID?) async {
-        guard hostID != selectedHostID else { return }
+        if hostID == selectedHostID {
+            if let hostSelectionOperation { await hostSelectionOperation.value }
+            return
+        }
         hostSelectionGeneration += 1
         let selectionGeneration = hostSelectionGeneration
         isSwitchingHost = true
@@ -766,10 +865,18 @@ public final class OpenPawModel {
         stateAttemptHasConnected = false
         selectedHostID = hostID
 
-        if let lifecycle = backend as? any StructuredBackendLifecycle { await lifecycle.disconnect() }
-        await terminal?.disconnect()
-
-        if hostSelectionGeneration == selectionGeneration { isSwitchingHost = false }
+        let previousOperation = hostSelectionOperation
+        let lifecycle = backend as? any StructuredBackendLifecycle
+        let terminal = terminal
+        let operation = Task { @MainActor [weak self] in
+            if let previousOperation { await previousOperation.value }
+            guard let self, self.hostSelectionGeneration == selectionGeneration else { return }
+            if let lifecycle { await lifecycle.disconnect() }
+            await terminal?.disconnect()
+            if self.hostSelectionGeneration == selectionGeneration { self.isSwitchingHost = false }
+        }
+        hostSelectionOperation = operation
+        await operation.value
     }
 
     @discardableResult
@@ -1088,6 +1195,8 @@ extension Error {
         }
     }
 }
+
+private struct InboxDismissResponseError: Error {}
 
 public struct PresentedError: Identifiable, Sendable, Equatable {
     public let id = UUID()

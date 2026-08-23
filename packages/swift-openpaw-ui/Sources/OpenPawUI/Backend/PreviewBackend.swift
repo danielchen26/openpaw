@@ -219,8 +219,16 @@ public struct PreviewBackend: OpenPawBackend {
 
     public func inbox(status: InboxStatus?) async throws -> [InboxItem] {
         try requireTunnel()
-        guard let status else { return inboxItems }
-        return inboxItems.filter { $0.status == status }
+        let dismissed = await journal.dismissedIDs()
+        let items = inboxItems.map { source in
+            guard dismissed.contains(source.id) else { return source }
+            var archived = source
+            archived.status = .dismissed
+            archived.actionToken = nil
+            return archived
+        }
+        guard let status else { return items }
+        return items.filter { $0.status == status }
     }
 
     /// Enforces the safety gate the way the daemon does — approving an item that demands the expanded command
@@ -242,6 +250,18 @@ public struct PreviewBackend: OpenPawBackend {
         }
         await journal.record(Decision(itemID: item.id.rawValue, action: action, answer: answer))
         return ResolveResult(status: "accepted", eventID: item.sourceEventID.rawValue)
+    }
+
+    public func dismiss(item: InboxItem) async throws -> InboxDismissResult {
+        try requireTunnel()
+        guard item.isDismissible else {
+            throw HostClientError.badRequest("Permission and question requests cannot be dismissed.")
+        }
+        await journal.recordDismissal(item.id)
+        var dismissed = item
+        dismissed.status = .dismissed
+        dismissed.actionToken = nil
+        return InboxDismissResult(status: .dismissed, item: dismissed)
     }
 
     /// Replays the fixture stream from `afterSeq`, then finishes. It does not hold the stream open: a preview
@@ -362,12 +382,15 @@ public struct Decision: Sendable, Hashable {
 /// `Sendable` struct hiding a mutex is a puzzle for whoever reads it next.
 public actor ResolveJournal {
     private var decisions: [Decision] = []
+    private var dismissed: Set<InboxID> = []
 
     public init() {}
 
     public func record(_ decision: Decision) { decisions.append(decision) }
+    public func recordDismissal(_ itemID: InboxID) { dismissed.insert(itemID) }
     public func all() -> [Decision] { decisions }
     public func last() -> Decision? { decisions.last }
+    public func dismissedIDs() -> Set<InboxID> { dismissed }
 }
 
 // MARK: - The scenario itself

@@ -12,13 +12,21 @@ import SwiftUI
 /// rest of the app.
 public struct InboxView: View {
     private let model: OpenPawModel
+    @Binding private var routedItemID: String?
+    private let bottomAccessoryInset: CGFloat
 
     @State private var filter: InboxCategory?
     @State private var showsDecided = false
     @State private var recovery: InboxItem?
 
-    public init(model: OpenPawModel) {
+    public init(
+        model: OpenPawModel,
+        routedItemID: Binding<String?> = .constant(nil),
+        bottomAccessoryInset: CGFloat = 0
+    ) {
         self.model = model
+        _routedItemID = routedItemID
+        self.bottomAccessoryInset = bottomAccessoryInset
     }
 
     public var body: some View {
@@ -30,6 +38,18 @@ public struct InboxView: View {
         .background(OpenPawTheme.ink)
         .sheet(item: $recovery) { item in
             ApprovalSheet(model: model, item: item)
+        }
+        .navigationDestination(item: $routedItemID) { itemID in
+            if let item = model.inbox.first(where: { $0.id.rawValue == itemID }) {
+                InboxItemDetailView(model: model, item: item)
+                    .safeAreaPadding(.bottom, bottomAccessoryInset)
+            } else {
+                ContentUnavailableView(
+                    "Inbox item unavailable",
+                    systemImage: "tray",
+                    description: Text("Refresh the Inbox to see current work from this host.")
+                )
+            }
         }
     }
 
@@ -172,6 +192,10 @@ public struct InboxView: View {
     private func pendingRow(_ item: InboxItem, in group: InboxSessionGroup) -> some View {
         NavigationLink {
             InboxItemDetailView(model: model, item: item)
+                // The compact Control Deck belongs outside the NavigationStack, so its root padding does not follow
+                // a pushed detail. Repeat that contract here or the decision control is visible behind the deck but
+                // the deck receives the tap.
+                .safeAreaPadding(.bottom, bottomAccessoryInset)
         } label: {
             InboxQueueRow(item: item)
         }
@@ -191,12 +215,14 @@ public struct InboxView: View {
                 }
                 .tint(OpenPawTheme.bad)
             }
-            Button {
-                model.dismiss(item)
-            } label: {
-                Label("Dismiss", systemImage: "archivebox")
+            if item.isDismissible {
+                Button {
+                    Task { await model.dismiss(item) }
+                } label: {
+                    Label("Dismiss", systemImage: "archivebox")
+                }
+                .tint(OpenPawTheme.textTertiary)
             }
-            .tint(OpenPawTheme.textTertiary)
         }
     }
 
@@ -246,6 +272,7 @@ public struct InboxView: View {
                 ForEach(decided) { item in
                     NavigationLink {
                         InboxItemDetailView(model: model, item: item)
+                            .safeAreaPadding(.bottom, bottomAccessoryInset)
                     } label: {
                         InboxDecidedRow(item: item, sessionTitle: sessionTitle(for: item.sessionID.rawValue))
                     }
@@ -575,7 +602,7 @@ enum InboxCopy {
         case .resolved:
             return decision.map { "Resolved: \($0)." } ?? "Resolved."
         case .dismissed:
-            return "Dismissed on this device. The agent was not answered."
+            return "Dismissed on the host. The agent was not answered."
         case .expired:
             return "Expired before anyone decided."
         }
