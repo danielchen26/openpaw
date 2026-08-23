@@ -43,6 +43,40 @@ final class TailscaleAdminConnectorTests: XCTestCase {
         XCTAssertEqual(URLProtocolStub.requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer token-one")
     }
 
+    func testQuad100LocalIdentityUsesOnlyTheFixedEndpointAndDecodesTheSignedInTailnet() async throws {
+        URLProtocolStub.routes = [
+            .init(
+                status: 200,
+                body: #"{"Profile":{"LoginName":"alice@example.com","DisplayName":"Alice"},"Status":"Running","DeviceName":"Alice's iPhone","TailnetName":"example.ts.net"}"#
+            )
+        ]
+        let connector = Quad100TailscaleLocalIdentityConnector(configuration: stubConfiguration())
+
+        let identity = try await connector.localIdentity()
+
+        XCTAssertEqual(URLProtocolStub.requests.map(\.url?.absoluteString), ["http://100.100.100.100/api/data"])
+        XCTAssertEqual(identity.profile?.loginName, "alice@example.com")
+        XCTAssertEqual(identity.tailnetName, "example.ts.net")
+    }
+
+    func testQuad100LocalIdentityRejectsAResponseOverItsByteBudget() async {
+        URLProtocolStub.routes = [.init(status: 200, body: String(repeating: "x", count: 65))]
+        let connector = Quad100TailscaleLocalIdentityConnector(maxBytes: 64, configuration: stubConfiguration())
+
+        await XCTAssertThrowsErrorAsync(try await connector.localIdentity()) { error in
+            XCTAssertEqual(error as? TailscaleLocalIdentityError, .responseTooLarge)
+        }
+    }
+
+    func testQuad100LocalIdentityRefusesRedirectResponses() async {
+        URLProtocolStub.routes = [.init(status: 302, body: "")]
+        let connector = Quad100TailscaleLocalIdentityConnector(configuration: stubConfiguration())
+
+        await XCTAssertThrowsErrorAsync(try await connector.localIdentity()) { error in
+            XCTAssertEqual(error as? TailscaleLocalIdentityError, .redirectRefused)
+        }
+    }
+
     func testRefreshesShortLivedInMemoryTokenOnExpiry() async throws {
         let clock = ManualClock(Date(timeIntervalSince1970: 100))
         let now: @Sendable () -> Date = { clock.now() }
@@ -151,9 +185,13 @@ final class TailscaleAdminConnectorTests: XCTestCase {
         store: TailscaleAdminCredentialStore = InMemoryAdminCredentialStore(),
         clock: @escaping @Sendable () -> Date = { Date(timeIntervalSince1970: 100) }
     ) -> TailscaleAdminConnector {
+        TailscaleAdminConnector(session: URLSession(configuration: stubConfiguration()), credentialStore: store, now: clock)
+    }
+
+    private func stubConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [URLProtocolStub.self]
-        return TailscaleAdminConnector(session: URLSession(configuration: configuration), credentialStore: store, now: clock)
+        return configuration
     }
 }
 

@@ -79,10 +79,11 @@
 	<key>NSFaceIDUsageDescription</key>
 	<string>OpenPaw asks for Face ID before it shows your sessions, because anyone holding this phone could otherwise approve a command that deletes files or reads credentials on your machine.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>OpenPaw connects to the machine you added by address, which is usually on your own network. It contacts only the hosts you configure and never scans for others.</string>
+	<string>OpenPaw checks Tailscale’s fixed local status endpoint and connects only to hosts you configure. It never scans your network or trusts discovered devices automatically.</string>
 
-	<!-- The forwarded host API is reached at 127.0.0.1 through the SSH tunnel, which is plain HTTP inside an
-	     encrypted channel. Nothing else is exempted from App Transport Security. -->
+	<!-- The forwarded host API is reached at 127.0.0.1 through the SSH tunnel, and Tailscale's fixed Quad100
+	     identity endpoint is local HTTP. Both remain on-device or inside an encrypted tunnel; arbitrary internet
+	     HTTP is not exempted from App Transport Security. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

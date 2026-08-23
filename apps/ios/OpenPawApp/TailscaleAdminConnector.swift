@@ -266,28 +266,41 @@ struct KeychainTailscaleAdminCredentialStore: TailscaleAdminCredentialStore {
 final class Quad100TailscaleLocalIdentityConnector: NSObject, TailscaleLocalIdentityConnecting, URLSessionTaskDelegate, @unchecked Sendable {
     private let endpoint = URL(string: "http://100.100.100.100/api/data")!
     private let maxBytes: Int
+    private let configuration: URLSessionConfiguration
     private let decoder = JSONDecoder()
 
-    init(maxBytes: Int = 64 * 1024) { self.maxBytes = maxBytes }
-
-    func localIdentity() async throws -> TailscaleLocalIdentity {
-        var configuration = URLSessionConfiguration.ephemeral
+    init(
+        maxBytes: Int = 64 * 1024,
+        configuration: URLSessionConfiguration = .ephemeral
+    ) {
+        self.maxBytes = maxBytes
         configuration.timeoutIntervalForRequest = 1.5
         configuration.timeoutIntervalForResource = 2.0
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        self.configuration = configuration
+    }
+
+    func localIdentity() async throws -> TailscaleLocalIdentity {
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         do {
-            let (data, response) = try await session.data(for: request)
+            let (bytes, response) = try await session.bytes(for: request)
             try Task.checkCancellation()
             guard let http = response as? HTTPURLResponse else { throw TailscaleLocalIdentityError.malformedJSON }
+            guard !(300 ..< 400).contains(http.statusCode) else { throw TailscaleLocalIdentityError.redirectRefused }
             guard http.statusCode == 200 else { throw TailscaleLocalIdentityError.unavailable }
-            guard data.count <= maxBytes else { throw TailscaleLocalIdentityError.responseTooLarge }
+            var data = Data()
+            data.reserveCapacity(min(maxBytes, 4 * 1024))
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                guard data.count < maxBytes else { throw TailscaleLocalIdentityError.responseTooLarge }
+                data.append(byte)
+            }
             return try decode(data)
         } catch is CancellationError {
             throw CancellationError()

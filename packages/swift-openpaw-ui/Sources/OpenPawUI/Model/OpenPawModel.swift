@@ -754,7 +754,7 @@ public final class OpenPawModel {
             var source: HomeTailnetBootstrapState.Source = .none
             var failure: String?
 
-            if hint == .likelyAvailable, let tailscaleLocalIdentityConnector {
+            if let tailscaleLocalIdentityConnector {
                 do { identity = try await tailscaleLocalIdentityConnector.localIdentity(); source = .localIdentity }
                 catch is CancellationError { return }
                 catch { /* local identity can be unavailable on some clients */ }

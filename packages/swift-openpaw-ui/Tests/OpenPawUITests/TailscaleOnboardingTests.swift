@@ -52,6 +52,85 @@ struct TailscaleRouteHintTests {
     }
 }
 
+@Suite("Home Tailnet bootstrap")
+struct HomeTailnetBootstrapTests {
+    @MainActor
+    @Test("Home loads devices from previously saved OpenPaw administrator authorization without prompting")
+    func savedAuthorizationLoadsCandidatesAutomatically() async {
+        let admin = RecordingTailscaleAdminConnector()
+        await admin.setDevices([
+            TailscaleAdminDeviceCandidate(
+                id: "saved-node",
+                name: "build.example.ts.net",
+                hostname: "build",
+                addresses: ["100.64.0.9"],
+                os: "macOS",
+                isOnline: true
+            )
+        ])
+        let model = OpenPawModel(
+            tailscaleAdminConnector: admin,
+            tailscaleLocalIdentityConnector: FixtureTailscaleLocalIdentityConnector()
+        )
+
+        model.refreshHomeTailnetBootstrap()
+        await waitUntil { model.homeTailnetBootstrap.phase != .loading }
+
+        #expect(model.homeTailnetBootstrap.candidates.map(\.id) == ["saved-node"])
+        #expect(model.homeTailnetBootstrap.source == .savedAdministrator)
+        #expect(model.hostStore.hosts.isEmpty, "automatic loading must not trust, save, or connect candidates")
+    }
+
+    @Test("Review candidates includes candidates loaded automatically on Home")
+    func homeCandidatesReachAddDevice() {
+        let automatic = AddDeviceCandidate(
+            id: "node-1",
+            nickname: "Build Mac",
+            hostname: "build.example.ts.net",
+            source: .tailscaleAdministrator
+        )
+
+        #expect(
+            WorkspaceHomeCandidateSelection.merge(explicit: [], bootstrap: [automatic])
+                == [automatic]
+        )
+    }
+
+    @MainActor
+    @Test("Home probes the fixed local Tailscale identity endpoint even when the route hint misses it")
+    func localIdentityDoesNotDependOnTheHeuristicRouteHint() async {
+        let identity = TailscaleLocalIdentity(
+            profile: TailscaleLocalProfile(loginName: "alice@example.com", displayName: "Alice"),
+            status: "Running",
+            deviceName: "Alice's iPhone",
+            tailnetName: "example.ts.net"
+        )
+        let localConnector = RecordingLocalIdentityConnector(identity: identity)
+        let model = OpenPawModel(
+            tailscaleRouteHintSource: StaticRoutePathSource(
+                snapshot: TailscaleRoutePathSnapshot(isSatisfied: true, interfaceNames: ["en0"])
+            ),
+            tailscaleLocalIdentityConnector: localConnector
+        )
+
+        model.refreshHomeTailnetBootstrap()
+        await waitUntil { model.homeTailnetBootstrap.phase != .loading }
+
+        #expect(await localConnector.callCount == 1)
+        #expect(model.homeTailnetBootstrap.localIdentity == identity)
+        #expect(model.homeTailnetBootstrap.phase == .loaded)
+        #expect(model.suggestedAdministratorTailnet == "example.ts.net")
+    }
+
+    @MainActor
+    private func waitUntil(_ predicate: @escaping @MainActor @Sendable () -> Bool) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while !predicate(), clock.now < deadline { await Task.yield() }
+        #expect(predicate())
+    }
+}
+
 @Suite("Advanced Tailscale administrator onboarding")
 struct TailscaleAdministratorOnboardingTests {
     @Test("The advanced path is clearly an administrator workflow, never normal Tailscale login")
@@ -679,6 +758,20 @@ private actor RecordingTailscaleAdminConnector: TailscaleAdminConnecting {
         let waiters = resumeWaiters
         resumeWaiters.removeAll()
         waiters.forEach { $0.resume() }
+    }
+}
+
+private actor RecordingLocalIdentityConnector: TailscaleLocalIdentityConnecting {
+    private let identity: TailscaleLocalIdentity
+    private(set) var callCount = 0
+
+    init(identity: TailscaleLocalIdentity) {
+        self.identity = identity
+    }
+
+    func localIdentity() async throws -> TailscaleLocalIdentity {
+        callCount += 1
+        return identity
     }
 }
 

@@ -10,6 +10,16 @@ public enum WorkspaceHomeCopy {
     public static let emptyAndOnboardingCopy = [emptyPrimaryAction, headline, message, localControl]
 }
 
+public enum WorkspaceHomeCandidateSelection {
+    public static func merge(
+        explicit: [AddDeviceCandidate],
+        bootstrap: [AddDeviceCandidate]
+    ) -> [AddDeviceCandidate] {
+        var seen = Set<String>()
+        return (explicit + bootstrap).filter { seen.insert($0.id).inserted }
+    }
+}
+
 @MainActor
 public struct WorkspaceHomeView: View {
     private let model: OpenPawModel
@@ -51,7 +61,14 @@ public struct WorkspaceHomeView: View {
         }
         .sheet(isPresented: $isAdding) {
             NavigationStack {
-                AddDeviceFlow(model: model, settings: settings, candidates: candidates) { isAdding = false }
+                AddDeviceFlow(
+                    model: model,
+                    settings: settings,
+                    candidates: WorkspaceHomeCandidateSelection.merge(
+                        explicit: candidates,
+                        bootstrap: model.homeTailnetBootstrap.candidates
+                    )
+                ) { isAdding = false }
             }
         }
         .sheet(isPresented: $isShowingProviderImport) {
