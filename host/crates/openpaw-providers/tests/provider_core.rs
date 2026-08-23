@@ -1,6 +1,7 @@
 use axum::{
     Json, Router,
     extract::Query,
+    http::HeaderMap,
     routing::{get, post},
 };
 use openpaw_providers::*;
@@ -50,7 +51,7 @@ async fn device_poll_states_and_hf_refresh_are_supported() {
     let step = Arc::new(Mutex::new(0usize));
     let app_step = step.clone();
     let app = Router::new()
-        .route("/oauth/device/code", post(|| async { Json(json!({"device_code":"dev","user_code":"ABCD","verification_uri":"https://hf/device","expires_in":600,"interval":5})) }))
+        .route("/oauth/device", post(|| async { Json(json!({"device_code":"dev","user_code":"ABCD","verification_uri":"https://hf/device","expires_in":600,"interval":5})) }))
         .route("/oauth/token", post(move || {
             let app_step = app_step.clone();
             async move {
@@ -76,7 +77,9 @@ async fn device_poll_states_and_hf_refresh_are_supported() {
     );
     assert_eq!(
         hf.poll_device_authorization("dev").await.unwrap(),
-        DevicePollState::Pending
+        DevicePollState::Pending {
+            interval_seconds: 5
+        }
     );
     assert!(matches!(
         hf.poll_device_authorization("dev").await.unwrap(),
@@ -106,7 +109,11 @@ async fn github_repository_listing_uses_real_page_parameters() {
             let page: usize = params["page"].parse().unwrap();
             let len = if page == 1 { 100 } else { 1 };
             let repos: Vec<_> = (0..len).map(|i| json!({"name":format!("r{i}"),"owner":{"login":"me"},"clone_url":format!("https://github.example/me/r{i}.git")})).collect();
-            Json(repos)
+            let mut headers = HeaderMap::new();
+            if page == 1 {
+                headers.insert("link", format!("<{}/user/repos?per_page=100&page=2>; rel=\"next\"", params.get("base").map_or("", String::as_str)).parse().unwrap());
+            }
+            (headers, Json(repos))
         }
     }));
     let base = serve(app).await;
@@ -188,7 +195,9 @@ fn canonical_clone_spec_has_https_url_and_secret_credential_seam() {
         "https://github.com",
         "https://api.github.com",
     ));
-    let spec = gh.clone_spec(&repo, SecretToken::new("short-lived".into()));
+    let spec = gh
+        .clone_spec(&repo, SecretToken::new("short-lived".into()))
+        .unwrap();
     assert_eq!(spec.url, "https://github.com/me/r.git");
     assert_eq!(spec.username, "x-access-token");
     assert!(!format!("{spec:?}").contains("short-lived"));
