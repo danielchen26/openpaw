@@ -214,11 +214,25 @@ pub struct Repository {
     pub https_url: String,
     pub is_private: bool,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CloneSpec {
     pub url: String,
     pub username: String,
     pub password: SecretToken,
+}
+impl fmt::Debug for CloneSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CloneSpec")
+            .field("url", &"<redacted>")
+            .field("username", &"<redacted>")
+            .field("password", &self.password)
+            .finish()
+    }
+}
+impl fmt::Display for CloneSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CloneSpec(<redacted>)")
+    }
 }
 
 #[derive(Clone, Debug)]

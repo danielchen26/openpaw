@@ -37,6 +37,127 @@ fn provider_errors_do_not_reveal_secret_values() {
 }
 
 #[test]
+fn clone_spec_debug_display_and_errors_redact_credentials() {
+    let sentinel_url = "https://github.com/sentinel-owner/sentinel-repo.git";
+    let sentinel_username = "x-access-token";
+    let sentinel_token = "ghp_SENTINEL_CLONE_TOKEN_123456789";
+    let gh = GitHubProvider::new(PublicClientConfig::github_app(
+        "client",
+        "https://github.test",
+        "https://api.github.test",
+    ));
+    let repo = Repository {
+        provider_repo_id: "github.123".into(),
+        owner: "sentinel-owner".into(),
+        name: "sentinel-repo".into(),
+        https_url: sentinel_url.into(),
+        is_private: true,
+    };
+    let spec = gh
+        .clone_spec(&repo, SecretToken::new(sentinel_token.into()))
+        .unwrap();
+
+    assert_eq!(spec.url, sentinel_url);
+    assert_eq!(spec.username, sentinel_username);
+    assert_eq!(spec.password.expose_secret(), sentinel_token);
+
+    let rendered = format!("{spec:?} {spec}");
+    for secret_surface in [
+        sentinel_url,
+        "sentinel-owner",
+        "sentinel-repo",
+        sentinel_username,
+        sentinel_token,
+    ] {
+        assert!(
+            !rendered.contains(secret_surface),
+            "CloneSpec rendered sensitive surface: {secret_surface} in {rendered}"
+        );
+    }
+
+    let bad_repo = Repository {
+        https_url: "https://evil.example/sentinel-owner/sentinel-repo.git".into(),
+        ..repo
+    };
+    let err = gh
+        .clone_spec(&bad_repo, SecretToken::new(sentinel_token.into()))
+        .unwrap_err();
+    let err_rendered = format!("{err:?} {err}");
+    for secret_surface in [
+        sentinel_url,
+        "evil.example",
+        "sentinel-owner",
+        "sentinel-repo",
+        sentinel_username,
+        sentinel_token,
+    ] {
+        assert!(
+            !err_rendered.contains(secret_surface),
+            "CloneSpec error rendered sensitive surface: {secret_surface} in {err_rendered}"
+        );
+    }
+}
+
+#[test]
+fn clone_spec_preserves_provider_specific_derivation_and_host_pinning() {
+    let gh = GitHubProvider::new(PublicClientConfig::github_app(
+        "client",
+        "https://github.test",
+        "https://api.github.test",
+    ));
+    let gh_repo = Repository {
+        provider_repo_id: "github.456".into(),
+        owner: "octo-owner".into(),
+        name: "octo-repo".into(),
+        https_url: "https://github.com/octo-owner/octo-repo.git".into(),
+        is_private: true,
+    };
+    let gh_spec = gh
+        .clone_spec(&gh_repo, SecretToken::new("ghp_DERIVATION_SENTINEL".into()))
+        .unwrap();
+    assert_eq!(gh_spec.url, "https://github.com/octo-owner/octo-repo.git");
+    assert_eq!(gh_spec.username, "x-access-token");
+    assert_eq!(gh_spec.password.expose_secret(), "ghp_DERIVATION_SENTINEL");
+
+    let hf = HuggingFaceProvider::new(PublicClientConfig::hugging_face(
+        "client",
+        "https://hf.test",
+        "https://api.hf.test",
+    ));
+    let hf_repo = Repository {
+        provider_repo_id: "hf.model.789".into(),
+        owner: "hf-owner".into(),
+        name: "hf-model".into(),
+        https_url: "https://huggingface.co/hf-owner/hf-model".into(),
+        is_private: true,
+    };
+    let hf_spec = hf
+        .clone_spec(&hf_repo, SecretToken::new("hf_DERIVATION_SENTINEL".into()))
+        .unwrap();
+    assert_eq!(hf_spec.url, "https://huggingface.co/hf-owner/hf-model");
+    assert_eq!(hf_spec.username, "hf-owner");
+    assert_eq!(hf_spec.password.expose_secret(), "hf_DERIVATION_SENTINEL");
+
+    let bad_gh_repo = Repository {
+        https_url: "https://github.evil/octo-owner/octo-repo.git".into(),
+        ..gh_repo
+    };
+    assert!(matches!(
+        gh.clone_spec(&bad_gh_repo, SecretToken::new("ghp_BAD_HOST".into())),
+        Err(ProviderError::Protocol(_))
+    ));
+
+    let bad_hf_repo = Repository {
+        https_url: "https://huggingface.evil/hf-owner/hf-model".into(),
+        ..hf_repo
+    };
+    assert!(matches!(
+        hf.clone_spec(&bad_hf_repo, SecretToken::new("hf_BAD_HOST".into())),
+        Err(ProviderError::Protocol(_))
+    ));
+}
+
+#[test]
 fn github_minimum_scopes_avoid_coarse_repo_by_default() {
     let gh = GitHubProvider::new(PublicClientConfig::github_app(
         "client",
