@@ -230,7 +230,21 @@ impl Profile {
                 Capability::FilesRead,
                 Capability::DevicesRead,
             ],
-            Profile::Operator => &Capability::ALL,
+            Profile::Operator => &[
+                Capability::SessionsRead,
+                Capability::EventsRead,
+                Capability::InboxRead,
+                Capability::InboxWrite,
+                Capability::ApprovalsWrite,
+                Capability::ReposRead,
+                Capability::ProvidersRead,
+                Capability::ProvidersManage,
+                Capability::ReposManage,
+                Capability::FilesRead,
+                Capability::DevicesRead,
+                Capability::PreviewProxy,
+                Capability::UploadsWrite,
+            ],
         }
     }
 
@@ -777,19 +791,29 @@ mod tests {
 
     #[test]
     fn profiles_match_the_capability_spec() {
+        let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("protocol/capability-spec/capabilities.json");
+        let spec_source = std::fs::read_to_string(&spec_path).expect("capability spec can be read");
+        let spec: serde_json::Value =
+            serde_json::from_str(&spec_source).expect("capability spec is valid JSON");
+
+        let spec_profile = |name: &str| -> Vec<String> {
+            spec["profiles"][name]
+                .as_array()
+                .unwrap_or_else(|| panic!("profiles.{name} is an array"))
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .unwrap_or_else(|| panic!("profiles.{name} contains strings"))
+                        .to_owned()
+                })
+                .collect()
+        };
+
         let observer = Profile::Observer.capability_names();
-        assert_eq!(
-            observer,
-            vec![
-                "sessions.read",
-                "events.read",
-                "inbox.read",
-                "repos.read",
-                "providers.read",
-                "files.read",
-                "devices.read"
-            ]
-        );
+        assert_eq!(observer, spec_profile("observer"));
         assert!(!observer.contains(&"repos.manage".to_owned()));
         assert!(!observer.contains(&"providers.manage".to_owned()));
         assert!(!observer.contains(&"inbox.write".to_owned()));
@@ -797,28 +821,33 @@ mod tests {
         assert!(!observer.contains(&"uploads.write".to_owned()));
 
         let operator = Profile::Operator.capability_names();
-        assert_eq!(
-            operator,
-            vec![
-                "sessions.read",
-                "events.read",
-                "inbox.read",
-                "inbox.write",
-                "approvals.write",
-                "repos.read",
-                "providers.read",
-                "providers.manage",
-                "repos.manage",
-                "files.read",
-                "preview.proxy",
-                "devices.read",
-                "uploads.write"
-            ]
-        );
+        assert_eq!(operator, spec_profile("operator"));
         assert_eq!(operator.len(), 13);
         for capability in Capability::ALL {
             assert!(operator.contains(&capability.as_str().to_owned()));
         }
+
+        let capability_object_order = spec_source
+            .lines()
+            .skip_while(|line| !line.trim_start().starts_with("\"capabilities\": {"))
+            .skip(1)
+            .take_while(|line| !line.trim_start().starts_with("\"profiles\":"))
+            .filter_map(|line| {
+                let trimmed = line.trim_start();
+                trimmed
+                    .strip_prefix('"')?
+                    .split_once("\": {")
+                    .map(|(name, _)| name.to_owned())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            Capability::ALL
+                .iter()
+                .map(|capability| capability.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            capability_object_order
+        );
+
         assert_eq!("operator".parse::<Profile>().unwrap(), Profile::Operator);
         assert_eq!("Observer".parse::<Profile>().unwrap(), Profile::Observer);
         assert!("root".parse::<Profile>().is_err());
