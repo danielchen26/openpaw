@@ -28,17 +28,25 @@ every one of these features is a liability if the layer under it is guesswork.
 - **Session space.** Present OpenPaw agent sessions and discovered Herdr/tmux/Zellij/screen sessions together without
   erasing provenance. Wire restoration plans and the existing multiplexer actions into the shipped root flow.
 - **Real Tailscale discovery.** The current onboarding labels candidates honestly and never calls them trusted. The
-  next step is a discovery backend plus explicit save/trust and SSH credential handoff.
+  next step is paired-host discovery plus explicit save/trust and SSH credential handoff. OpenPaw cannot read the
+  installed iOS Tailscale application's account or peer list; the boundary is recorded in
+  [ADR 0003](../decisions/0003-tailscale-discovery-boundary.md).
+- **Repository providers.** Add host-scoped GitHub and Hugging Face authorization, sanitized browsing, hardened
+  HTTPS-only import, and canonical workspace registration without returning tokens or introducing a remote shell
+  endpoint. The credential and clone boundary is recorded in
+  [ADR 0004](../decisions/0004-provider-token-boundary.md).
 
 ## Next — resilient mobile transport
 
 - **Mosh transport feasibility.** Native Mosh is not implemented. The hard part is not compiling the C++ core, it is
   the UDP lifecycle across iOS background suspension, resynchronising terminal state after a kill, and third-party
-  license compliance in an App Store build. It can only land behind `RemoteTransport` after those gates are resolved.
+  license compliance in an App Store build. It can only land behind `RemoteTransport` after Gate M0 in
+  [ADR 0001](../decisions/0001-mosh-distribution-gate.md) is approved.
 - **Eternal Terminal transport integration.** For networks where UDP is simply not allowed. An isolated foundation
   exists, but it is disabled by default, excluded from default `TransportSelector` planning by
   `ExperimentalTransportFeatures.disabled`, and still needs app integration plus real `etserver` and physical-device
-  validation before any support claim.
+  validation before any support claim. App wiring and distribution are additionally blocked by Gate E0 in
+  [ADR 0002](../decisions/0002-et-provenance-distribution-gate.md).
 
 ### Acceptance debt before any resilient-transport support claim
 

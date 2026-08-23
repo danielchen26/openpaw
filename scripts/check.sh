@@ -52,6 +52,95 @@ print(max(candidates)[-1] if candidates else "")
 
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/opaw-check}
 
+product_claims_step() {
+  python3 - "$ROOT/README.md" "$ROOT"/docs/architecture/*.md <<'PY'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).parent
+documents = [Path(path) for path in sys.argv[1:]]
+required = [root / "README.md", root / "docs" / "architecture" / "README.md"]
+missing = [path for path in required if not path.is_file()]
+missing.extend(path for path in documents if not path.is_file())
+if missing:
+    for path in sorted(set(missing)):
+        print(f"product claim gate missing allowlisted file: {path}", file=sys.stderr)
+    raise SystemExit(1)
+
+decisions = root / "docs" / "decisions"
+mosh_decision = decisions / "0001-mosh-distribution-gate.md"
+et_decision = decisions / "0002-et-provenance-distribution-gate.md"
+boundary_decisions = [
+    mosh_decision,
+    et_decision,
+    decisions / "0003-tailscale-discovery-boundary.md",
+    decisions / "0004-provider-token-boundary.md",
+]
+table = re.compile(r"\|\s*Allowed\s*\|\s*Forbidden\s*\|", re.IGNORECASE)
+status = re.compile(r"\*\*Gate status:\*\*\s*([^\n]+)", re.IGNORECASE)
+errors = []
+for path in boundary_decisions:
+    if not path.is_file():
+        errors.append(f"missing required decision record: {path}")
+        continue
+    if table.search(path.read_text(encoding="utf-8")) is None:
+        errors.append(f"{path} must contain an Allowed | Forbidden table")
+
+def approved(path):
+    if not path.is_file():
+        return False
+    match = status.search(path.read_text(encoding="utf-8"))
+    return match is not None and match.group(1).strip().casefold() == "approved"
+
+tailscale_claims = (
+    "sign in with tailscale",
+    "reads your tailscale account",
+    "reads the installed tailscale app account",
+)
+mosh_claims = (
+    "mosh is shipped",
+    "ships with mosh",
+    "native mosh is implemented and shipped",
+    "mosh transport is shipped",
+    "mosh transport is production-ready",
+)
+et_claims = (
+    "eternal terminal is integrated",
+    "eternal terminal is app-integrated",
+    "eternal terminal is shipped",
+    "et app integration is shipped",
+)
+
+for path in sorted(set(documents)):
+    content = path.read_text(encoding="utf-8").replace("“", '"').replace("”", '"').casefold()
+    for claim in tailscale_claims:
+        if claim in content:
+            errors.append(f"{path}: forbidden installed Tailscale claim: {claim}")
+    if not approved(mosh_decision):
+        for claim in mosh_claims:
+            if claim in content:
+                errors.append(f"{path}: forbidden Gate M0 claim: {claim}")
+    if not approved(et_decision):
+        for claim in et_claims:
+            if claim in content:
+                errors.append(f"{path}: forbidden Gate E0 claim: {claim}")
+
+if errors:
+    print("\n".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+step "docs · product claims"  product_claims_step
+
+if [ "${OPENPAW_PRODUCT_CLAIMS_ONLY:-0}" = 1 ]; then
+  if ((${#FAILED[@]})); then
+    exit 1
+  fi
+  exit 0
+fi
+
 step "host · fmt"            in_dir host cargo fmt --all --check
 step "host · clippy"         in_dir host cargo clippy --workspace --all-targets -- -D warnings
 step "host · test"           in_dir host cargo test --workspace

@@ -28,6 +28,24 @@ Nothing above depends on anything below it except through those seams. `openpaw-
 `OpenPawProtocol` are deliberate duplicates: one wire format, two independent implementations, both pinned to the
 same golden files, so a drift in either is a test failure rather than a field bug.
 
+## Product and distribution boundaries
+
+The architecture is intentionally broader than the set of features that may ship today. These decision records are
+release constraints, not aspirational notes:
+
+- [ADR 0001](../decisions/0001-mosh-distribution-gate.md) keeps native Mosh unlinked and unavailable until Gate M0
+  resolves licensing, distribution, interoperability, and physical-device lifecycle.
+- [ADR 0002](../decisions/0002-et-provenance-distribution-gate.md) keeps Eternal Terminal protocol-only and
+  unavailable until the independent Gate E0 resolves provenance, distribution, real-server interoperability, and
+  lifecycle behavior.
+- [ADR 0003](../decisions/0003-tailscale-discovery-boundary.md) defines Tailscale-assisted discovery without
+  claiming access to the installed iOS application's account or peer list.
+- [ADR 0004](../decisions/0004-provider-token-boundary.md) keeps repository-provider credentials on the selected
+  host and preserves the no-arbitrary-execution boundary for imports.
+
+Until M0 and E0 are approved, SSH is the only production terminal transport and unavailable transports are omitted
+from product UI rather than shown as disabled promises.
+
 ## Why two sources of truth, and which one wins
 
 | Question | Authority |
