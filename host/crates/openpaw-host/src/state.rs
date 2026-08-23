@@ -21,7 +21,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use openpaw_agents::Cursor;
-use openpaw_protocol::SessionId;
+use openpaw_protocol::{InboxId, SessionId};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -79,6 +79,20 @@ struct StateFile {
     /// One cursor per session id, so a restart resumes parsing instead of
     /// replaying every transcript from byte zero.
     cursors: BTreeMap<String, Cursor>,
+    /// Inbox ids the operator dismissed locally.
+    dismissed_inbox: BTreeMap<String, DismissedInboxItem>,
+}
+
+/// Durable local dismissal tombstone for informational inbox items.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DismissedInboxItem {
+    /// Inbox item id.
+    pub inbox_id: String,
+    /// Device that dismissed it.
+    pub device_id: String,
+    /// Dismissal time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub dismissed_at: OffsetDateTime,
 }
 
 /// Owner of the state directory.
@@ -224,6 +238,48 @@ impl Store {
         self.persist()
     }
 
+    /// Persist an informational inbox dismissal tombstone before in-memory mutation.
+    pub fn insert_dismissed_inbox(
+        &self,
+        id: &InboxId,
+        device_id: &str,
+        at: OffsetDateTime,
+    ) -> Result<bool> {
+        let mut inserted = false;
+        {
+            let mut guard = self.lock();
+            if !guard.dismissed_inbox.contains_key(id.as_ref()) {
+                guard.dismissed_inbox.insert(
+                    id.as_ref().to_owned(),
+                    DismissedInboxItem {
+                        inbox_id: id.as_ref().to_owned(),
+                        device_id: device_id.to_owned(),
+                        dismissed_at: at,
+                    },
+                );
+                inserted = true;
+            }
+        }
+        if inserted {
+            self.persist()?;
+        }
+        Ok(inserted)
+    }
+
+    /// True when an inbox item id has a durable local dismissal tombstone.
+    pub fn is_inbox_dismissed(&self, id: &InboxId) -> bool {
+        self.lock().dismissed_inbox.contains_key(id.as_ref())
+    }
+
+    /// All durable local dismissal ids.
+    pub fn dismissed_inbox_ids(&self) -> Vec<InboxId> {
+        self.lock()
+            .dismissed_inbox
+            .keys()
+            .filter_map(|id| id.parse().ok())
+            .collect()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, StateFile> {
         // A poisoned lock means a previous holder panicked mid-mutation. The
         // state is a plain document with no cross-field invariant, so recovering
@@ -338,6 +394,29 @@ mod tests {
             paired_at: OffsetDateTime::UNIX_EPOCH,
             last_seen: None,
         }
+    }
+
+    #[test]
+    fn dismissed_inbox_tombstones_persist_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        let id: InboxId = "inb_0123456789abcdef01234567".parse().unwrap();
+        let store = Store::open(&root).unwrap();
+        assert!(
+            store
+                .insert_dismissed_inbox(&id, "dev_a", OffsetDateTime::UNIX_EPOCH)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .insert_dismissed_inbox(&id, "dev_a", OffsetDateTime::UNIX_EPOCH)
+                .unwrap()
+        );
+        drop(store);
+
+        let reopened = Store::open(&root).unwrap();
+        assert!(reopened.is_inbox_dismissed(&id));
+        assert_eq!(reopened.dismissed_inbox_ids(), vec![id]);
     }
 
     #[test]

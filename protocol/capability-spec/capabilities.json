@@ -13,6 +13,10 @@
       "description": "Read pending inbox items including command detail.",
       "read_only": true
     },
+    "inbox.write": {
+      "description": "Dismiss informational inbox items without resolving agent requests.",
+      "read_only": false
+    },
     "approvals.write": {
       "description": "Resolve permission/question items. Requires a one-time action token per decision.",
       "read_only": false
@@ -51,6 +55,7 @@
       "sessions.read",
       "events.read",
       "inbox.read",
+      "inbox.write",
       "approvals.write",
       "repos.read",
       "files.read",

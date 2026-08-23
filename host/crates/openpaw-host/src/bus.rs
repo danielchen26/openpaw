@@ -77,6 +77,7 @@ struct Inner {
     seqs: HashMap<SessionId, u64>,
     /// Inbox items keyed by id; ordered so listings are stable.
     inbox: BTreeMap<InboxId, PendingItem>,
+    dismissed: std::collections::BTreeSet<InboxId>,
 }
 
 /// Event fan-out with replay and the pending-inbox map.
@@ -162,6 +163,22 @@ impl Bus {
         };
 
         let mut inner = self.lock();
+        if inner.dismissed.contains(&projected.id) {
+            let mut item = projected;
+            item.status = InboxStatus::Dismissed;
+            item.action_token = None;
+            item.resolution = Some("dismissed".to_owned());
+            inner.inbox.insert(
+                item.id.clone(),
+                PendingItem {
+                    item: item.clone(),
+                    source: Arc::clone(&stored),
+                    action_token: None,
+                    issued: Instant::now(),
+                },
+            );
+            return (stored, Some(item));
+        }
         if let Some(existing) = inner.inbox.get(&projected.id) {
             let item = existing.item.clone();
             return (stored, Some(item));
@@ -315,6 +332,36 @@ impl Bus {
         }
     }
 
+    /// Mark an informational item dismissed. Idempotent for already-dismissed items.
+    pub fn dismiss(&self, id: &InboxId) -> Result<InboxItem, DismissError> {
+        let mut inner = self.lock();
+        Self::sweep(&mut inner, self.token_ttl);
+        if inner.dismissed.contains(id) {
+            return inner
+                .inbox
+                .get(id)
+                .map(|pending| pending.item.clone())
+                .ok_or(DismissError::Unknown);
+        }
+        let pending = inner.inbox.get_mut(id).ok_or(DismissError::Unknown)?;
+        if pending.request_id().is_some() || pending.item.request_id.is_some() {
+            return Err(DismissError::Actionable);
+        }
+        pending.action_token = None;
+        pending.item.action_token = None;
+        pending.item.status = InboxStatus::Dismissed;
+        pending.item.resolution = Some("dismissed".to_owned());
+        let item = pending.item.clone();
+        inner.dismissed.insert(id.clone());
+        Ok(item)
+    }
+
+    /// Hydrate durable dismissal tombstones on boot.
+    pub fn hydrate_dismissed(&self, ids: impl IntoIterator<Item = InboxId>) {
+        let mut inner = self.lock();
+        inner.dismissed.extend(ids);
+    }
+
     /// Flip items whose token aged out, or whose own `expires_at` passed, to
     /// [`InboxStatus::Expired`].
     ///
@@ -344,10 +391,23 @@ impl Bus {
     }
 }
 
+/// Why an inbox item cannot be dismissed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DismissError {
+    /// No such item.
+    #[error("unknown inbox item")]
+    Unknown,
+    /// The item represents an agent request and must be resolved or denied.
+    #[error("only informational inbox items can be dismissed")]
+    Actionable,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openpaw_protocol::{ActionId, AgentKind, DeltaKind, PermissionRequested, Risk, TurnDelta};
+    use openpaw_protocol::{
+        ActionId, AgentKind, AgentLifecycle, DeltaKind, PermissionRequested, Risk, TurnDelta,
+    };
     use time::OffsetDateTime;
 
     fn session() -> SessionId {
@@ -385,6 +445,38 @@ mod tests {
                 expires_at: None,
             }),
         )
+    }
+
+    fn completion() -> Event {
+        Event::new(
+            &session(),
+            AgentKind::ClaudeCode,
+            "agent:completed:1",
+            OffsetDateTime::UNIX_EPOCH,
+            Body::AgentCompleted(AgentLifecycle {
+                reason: Some("done".into()),
+                exit_code: None,
+                title: Some("Done".into()),
+            }),
+        )
+    }
+
+    #[test]
+    fn hydrated_dismissal_tombstone_keeps_reprojected_item_dismissed_without_token() {
+        let bus = Bus::new(16);
+        let first = InboxItem::from_event(&completion()).unwrap();
+        bus.hydrate_dismissed([first.id.clone()]);
+
+        let (_stored, item) = bus.publish_with_inbox(completion());
+        let item = item.expect("projection");
+        assert_eq!(item.status, InboxStatus::Dismissed);
+        assert!(item.action_token.is_none());
+        let peeked = bus.peek(&item.id).expect("dismissed projection is listed");
+        assert_eq!(peeked.item.status, InboxStatus::Dismissed);
+        assert!(
+            peeked.item.action_token.is_none(),
+            "no pending authority is minted"
+        );
     }
 
     #[test]

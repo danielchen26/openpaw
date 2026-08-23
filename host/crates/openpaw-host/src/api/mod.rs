@@ -162,6 +162,11 @@ pub fn router(app: AppState) -> Router {
         Capability::ApprovalsWrite,
         Router::new().route("/v1/inbox/{id}/resolve", post(inbox::resolve)),
     );
+    let inbox_write = guard(
+        &app,
+        Capability::InboxWrite,
+        Router::new().route("/v1/inbox/{id}/dismiss", post(inbox::dismiss)),
+    );
     let repos = guard(
         &app,
         Capability::ReposRead,
@@ -206,6 +211,7 @@ pub fn router(app: AppState) -> Router {
         .merge(events)
         .merge(inbox)
         .merge(approvals)
+        .merge(inbox_write)
         .merge(repos)
         .merge(files)
         .merge(uploads)

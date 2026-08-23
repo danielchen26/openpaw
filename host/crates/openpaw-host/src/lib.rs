@@ -87,6 +87,7 @@ impl AppState {
         let audit = audit::Audit::new(store.state_dir());
         let proxy = openpaw_preview::Proxy::new(config.preview_policy());
         let bus = bus::Bus::new(config.ring_capacity);
+        bus.hydrate_dismissed(store.dismissed_inbox_ids());
         AppState {
             config: Arc::new(config),
             store: Arc::new(store),

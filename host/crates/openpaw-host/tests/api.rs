@@ -26,8 +26,8 @@ use openpaw_host::auth::{self, Profile};
 use openpaw_host::state::{Device, Store};
 use openpaw_host::{AppState, Config};
 use openpaw_protocol::{
-    ActionId, AgentKind, Body, Event, InboxItem, PermissionRequested, QuestionRequested, Risk,
-    SessionId,
+    ActionId, AgentKind, AgentLifecycle, Body, Event, InboxItem, PermissionRequested,
+    QuestionRequested, Risk, SessionId,
 };
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -250,6 +250,20 @@ fn question() -> Event {
             question: "Which package manager?".to_owned(),
             choices: vec!["pnpm".to_owned(), "npm".to_owned()],
             allows_free_text: true,
+        }),
+    )
+}
+
+fn completion_event(unique: &str) -> Event {
+    Event::new(
+        &session(),
+        AgentKind::ClaudeCode,
+        &format!("agent:completed:{unique}"),
+        OffsetDateTime::now_utc(),
+        Body::AgentCompleted(AgentLifecycle {
+            reason: Some("done".to_owned()),
+            exit_code: None,
+            title: Some(format!("Completed {unique}")),
         }),
     )
 }
@@ -601,6 +615,122 @@ async fn an_observer_can_read_but_cannot_resolve() {
         )
         .await;
     assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
+async fn informational_inbox_item_can_be_dismissed_idempotently_and_audited() {
+    let harness = Harness::boot().await;
+    let item = seed(&harness, completion_event("dismiss"));
+    assert!(item.request_id.is_none());
+    assert!(
+        item.action_token.is_some(),
+        "legacy acknowledge token may exist before dismiss endpoint implementation"
+    );
+
+    let path = format!("/v1/inbox/{}/dismiss", item.id);
+    let first = harness
+        .signed(
+            reqwest::Method::POST,
+            &path,
+            Some(json!({})),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(first.status(), 200);
+    let body: Value = first.json().await.unwrap();
+    assert_eq!(body["status"], "dismissed");
+    assert_eq!(body["item"]["id"], item.id.as_ref());
+    assert_eq!(body["item"]["status"], "dismissed");
+    assert!(body["item"]["action_token"].is_null());
+
+    let second = harness
+        .signed(
+            reqwest::Method::POST,
+            &path,
+            Some(json!({})),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(second.status(), 200, "dismiss is idempotent");
+    let body: Value = second.json().await.unwrap();
+    assert_eq!(body["item"]["status"], "dismissed");
+
+    assert!(
+        std::fs::read_dir(harness.app.store.decisions_dir())
+            .unwrap()
+            .next()
+            .is_none(),
+        "dismiss does not write a decision file"
+    );
+    let entries = harness.audit_entries().await;
+    let dismisses: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.action == "inbox.dismiss")
+        .collect();
+    assert_eq!(dismisses.len(), 1, "only the first dismiss is audited");
+    assert_eq!(dismisses[0].device_id, harness.operator.device_id);
+    assert_eq!(dismisses[0].target, item.id.as_ref());
+}
+
+#[tokio::test]
+async fn dismiss_requires_inbox_write_and_rejects_actionable_or_unknown_items() {
+    let harness = Harness::boot().await;
+    let info = seed(&harness, completion_event("cap"));
+    let actionable = seed(&harness, destructive_permission());
+    let token = actionable.action_token.clone().unwrap();
+
+    let observer = harness
+        .signed(
+            reqwest::Method::POST,
+            &format!("/v1/inbox/{}/dismiss", info.id),
+            Some(json!({})),
+            &harness.observer,
+        )
+        .await;
+    assert_eq!(observer.status(), 403);
+    assert_eq!(
+        observer
+            .headers()
+            .get(auth::REQUIRED_CAPABILITY_HEADER)
+            .and_then(|v| v.to_str().ok()),
+        Some("inbox.write")
+    );
+    let body: Value = observer.json().await.unwrap();
+    assert_eq!(body["capability"], "inbox.write");
+
+    let conflict = harness
+        .signed(
+            reqwest::Method::POST,
+            &format!("/v1/inbox/{}/dismiss", actionable.id),
+            Some(json!({})),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(conflict.status(), 409);
+
+    let claim = harness
+        .signed(
+            reqwest::Method::POST,
+            &format!("/v1/inbox/{}/resolve", actionable.id),
+            Some(json!({"action":"approve_once","action_token":token,"detail_acknowledged":true})),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(
+        claim.status(),
+        200,
+        "failed dismiss does not burn the approval token"
+    );
+
+    let unknown = harness
+        .signed(
+            reqwest::Method::POST,
+            "/v1/inbox/inb_0123456789abcdef01234567/dismiss",
+            Some(json!({})),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(unknown.status(), 404);
 }
 
 // ---------------------------------------------------------------------------

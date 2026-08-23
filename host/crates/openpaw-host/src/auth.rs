@@ -146,6 +146,8 @@ pub enum Capability {
     EventsRead,
     /// Read inbox items, including command detail.
     InboxRead,
+    /// Dismiss informational inbox items.
+    InboxWrite,
     /// Resolve permission and question items.
     ApprovalsWrite,
     /// Read git status, diffs and trees.
@@ -162,10 +164,11 @@ pub enum Capability {
 
 impl Capability {
     /// Every capability, in spec order.
-    pub const ALL: [Capability; 9] = [
+    pub const ALL: [Capability; 10] = [
         Capability::SessionsRead,
         Capability::EventsRead,
         Capability::InboxRead,
+        Capability::InboxWrite,
         Capability::ApprovalsWrite,
         Capability::ReposRead,
         Capability::FilesRead,
@@ -180,6 +183,7 @@ impl Capability {
             Capability::SessionsRead => "sessions.read",
             Capability::EventsRead => "events.read",
             Capability::InboxRead => "inbox.read",
+            Capability::InboxWrite => "inbox.write",
             Capability::ApprovalsWrite => "approvals.write",
             Capability::ReposRead => "repos.read",
             Capability::FilesRead => "files.read",
@@ -772,11 +776,12 @@ mod tests {
                 "devices.read"
             ]
         );
+        assert!(!observer.contains(&"inbox.write".to_owned()));
         assert!(!observer.contains(&"approvals.write".to_owned()));
         assert!(!observer.contains(&"uploads.write".to_owned()));
 
         let operator = Profile::Operator.capability_names();
-        assert_eq!(operator.len(), 9);
+        assert_eq!(operator.len(), 10);
         for capability in Capability::ALL {
             assert!(operator.contains(&capability.as_str().to_owned()));
         }

@@ -31,6 +31,7 @@ use crate::api::ApiError;
 use crate::audit::AuditEntry;
 use crate::auth::AuthedDevice;
 use crate::bus::ClaimError;
+use crate::bus::DismissError;
 
 /// Schema version of a decision file.
 pub const DECISION_VERSION: &str = "1";
@@ -70,6 +71,15 @@ pub struct ResolveResponse {
     /// Id of the event published as a result. `null` for a dismissal, which
     /// produces no agent-visible fact.
     pub event_id: Option<String>,
+}
+
+/// Response of `POST /v1/inbox/{id}/dismiss`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DismissResponse {
+    /// Always `dismissed` on success.
+    pub status: String,
+    /// Updated inbox item state.
+    pub item: InboxItem,
 }
 
 /// What gets written to `<state_dir>/decisions/<request_id>.json`.
@@ -374,6 +384,50 @@ pub async fn resolve(
     Ok(Json(ResolveResponse {
         status: "resolved".to_owned(),
         event_id: Some(published.event_id.as_ref().to_owned()),
+    }))
+}
+
+/// `POST /v1/inbox/{id}/dismiss`.
+pub async fn dismiss(
+    State(app): State<AppState>,
+    Extension(device): Extension<AuthedDevice>,
+    UrlPath(id): UrlPath<String>,
+) -> Result<Json<DismissResponse>, ApiError> {
+    let id: InboxId = id
+        .parse()
+        .map_err(|err| ApiError::bad_request(format!("invalid inbox id: {err}")))?;
+    let pending = app
+        .bus
+        .peek(&id)
+        .ok_or_else(|| ApiError::not_found("unknown inbox item"))?;
+    if pending.request_id().is_some() || pending.item.request_id.is_some() {
+        return Err(ApiError::conflict(
+            "only informational inbox items can be dismissed",
+        ));
+    }
+
+    let inserted = app
+        .store
+        .insert_dismissed_inbox(&id, &device.device_id, OffsetDateTime::now_utc())
+        .map_err(ApiError::internal)?;
+    let item = app.bus.dismiss(&id).map_err(|err| match err {
+        DismissError::Unknown => ApiError::not_found("unknown inbox item"),
+        DismissError::Actionable => ApiError::conflict(err.to_string()),
+    })?;
+    if inserted {
+        app.audit
+            .append(&AuditEntry::now(
+                &device.device_id,
+                "inbox.dismiss",
+                id.as_ref(),
+                "dismissed",
+            ))
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    Ok(Json(DismissResponse {
+        status: "dismissed".to_owned(),
+        item,
     }))
 }
 
