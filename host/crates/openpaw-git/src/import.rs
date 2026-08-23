@@ -1,11 +1,11 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -18,7 +18,9 @@ const KILL_GRACE: Duration = Duration::from_millis(500);
 const REAP_GRACE: Duration = Duration::from_millis(500);
 
 #[cfg(test)]
-static TEST_GIT_PROGRAM: Mutex<Option<OsString>> = Mutex::new(None);
+thread_local! {
+    static TEST_GIT_PROGRAM: RefCell<Option<OsString>> = const { RefCell::new(None) };
+}
 
 #[derive(Clone, Default)]
 pub struct CancellationToken(Arc<AtomicBool>);
@@ -155,12 +157,10 @@ pub fn clone_repo(req: CloneRequest) -> Result<(), GitError> {
 
 fn git_program() -> OsString {
     #[cfg(test)]
-    if let Some(program) = TEST_GIT_PROGRAM
-        .lock()
-        .expect("test git program lock")
-        .clone()
     {
-        return program;
+        if let Some(program) = TEST_GIT_PROGRAM.with(|program| program.borrow().clone()) {
+            return program;
+        }
     }
     OsString::from("git")
 }
@@ -513,6 +513,39 @@ mod tests {
             .status();
     }
 
+    fn wait_for_path(path: &Path, timeout: Duration) {
+        let start = Instant::now();
+        while !path.exists() {
+            assert!(
+                start.elapsed() < timeout,
+                "timed out waiting for {}",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    struct TestGitProgramGuard;
+
+    impl Drop for TestGitProgramGuard {
+        fn drop(&mut self) {
+            TEST_GIT_PROGRAM.with(|program| {
+                *program.borrow_mut() = None;
+            });
+        }
+    }
+
+    fn use_test_git_program(program: impl AsRef<Path>) -> TestGitProgramGuard {
+        TEST_GIT_PROGRAM.with(|test_program| {
+            *test_program.borrow_mut() = Some(program.as_ref().as_os_str().to_owned());
+        });
+        TestGitProgramGuard
+    }
+
+    fn path_is_symlink(path: impl AsRef<Path>) -> bool {
+        fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+    }
+
     fn req(
         td: &tempfile::TempDir,
         policy: CloneBytePolicy,
@@ -699,25 +732,47 @@ mod tests {
     fn containment_escape_after_spawn_terminates_child_before_return() {
         let td = tempfile::tempdir().unwrap();
         let git = td.path().join("git");
-        let alive = td.path().join("alive");
+        let ready = td.path().join("ready");
+        let trigger_escape = td.path().join("trigger-escape");
+        let pid_file = td.path().join("child.pid");
         let outside_td = tempfile::tempdir().unwrap();
         let outside = outside_td.path().join("outside");
         fs::create_dir(&outside).unwrap();
-        fs::write(&git, format!("#!/bin/sh\nfor last do :; done\nrmdir \"$last\"\nln -s '{}' \"$last\"\ntouch '{}'\ntrap '' TERM\nsleep 10\n", outside.display(), alive.display())).unwrap();
-        chmod_x(&git);
-        let err = clone_with_git_program(
-            req(&td, CloneBytePolicy::default(), CancellationToken::new()),
+        fs::write(
             &git,
+            format!(
+                "#!/bin/sh\nfor last do :; done\necho $$ > '{}'\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\nrmdir \"$last\"\nln -s '{}' \"$last\"\ntrap '' TERM\nwhile :; do sleep 10; done\n",
+                pid_file.display(),
+                ready.display(),
+                trigger_escape.display(),
+                outside.display()
+            ),
         )
-        .unwrap_err();
+        .unwrap();
+        chmod_x(&git);
+        let request = req(&td, CloneBytePolicy::default(), CancellationToken::new());
+        let git_for_thread = git.clone();
+        let clone = thread::spawn(move || clone_with_git_program(request, git_for_thread));
+
+        wait_for_path(&ready, Duration::from_secs(2));
+        assert!(
+            td.path().join("repo").is_dir(),
+            "ready checkpoint must not expose a missing destination"
+        );
+        let child_pid = fs::read_to_string(&pid_file).unwrap();
+        fs::write(&trigger_escape, "go").unwrap();
+
+        let err = clone.join().unwrap().unwrap_err();
         assert!(
             matches!(err, GitError::InvalidDestination(_) | GitError::Io(_)),
             "unexpected error: {err:?}"
         );
-        thread::sleep(Duration::from_millis(100));
-        assert!(alive.exists(), "test script reached long-running section");
+        assert!(
+            path_is_symlink(td.path().join("repo")),
+            "test script reached the post-spawn containment escape"
+        );
         let pgrep = Command::new("pgrep")
-            .args(["-f", alive.to_str().unwrap()])
+            .args(["-f", git.to_str().unwrap()])
             .output()
             .unwrap();
         assert!(
@@ -725,6 +780,14 @@ mod tests {
             "escaped child still running: {}",
             String::from_utf8_lossy(&pgrep.stdout)
         );
+        let child_pid = child_pid.trim();
+        let child_alive = Command::new("kill")
+            .args(["-0", child_pid])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!child_alive, "escaped child pid {child_pid} still running");
     }
 
     #[test]
@@ -777,6 +840,47 @@ mod tests {
             "{results:?}"
         );
         assert!(dest.exists(), "winner-owned destination is preserved");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn public_clone_repo_test_hook_is_thread_local() {
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for label in ["one", "two"] {
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                let td = tempfile::tempdir().unwrap();
+                let git = td.path().join("git");
+                fs::write(
+                    &git,
+                    format!(
+                        "#!/bin/sh\nfor last do :; done\nmkdir -p \"$last\"\nprintf '{}\\n' > \"$last/source\"\n",
+                        label
+                    ),
+                )
+                .unwrap();
+                chmod_x(&git);
+                let _guard = use_test_git_program(&git);
+                barrier.wait();
+
+                let dest = td.path().join("clone");
+                clone_repo(CloneRequest {
+                    remote: HttpsRemoteUrl::parse("https://fixture.invalid/source.git").unwrap(),
+                    destination: TrustedCloneDestination::new(&dest).unwrap(),
+                    r#ref: None,
+                    timeout: Duration::from_secs(2),
+                    byte_policy: CloneBytePolicy::default(),
+                    cancellation: CancellationToken::new(),
+                    lfs_smudge: LfsSmudgePolicy::Disable,
+                })
+                .unwrap();
+                fs::read_to_string(dest.join("source")).unwrap()
+            }));
+        }
+        let mut labels: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        labels.sort();
+        assert_eq!(labels, ["one\n", "two\n"]);
     }
 
     #[test]
@@ -838,10 +942,7 @@ mod tests {
         // Rewrite argv without relying on shell arrays.
         fs::write(&wrapper, format!("#!/bin/sh\nout=\"\"\nfor arg do\n  case \"$arg\" in\n    https://fixture.invalid/source.git) out=\"$out '{}'\" ;;\n    protocol.file.allow=never) out=\"$out protocol.file.allow=always\" ;;\n    *) out=\"$out '$arg'\" ;;\n  esac\ndone\neval GIT_ALLOW_PROTOCOL=https:file exec git $out\n", source.display())).unwrap();
         chmod_x(&wrapper);
-        {
-            let mut guard = TEST_GIT_PROGRAM.lock().expect("test git program lock");
-            *guard = Some(wrapper.clone().into_os_string());
-        }
+        let _guard = use_test_git_program(&wrapper);
         let dest = td.path().join("clone");
         let result = clone_repo(CloneRequest {
             remote: HttpsRemoteUrl::parse("https://fixture.invalid/source.git").unwrap(),
@@ -852,10 +953,6 @@ mod tests {
             cancellation: CancellationToken::new(),
             lfs_smudge: LfsSmudgePolicy::Disable,
         });
-        {
-            let mut guard = TEST_GIT_PROGRAM.lock().expect("test git program lock");
-            *guard = None;
-        }
         result.unwrap();
         assert_eq!(fs::read_to_string(dest.join("README.md")).unwrap(), "ok\n");
     }
