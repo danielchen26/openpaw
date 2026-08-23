@@ -17,6 +17,7 @@ pub mod inbox;
 pub mod pair;
 pub mod preview;
 pub mod providers;
+pub mod repo_imports;
 pub mod repos;
 pub mod sessions;
 pub mod tailscale;
@@ -29,22 +30,6 @@ use serde_json::json;
 
 use crate::AppState;
 use crate::auth::{self, Capability};
-
-async fn repo_import_contract_pending()
--> Result<Json<openpaw_protocol::RepoImportProgress>, ApiError> {
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "repository import implementation is not installed on this host",
-    ))
-}
-
-async fn repo_import_cancel_contract_pending()
--> Result<Json<openpaw_protocol::RepoImportProgress>, ApiError> {
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "repository import cancellation implementation is not installed on this host",
-    ))
-}
 
 /// A failed request, rendered as `{"error": "..."}` with a status code.
 #[derive(Debug, Clone)]
@@ -224,12 +209,12 @@ pub fn router(app: AppState) -> Router {
         &app,
         Capability::ReposManage,
         Router::new()
-            .route("/v1/repo-imports", post(repo_import_contract_pending))
+            .route("/v1/repo-imports", post(repo_imports::start_import))
             .route(
                 "/v1/repo-imports/{id}",
-                get(repo_import_contract_pending).delete(repo_import_cancel_contract_pending),
+                get(repo_imports::get_import).delete(repo_imports::cancel_import),
             )
-            .route("/v1/repos/register", post(repo_import_contract_pending)),
+            .route("/v1/repos/register", post(repo_imports::register_repo)),
     );
     let uploads = guard(
         &app,

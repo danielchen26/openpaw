@@ -31,6 +31,7 @@ pub mod config;
 pub mod state;
 pub mod supervisor;
 pub mod uploads;
+pub mod workspaces;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,8 +67,12 @@ pub struct AppState {
     pub proxy: Arc<openpaw_preview::Proxy>,
     /// Allowlisted repository roots. Nothing outside them is readable.
     pub roots: Arc<openpaw_files::Roots>,
+    /// Dynamic workspace registry.
+    pub workspaces: Arc<workspaces::WorkspaceRegistry>,
     /// Provider authorization and token manager.
     pub provider_manager: Arc<api::providers::ProviderManager>,
+    /// Repository import progress manager.
+    pub repo_imports: Arc<api::repo_imports::RepoImportManager>,
     /// Live session registry.
     pub sessions: Arc<supervisor::Registry>,
     /// Fixed read-only Tailscale status runner.
@@ -83,17 +88,24 @@ impl AppState {
     pub fn new(
         config: Config,
         store: state::Store,
-        roots: openpaw_files::Roots,
+        _roots: openpaw_files::Roots,
         home: PathBuf,
     ) -> AppState {
         let audit = audit::Audit::new(store.state_dir());
         let proxy = openpaw_preview::Proxy::new(config.preview_policy());
         let bus = bus::Bus::new(config.ring_capacity);
         bus.hydrate_dismissed(store.dismissed_inbox_ids());
+        let workspace_registry = Arc::new(
+            workspaces::WorkspaceRegistry::open(store.state_dir(), config.repos.clone())
+                .expect("workspace registry"),
+        );
         let provider_manager = Arc::new(api::providers::ProviderManager::new(
             store.state_dir(),
             config.providers.clone(),
         ));
+        let repo_imports = Arc::new(
+            api::repo_imports::RepoImportManager::open(store.state_dir()).expect("repo imports"),
+        );
         AppState {
             config: Arc::new(config),
             store: Arc::new(store),
@@ -102,13 +114,20 @@ impl AppState {
             nonces: Arc::new(auth::NonceCache::new()),
             pairing: Arc::new(auth::PairingCodes::new()),
             proxy: Arc::new(proxy),
-            roots: Arc::new(roots),
+            roots: workspace_registry.snapshot(),
+            workspaces: workspace_registry,
             provider_manager,
+            repo_imports,
             sessions: Arc::new(supervisor::Registry::new()),
             tailscale: api::tailscale::default_runner(),
             home,
             started_at: OffsetDateTime::now_utc(),
         }
+    }
+
+    /// Current repository roots snapshot.
+    pub fn roots(&self) -> Arc<openpaw_files::Roots> {
+        self.workspaces.snapshot()
     }
 
     /// Publish an event: fan it out, fold it into the session registry, and

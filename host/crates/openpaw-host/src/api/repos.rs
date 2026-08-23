@@ -90,7 +90,7 @@ fn non_empty(value: &Option<String>) -> Option<&str> {
 
 /// `GET /v1/repos`.
 pub async fn list(State(app): State<AppState>) -> Result<Json<Vec<RepoSummary>>, ApiError> {
-    let roots = app.roots.clone();
+    let roots = app.roots();
     let summaries = tokio::task::spawn_blocking(move || openpaw_git::summaries(&roots)).await?;
     Ok(Json(summaries))
 }
@@ -100,7 +100,7 @@ pub async fn status(
     State(app): State<AppState>,
     UrlPath(repo): UrlPath<String>,
 ) -> Result<Json<Status>, ApiError> {
-    let roots = app.roots.clone();
+    let roots = app.roots();
     let status = tokio::task::spawn_blocking(move || {
         openpaw_git::open_named(&roots, &repo).and_then(|repo| repo.status())
     })
@@ -115,7 +115,7 @@ pub async fn diff(
     UrlPath(repo): UrlPath<String>,
     Query(query): Query<DiffQuery>,
 ) -> Result<Json<Diff>, ApiError> {
-    let roots = app.roots.clone();
+    let roots = app.roots();
     let request = DiffRequest {
         mode: query.mode(),
         path: non_empty(&query.path).map(str::to_owned),
@@ -134,7 +134,7 @@ pub async fn tree(
     UrlPath(repo): UrlPath<String>,
     Query(query): Query<RefQuery>,
 ) -> Result<Json<Vec<TreeEntry>>, ApiError> {
-    let roots = app.roots.clone();
+    let roots = app.roots();
     let relative = non_empty(&query.path).unwrap_or_default().to_owned();
 
     match non_empty(&query.reference) {
@@ -172,7 +172,7 @@ pub async fn blob(
     UrlPath(repo): UrlPath<String>,
     Query(query): Query<RefQuery>,
 ) -> Result<Json<Blob>, ApiError> {
-    let roots = app.roots.clone();
+    let roots = app.roots();
     let max_bytes = app.config.max_blob_bytes;
     let relative = non_empty(&query.path)
         .ok_or_else(|| ApiError::bad_request("path is required"))?
@@ -222,7 +222,7 @@ pub async fn search(
         .unwrap_or(DEFAULT_SEARCH_LIMIT)
         .clamp(1, MAX_SEARCH_LIMIT);
     let relative = non_empty(&query.path).unwrap_or_default().to_owned();
-    let roots = app.roots.clone();
+    let roots = app.roots();
 
     let hits = tokio::task::spawn_blocking(move || {
         let root = roots
