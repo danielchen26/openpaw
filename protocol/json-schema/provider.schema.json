@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openpaw.dev/schema/v1/provider.schema.json",
+  "title": "OpenPaw provider API contracts",
+  "$defs": {
+    "providerId": { "type": "string", "enum": ["github", "huggingface"] },
+    "connectionState": { "type": "string", "enum": ["disconnected", "authorizing", "connected", "error"] },
+    "authorizationState": { "type": "string", "enum": ["pending", "slow_down", "authorized", "denied", "expired", "cancelled"] },
+    "providerStatus": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "display_name", "state", "scopes", "repo_listing_supported"],
+      "properties": {
+        "id": { "$ref": "#/$defs/providerId" },
+        "display_name": { "type": "string", "minLength": 1 },
+        "state": { "$ref": "#/$defs/connectionState" },
+        "account_label": { "type": "string" },
+        "scopes": { "type": "array", "items": { "type": "string" } },
+        "repo_listing_supported": { "type": "boolean" }
+      }
+    },
+    "authorizationStart": {
+      "type": "object", "additionalProperties": false,
+      "required": ["authorization_id", "verification_url", "user_code", "expires_at", "interval_seconds"],
+      "properties": {
+        "authorization_id": { "type": "string", "minLength": 1 },
+        "verification_url": { "type": "string", "format": "uri" },
+        "user_code": { "type": "string", "minLength": 1 },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "interval_seconds": { "type": "integer", "minimum": 1, "maximum": 300 }
+      }
+    },
+    "authorizationStatus": {
+      "type": "object", "additionalProperties": false,
+      "required": ["authorization_id", "state", "provider"],
+      "properties": {
+        "authorization_id": { "type": "string", "minLength": 1 },
+        "state": { "$ref": "#/$defs/authorizationState" },
+        "provider": { "$ref": "#/$defs/providerId" },
+        "account_label": { "type": "string" }
+      }
+    },
+    "providerRepo": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "provider", "owner", "name", "display_name", "is_private"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "provider": { "$ref": "#/$defs/providerId" },
+        "owner": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "display_name": { "type": "string", "minLength": 1 },
+        "is_private": { "type": "boolean" },
+        "clone_url_redacted": { "type": "string" }
+      }
+    },
+    "providerRepoPage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repos"],
+      "properties": {
+        "repos": { "type": "array", "items": { "$ref": "#/$defs/providerRepo" } },
+        "next_cursor": { "type": "string" }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/providerStatus" },
+    { "$ref": "#/$defs/authorizationStart" },
+    { "$ref": "#/$defs/authorizationStatus" },
+    { "$ref": "#/$defs/providerRepoPage" }
+  ]
+}

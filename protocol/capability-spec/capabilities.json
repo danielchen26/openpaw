@@ -25,6 +25,18 @@
       "description": "Read git status, diffs, trees and blobs inside allowlisted repository roots.",
       "read_only": true
     },
+    "providers.read": {
+      "description": "Read provider connection status and sanitized repository metadata without credentials.",
+      "read_only": true
+    },
+    "providers.manage": {
+      "description": "Begin, poll, cancel, and revoke provider device authorization without exposing tokens.",
+      "read_only": false
+    },
+    "repos.manage": {
+      "description": "Register existing repository roots and request host-selected repository imports.",
+      "read_only": false
+    },
     "files.read": {
       "description": "Read file contents inside allowlisted roots.",
       "read_only": true
@@ -48,6 +60,7 @@
       "events.read",
       "inbox.read",
       "repos.read",
+      "providers.read",
       "files.read",
       "devices.read"
     ],
@@ -58,6 +71,9 @@
       "inbox.write",
       "approvals.write",
       "repos.read",
+      "providers.read",
+      "providers.manage",
+      "repos.manage",
       "files.read",
       "devices.read",
       "preview.proxy",

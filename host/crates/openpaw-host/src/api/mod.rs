@@ -22,12 +22,60 @@ pub mod tailscale;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get, post};
+use axum::routing::{any, delete, get, post};
 use axum::{Json, Router, middleware};
 use serde_json::json;
 
 use crate::AppState;
 use crate::auth::{self, Capability};
+
+async fn provider_contract_pending() -> Result<Json<Vec<openpaw_protocol::ProviderStatus>>, ApiError>
+{
+    Err(ApiError::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "provider implementation is not installed on this host",
+    ))
+}
+
+async fn provider_authorize_contract_pending()
+-> Result<Json<openpaw_protocol::ProviderAuthorizationStart>, ApiError> {
+    Err(ApiError::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "provider authorization implementation is not installed on this host",
+    ))
+}
+
+async fn provider_authorization_status_contract_pending()
+-> Result<Json<openpaw_protocol::ProviderAuthorizationStatus>, ApiError> {
+    Err(ApiError::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "provider authorization implementation is not installed on this host",
+    ))
+}
+
+async fn provider_revoke_contract_pending()
+-> Result<Json<openpaw_protocol::ProviderStatus>, ApiError> {
+    Err(ApiError::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "provider revocation implementation is not installed on this host",
+    ))
+}
+
+async fn provider_repos_contract_pending()
+-> Result<Json<openpaw_protocol::ProviderRepoPage>, ApiError> {
+    Err(ApiError::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "provider repository listing implementation is not installed on this host",
+    ))
+}
+
+async fn repo_import_contract_pending()
+-> Result<Json<openpaw_protocol::RepoImportProgress>, ApiError> {
+    Err(ApiError::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "repository import implementation is not installed on this host",
+    ))
+}
 
 /// A failed request, rendered as `{"error": "..."}` with a status code.
 #[derive(Debug, Clone)]
@@ -182,6 +230,36 @@ pub fn router(app: AppState) -> Router {
         Capability::FilesRead,
         Router::new().route("/v1/repos/{repo}/blob", get(repos::blob)),
     );
+    let provider_contracts = guard(
+        &app,
+        Capability::ReposRead,
+        Router::new()
+            .route("/v1/providers", get(provider_contract_pending))
+            .route(
+                "/v1/providers/{provider}/authorize",
+                post(provider_authorize_contract_pending),
+            )
+            .route(
+                "/v1/providers/{provider}/authorize/{id}",
+                get(provider_authorization_status_contract_pending),
+            )
+            .route(
+                "/v1/providers/{provider}",
+                delete(provider_revoke_contract_pending),
+            )
+            .route(
+                "/v1/providers/{provider}/repos",
+                get(provider_repos_contract_pending),
+            ),
+    );
+    let repo_manage_contracts = guard(
+        &app,
+        Capability::ReposRead,
+        Router::new()
+            .route("/v1/repos/import", post(repo_import_contract_pending))
+            .route("/v1/repos/import/{id}", get(repo_import_contract_pending))
+            .route("/v1/repos/register", post(repo_import_contract_pending)),
+    );
     let uploads = guard(
         &app,
         Capability::UploadsWrite,
@@ -214,6 +292,8 @@ pub fn router(app: AppState) -> Router {
         .merge(inbox_write)
         .merge(repos)
         .merge(files)
+        .merge(provider_contracts)
+        .merge(repo_manage_contracts)
         .merge(uploads)
         .merge(preview)
         .merge(tailscale)

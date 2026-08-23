@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openpaw.dev/schema/v1/repo-import.schema.json",
+  "title": "OpenPaw repository import API contracts",
+  "$defs": {
+    "providerId": { "type": "string", "enum": ["github", "huggingface"] },
+    "importState": { "type": "string", "enum": ["queued", "cloning", "indexing", "completed", "failed", "cancelled"] },
+    "importRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "repo_id"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/providerId" },
+        "repo_id": { "type": "string", "minLength": 1 },
+        "requested_name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "registerRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["root_id"],
+      "properties": {
+        "root_id": { "type": "string", "minLength": 1 },
+        "requested_name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "progress": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "state", "repo_name", "destination_name"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "state": { "$ref": "#/$defs/importState" },
+        "repo_name": { "type": "string", "minLength": 1 },
+        "destination_name": { "type": "string", "minLength": 1 },
+        "percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "message": { "type": "string", "maxLength": 500 },
+        "source_url_redacted": { "type": "string", "not": { "pattern": "://[^/@]+:[^/@]+@" } }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/importRequest" },
+    { "$ref": "#/$defs/registerRequest" },
+    { "$ref": "#/$defs/progress" }
+  ]
+}

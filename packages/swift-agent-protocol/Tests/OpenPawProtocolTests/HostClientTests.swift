@@ -88,6 +88,36 @@ final class HostClientTests: XCTestCase {
         }
     }
 
+    func testProviderAndRepoImportContractsRoundTripWithoutSecretsOrPaths() async throws {
+        respond(status: 200, body: #"[{"id":"github","display_name":"GitHub","state":"connected","account_label":"octocat","scopes":["repo:read"],"repo_listing_supported":true}]"#)
+        let providers = try await makeClient().providers()
+        XCTAssertEqual(providers.first?.id, .github)
+        XCTAssertEqual(providers.first?.accountLabel, "octocat")
+        let providerData = try OpenPawCoding.encoder.encode(providers)
+        assertNoProviderRepoSecrets(providerData)
+
+        respond(status: 200, body: #"{"repos":[{"id":"repo_1","provider":"github","owner":"openpaw","name":"openpaw","display_name":"openpaw/openpaw","is_private":true,"clone_url_redacted":"https://<redacted>@github.com/openpaw/openpaw.git"}],"next_cursor":"next"}"#)
+        let page = try await makeClient().providerRepos(.github, cursor: "first")
+        XCTAssertEqual(page.repos.first?.cloneURLRedacted, "https://<redacted>@github.com/openpaw/openpaw.git")
+        assertNoProviderRepoSecrets(try OpenPawCoding.encoder.encode(page))
+
+        respond(status: 200, body: #"{"id":"imp_1","state":"cloning","repo_name":"openpaw","destination_name":"openpaw-2","percent":50,"source_url_redacted":"https://<redacted>@github.com/openpaw/openpaw.git"}"#)
+        let progress = try await makeClient().importRepo(.init(provider: .github, repoID: "repo_1", requestedName: "openpaw"))
+        XCTAssertEqual(progress.destinationName, "openpaw-2")
+        assertNoProviderRepoSecrets(try OpenPawCoding.encoder.encode(progress))
+        let body = try OpenPawCoding.encoder.encode(RepoImportRequest(provider: .github, repoID: "repo_1", requestedName: "openpaw"))
+        assertNoProviderRepoSecrets(body)
+        let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        XCTAssertNil(json?["destination_path"])
+    }
+
+    private func assertNoProviderRepoSecrets(_ data: Data, file: StaticString = #filePath, line: UInt = #line) {
+        let text = String(decoding: data, as: UTF8.self).lowercased()
+        for forbidden in ["token", "authorization_header", "credential_path", "destination_path", "\"env\""] {
+            XCTAssertFalse(text.contains(forbidden), "contract leaked forbidden field \(forbidden): \(text)", file: file, line: line)
+        }
+    }
+
     // MARK: Error mapping
 
     func testUnauthorizedMapping() async {

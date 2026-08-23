@@ -20,6 +20,7 @@ mod event;
 mod ids;
 mod inbox;
 mod payload;
+mod provider_repo;
 mod risk;
 pub mod signing;
 mod util;
@@ -35,6 +36,12 @@ pub use payload::{
     PermissionRequested, PermissionResolved, Plan, PlanStep, PlanStepStatus, QuestionAnswered,
     QuestionRequested, StdStream, ToolCompleted, ToolFailed, ToolOutput, ToolStarted,
     TurnCompleted, TurnDelta, TurnRole, TurnStarted, UsageUpdated,
+};
+pub use provider_repo::{
+    ProviderAuthorizationStart, ProviderAuthorizationState, ProviderAuthorizationStatus,
+    ProviderConnectionState, ProviderId, ProviderRepo, ProviderRepoPage, ProviderStatus,
+    RepoImportProgress, RepoImportRequest, RepoImportState, RepoRegisterRequest,
+    redact_url_credentials,
 };
 pub use risk::{Risk, RiskClass, extract_tool_command, extract_tool_paths};
 

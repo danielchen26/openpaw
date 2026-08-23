@@ -59,6 +59,97 @@ fn assert_valid(validator: &Validator, label: &str, instance: &Value) {
 }
 
 #[test]
+fn provider_and_repo_import_contracts_are_sanitized_and_schema_valid() {
+    let provider_schema = load("provider.schema.json");
+    let repo_schema = load("repo-import.schema.json");
+    let provider_validator = jsonschema::options()
+        .build(&provider_schema)
+        .expect("provider schema compiles");
+    let repo_validator = jsonschema::options()
+        .build(&repo_schema)
+        .expect("repo import schema compiles");
+
+    let status = serde_json::to_value(openpaw_protocol::ProviderStatus {
+        id: openpaw_protocol::ProviderId::Github,
+        display_name: "GitHub".to_owned(),
+        state: openpaw_protocol::ProviderConnectionState::Connected,
+        account_label: Some("octocat".to_owned()),
+        scopes: vec!["repo:read".to_owned()],
+        repo_listing_supported: true,
+    })
+    .unwrap();
+    assert_valid(&provider_validator, "provider status", &status);
+    assert_contract_has_no_secret_or_path_keys(&status);
+
+    let import = serde_json::to_value(openpaw_protocol::RepoImportRequest {
+        provider: openpaw_protocol::ProviderId::Github,
+        repo_id: "repo_123".to_owned(),
+        requested_name: Some("openpaw".to_owned()),
+    })
+    .unwrap();
+    assert_valid(&repo_validator, "repo import request", &import);
+    assert_contract_has_no_secret_or_path_keys(&import);
+
+    let progress = serde_json::to_value(openpaw_protocol::RepoImportProgress {
+        id: "imp_123".to_owned(),
+        state: openpaw_protocol::RepoImportState::Cloning,
+        repo_name: "openpaw".to_owned(),
+        destination_name: "openpaw-2".to_owned(),
+        percent: Some(42),
+        message: Some("cloning".to_owned()),
+        source_url_redacted: Some(openpaw_protocol::redact_url_credentials(
+            "https://user:token@example.com/org/repo.git",
+        )),
+    })
+    .unwrap();
+    assert_valid(&repo_validator, "repo import progress", &progress);
+    assert_contract_has_no_secret_or_path_keys(&progress);
+    assert_eq!(
+        progress["source_url_redacted"],
+        "https://<redacted>@example.com/org/repo.git"
+    );
+}
+
+#[test]
+fn repo_import_contract_rejects_caller_destination_paths_and_secret_maps() {
+    let repo_schema = load("repo-import.schema.json");
+    let repo_validator = jsonschema::options()
+        .build(&repo_schema)
+        .expect("repo import schema compiles");
+    let bad = serde_json::json!({"provider":"github","repo_id":"r","destination_path":"/tmp/r"});
+    assert!(!repo_validator.is_valid(&bad));
+    assert!(serde_json::from_value::<openpaw_protocol::RepoImportRequest>(bad).is_err());
+    let bad_progress = serde_json::json!({"id":"i","state":"cloning","repo_name":"r","destination_name":"r","env":{"GIT_ASKPASS":"/tmp/askpass"}});
+    assert!(!repo_validator.is_valid(&bad_progress));
+}
+
+fn assert_contract_has_no_secret_or_path_keys(value: &Value) {
+    const FORBIDDEN: &[&str] = &[
+        "token",
+        "authorization",
+        "authorization_header",
+        "credential_path",
+        "env",
+        "destination_path",
+    ];
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                assert!(
+                    !FORBIDDEN.contains(&key.as_str()),
+                    "forbidden key {key} in {map:?}"
+                );
+                assert_contract_has_no_secret_or_path_keys(value);
+            }
+        }
+        Value::Array(values) => values
+            .iter()
+            .for_each(assert_contract_has_no_secret_or_path_keys),
+        _ => {}
+    }
+}
+
+#[test]
 fn every_event_type_validates_against_the_event_schema() {
     let (event_validator, _) = validators();
     for kind in EventType::ALL {
