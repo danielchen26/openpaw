@@ -389,20 +389,19 @@ public struct RootView: View {
     public init(
         model: OpenPawModel,
         terminalSurface: @escaping () -> AnyView,
+        settings: OpenPawSettings = OpenPawSettings(),
         sessionSpaceProvider: any SessionSpaceProviding = EmptySessionSpaceProvider(),
         sessionCommandExecutor: any SessionSpaceCommandExecuting = EmptySessionSpaceCommandExecutor(),
         restorationStore: (any SessionRestorationStoring)? = nil
     ) {
         self.model = model
         self.terminalSurface = terminalSurface
+        self.settings = settings
         self.sessionSpaceProvider = sessionSpaceProvider
         self.sessionCommandExecutor = sessionCommandExecutor
         self.restorationStore = restorationStore
         self.router = ShellRouter()
-        let settings = OpenPawSettings()
-        self.settings = settings
-        // Roughly 120 bytes a line. The budget is fixed for the life of the process; changing it in Settings takes
-        // effect the next time the app launches, which is the honest trade for a store that never reallocates.
+        // Roughly 120 bytes a line. The store follows the injected settings owner for this RootView instance.
         self.scrollback = ScrollbackStore(byteBudget: settings.scrollbackLines * 120)
     }
 

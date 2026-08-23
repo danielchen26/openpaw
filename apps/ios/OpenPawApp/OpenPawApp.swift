@@ -209,6 +209,7 @@ final class AppWiring {
     let terminal: SSHTerminalBackend
     let hostAPI: HostAPIBackend
     let gate: GateController
+    let settings: OpenPawSettings
     #if DEBUG && targetEnvironment(simulator)
         let debugScenario: DebugScenario?
     #endif
@@ -257,6 +258,7 @@ final class AppWiring {
                     )
                 )
             },
+            settings: settings,
             sessionSpaceProvider: LiveMultiplexerSessionSpaceProvider(runner: sessionCommandRunner, restorationStore: restorationStore),
             sessionCommandExecutor: TerminalSessionCommandExecutor(terminal: terminal, runner: sessionCommandRunner),
             restorationStore: restorationStore
@@ -388,6 +390,7 @@ final class AppWiring {
         let tailscaleAdmin = TailscaleAdminConnector()
         let asrModels = LocalASRModelStore()
         let appleSpeech = SpeechDictation()
+        let settings = OpenPawSettings()
         let model: OpenPawModel
         #if DEBUG && targetEnvironment(simulator)
             if let debugScenario {
@@ -401,7 +404,8 @@ final class AppWiring {
                     dictationModels: asrModels,
                     dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech),
                     tailscaleAdminConnector: tailscaleAdmin,
-                    connectionPreflightRunner: connectionPreflight
+                    connectionPreflightRunner: connectionPreflight,
+                    settings: settings
                 )
             }
         #else
@@ -413,7 +417,8 @@ final class AppWiring {
                 dictationModels: asrModels,
                 dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech),
                 tailscaleAdminConnector: tailscaleAdmin,
-                connectionPreflightRunner: connectionPreflight
+                connectionPreflightRunner: connectionPreflight,
+                settings: settings
             )
         #endif
         self.asrModels = asrModels
@@ -425,7 +430,8 @@ final class AppWiring {
         self.terminal = terminal
         self.hostAPI = hostAPI
         self.model = model
-        gate = GateController()
+        self.settings = settings
+        gate = GateController(settings: settings)
 
         #if DEBUG && targetEnvironment(simulator)
             Self.seedDebugKeyIfRequested(into: keychain)
@@ -782,20 +788,35 @@ enum InboxURLAccessGate {
 @Observable
 final class GateController {
 
-    private(set) var decision: GateDecision = .unlocked
+    var decision: GateDecision {
+        BiometricGate.decide(policy: policy, lastUnlockedAt: lastUnlockedAt, leftForegroundAt: leftForegroundAt, now: decisionNow ?? Date())
+    }
     private(set) var trigger: GateTrigger = .launch
     private(set) var failureMessage: String?
     private(set) var isEvaluating = false
 
+    @ObservationIgnored private let settings: OpenPawSettings
+    private var unavailableReason: String?
+
     var policy: GatePolicy {
-        didSet {
-            persist()
+        get {
+            GatePolicy(
+                requiresBiometrics: settings.requiresBiometricGate,
+                graceInterval: settings.biometricGraceInterval,
+                unavailableReason: unavailableReason
+            )
+        }
+        set {
+            settings.requiresBiometricGate = newValue.requiresBiometrics
+            settings.biometricGraceInterval = newValue.graceInterval
+            unavailableReason = newValue.unavailableReason
             refresh(trigger: trigger)
         }
     }
 
     private var lastUnlockedAt: Date?
     private var leftForegroundAt: Date?
+    private var decisionNow: Date?
 
     /// The same defaults key `SettingsStore` writes from the "Require Face ID to open OpenPaw" toggle.
     ///
@@ -804,28 +825,20 @@ final class GateController {
     static let enabledKey = "openpaw.settings.biometricGate"
     private static let graceKey = "lock.graceInterval"
 
-    init() {
-        let defaults = UserDefaults.standard
-        policy = GatePolicy(
-            // Absent means on: a fresh install protects pending approvals before the user has seen the setting.
-            requiresBiometrics: defaults.object(forKey: Self.enabledKey) as? Bool ?? true,
-            graceInterval: defaults.object(forKey: Self.graceKey) as? Double
-                ?? GatePolicy.default.graceInterval,
-            unavailableReason: Self.capabilityFailure()
-        )
+    init(settings: OpenPawSettings = OpenPawSettings()) {
+        self.settings = settings
+        self.unavailableReason = Self.capabilityFailure()
         refresh(trigger: .launch)
     }
 
-    init(policy: GatePolicy, lastUnlockedAt: Date?, leftForegroundAt: Date?, now: Date) {
+    init(policy: GatePolicy, lastUnlockedAt: Date?, leftForegroundAt: Date?, now: Date, settings: OpenPawSettings = OpenPawSettings(defaults: UserDefaults(suiteName: "openpaw.gate.tests.\(UUID().uuidString)") ?? .standard)) {
+        self.settings = settings
+        self.unavailableReason = policy.unavailableReason
         self.policy = policy
         self.lastUnlockedAt = lastUnlockedAt
         self.leftForegroundAt = leftForegroundAt
-        decision = BiometricGate.decide(
-            policy: policy,
-            lastUnlockedAt: lastUnlockedAt,
-            leftForegroundAt: leftForegroundAt,
-            now: now
-        )
+        self.decisionNow = now
+
     }
 
     /// Why this device cannot satisfy the gate, or `nil` when it can.
@@ -852,8 +865,10 @@ final class GateController {
 
     func refresh(trigger: GateTrigger, now: Date = Date()) {
         self.trigger = trigger
-        decision = BiometricGate.decide(
-            policy: policy,
+        decisionNow = now
+        let effectivePolicy = policy
+        _ = BiometricGate.decide(
+            policy: effectivePolicy,
             lastUnlockedAt: lastUnlockedAt,
             leftForegroundAt: leftForegroundAt,
             now: now
@@ -888,6 +903,7 @@ final class GateController {
             )
             guard success else { return }
             lastUnlockedAt = Date()
+            decisionNow = nil
             refresh(trigger: trigger)
         } catch let error as LAError where error.code == .userCancel || error.code == .appCancel {
             return
@@ -902,11 +918,6 @@ final class GateController {
         policy.requiresBiometrics = false
     }
 
-    private func persist() {
-        let defaults = UserDefaults.standard
-        defaults.set(policy.requiresBiometrics, forKey: Self.enabledKey)
-        defaults.set(policy.graceInterval, forKey: Self.graceKey)
-    }
 }
 
 /// The locked screen. Human register: this is the app talking to a person, not reporting machine state.

@@ -1,4 +1,5 @@
 import XCTest
+@testable import OpenPawUI
 
 @testable import OpenPawApp
 
@@ -151,6 +152,28 @@ final class BiometricGateTests: XCTestCase {
         XCTAssertFalse(mayOpen)
         XCTAssertEqual(cancellationCount, 1)
         XCTAssertEqual(gate.decision, .authenticate)
+    }
+
+    @MainActor
+    func testSharedSettingsChangesImmediatelyDrivePolicyAndDecision() {
+        let suite = "openpaw.gate.shared.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let settings = OpenPawSettings(defaults: defaults)
+        settings.requiresBiometricGate = true
+        settings.biometricGraceInterval = 120
+        let gate = GateController(settings: settings)
+        XCTAssertTrue(gate.policy.requiresBiometrics)
+        XCTAssertEqual(gate.decision, .authenticate)
+
+        settings.requiresBiometricGate = false
+        settings.biometricGraceInterval = 0
+
+        XCTAssertFalse(gate.policy.requiresBiometrics)
+        XCTAssertEqual(gate.policy.graceInterval, 0)
+        XCTAssertEqual(gate.decision, .unlocked)
+        XCTAssertEqual(defaults.object(forKey: GateController.enabledKey) as? Bool, false)
+        XCTAssertEqual(defaults.object(forKey: "lock.graceInterval") as? Double, 0)
     }
 
     func testPromptCopyNamesTheProtectedThing() {

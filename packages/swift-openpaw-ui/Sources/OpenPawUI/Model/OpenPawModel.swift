@@ -100,7 +100,11 @@ public final class OpenPawModel {
     public var selectedSessionID: String?
     /// Recent events per agent session, capped so a long-running agent cannot grow the heap without bound.
     public private(set) var transcripts: [String: [Event]] = [:]
-    public var eventBudgetPerSession: Int = 2_000
+    public var eventBudgetPerSession: Int {
+        get { settings.eventBudgetPerSession }
+        set { settings.eventBudgetPerSession = OpenPawSettings.validatedEventBudget(newValue) }
+    }
+    @ObservationIgnored private let settings: OpenPawSettings
 
     // MARK: - Inbox
 
@@ -164,6 +168,7 @@ public final class OpenPawModel {
         tailscaleRouteHintSource: any TailscaleRoutePathSourcing = SystemTailscaleRoutePathSource(),
         tailscaleAdminConnector: (any TailscaleAdminConnecting)? = nil,
         connectionPreflightRunner: (any ConnectionPreflightRunning)? = nil,
+        settings: OpenPawSettings = OpenPawSettings(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.hostStore = hostStore
@@ -174,6 +179,7 @@ public final class OpenPawModel {
         self.tailscaleRouteHintSource = tailscaleRouteHintSource
         self.tailscaleAdminConnector = tailscaleAdminConnector
         self.connectionPreflightRunner = connectionPreflightRunner
+        self.settings = settings
         self.now = now
         if let dictationModels { self.dictationModels = dictationModels }
         self.selectedHostID = hostStore.hosts.first?.id
