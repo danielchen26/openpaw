@@ -1,6 +1,7 @@
 import Foundation
 import OpenPawSSH
 import OpenPawTerminalCore
+import OpenPawUI
 import XCTest
 
 @testable import OpenPawApp
@@ -59,28 +60,31 @@ final class LiveSSHConnectionTests: XCTestCase {
 
     /// Trust-on-first-use, matching the sheet the user taps through: the first fingerprint is accepted and pinned, so
     /// the test exercises the same pinning code path rather than disabling verification.
-    private func makeBackend(_ keychain: KeychainStore) -> (SSHTerminalBackend, Box<[String]>) {
+    private func makeBackend(_ keychain: KeychainStore) -> (SSHTerminalBackend, Box<[String]>, Box<SSHTransport?>) {
         let pins = Box<[String]>([])
+        let transport = Box<SSHTransport?>(nil)
         let backend = SSHTerminalBackend(
             makeTransport: { _ in
-                SSHTransport(
+                let created = SSHTransport(
                     secretResolver: keychain,
                     hostKeyVerification: { fingerprint in
                         pins.set(pins.get() + [fingerprint])
                         return .trusted
                     }
                 )
+                transport.set(created)
+                return created
             },
             makeConfiguration: { $0.connectionConfiguration },
             onHostKeyProblem: { _ in }
         )
-        return (backend, pins)
+        return (backend, pins, transport)
     }
 
     func testConnectsToRealHostAndRunsCommand() async throws {
         let target = try liveTarget()
         let (keychain, reference) = try seedKey(target)
-        let (backend, pins) = makeBackend(keychain)
+        let (backend, pins, _) = makeBackend(keychain)
 
         try await backend.connect(host: record(target, reference))
         addTeardownBlock { await backend.disconnect() }
@@ -107,7 +111,7 @@ final class LiveSSHConnectionTests: XCTestCase {
         let keychain = KeychainStore(service: "dev.openpaw.app.ssh.livetest")
         let reference = try KeychainReference(identifier: "openpaw-live-test-absent-key")
         try? keychain.delete(reference)
-        let (backend, _) = makeBackend(keychain)
+        let (backend, _, _) = makeBackend(keychain)
 
         do {
             try await backend.connect(host: record(target, reference))
@@ -120,7 +124,7 @@ final class LiveSSHConnectionTests: XCTestCase {
     func testRunSurfacesRemoteFailureExitStatus() async throws {
         let target = try liveTarget()
         let (keychain, reference) = try seedKey(target)
-        let (backend, _) = makeBackend(keychain)
+        let (backend, _, _) = makeBackend(keychain)
 
         try await backend.connect(host: record(target, reference))
         addTeardownBlock { await backend.disconnect() }
@@ -132,6 +136,56 @@ final class LiveSSHConnectionTests: XCTestCase {
         } catch {
             // Expected.
         }
+    }
+
+    /// Reproduces the exact command sequence behind the Sessions screen against a real PTY. The UI acceptance test
+    /// proved that detached creation reaches tmux but loses the workflow before navigation; this test identifies whether
+    /// the failure is inside the terminal executor or in the coordinator/UI layers that follow it.
+    @MainActor
+    func testCreatesAcknowledgesAndAttachesATmuxSessionThroughTheProductionTerminalExecutor() async throws {
+        let target = try liveTarget()
+        let (keychain, reference) = try seedKey(target)
+        let (backend, _, transport) = makeBackend(keychain)
+        let name = "openpaw-live-\(UUID().uuidString.prefix(8).lowercased())"
+
+        try await backend.connect(host: record(target, reference))
+        addTeardownBlock {
+            _ = try? await backend.run(command: "tmux kill-session -t \(shellQuoted(name))")
+            await backend.disconnect()
+        }
+
+        let control = ActiveSSHCommandRunner(activeConnection: {
+            guard let active = transport.get() else { return nil }
+            return await active.connection
+        })
+        let acknowledgement = try await TerminalSessionCommandExecutor(terminal: backend, runner: control)
+            .executeSessionCommand(.create(kind: .tmux, name: name, directory: nil))
+
+        XCTAssertEqual(acknowledgement.session?.name, name)
+        XCTAssertEqual(acknowledgement.session?.kind, .tmux)
+        let listed = try await control.run(TmuxAdapter().discoverCommand)
+        XCTAssertTrue(listed.contains(name), "the production executor returned without a discoverable tmux session")
+    }
+
+    func testConsecutiveCreateAndDiscoveryCaptureTheNewTmuxSession() async throws {
+        let target = try liveTarget()
+        let (keychain, reference) = try seedKey(target)
+        let (backend, _, _) = makeBackend(keychain)
+        let name = "openpaw-capture-\(UUID().uuidString.prefix(8).lowercased())"
+        let adapter = TmuxAdapter()
+
+        try await backend.connect(host: record(target, reference))
+        addTeardownBlock {
+            _ = try? await backend.run(command: "tmux kill-session -t \(shellQuoted(name))")
+            await backend.disconnect()
+        }
+
+        let createOutput = try await backend.run(command: adapter.createDetached(name: name, directory: nil))
+        let discoveryOutput = try await backend.run(command: adapter.discoverCommand)
+
+        XCTAssertTrue(
+            discoveryOutput.contains(name),
+            "consecutive capture lost the new session; create=\(String(reflecting: createOutput)); discover=\(String(reflecting: discoveryOutput))")
     }
 }
 

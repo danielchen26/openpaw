@@ -106,6 +106,27 @@ final class SessionSpacePresentationTests: XCTestCase {
         XCTAssertEqual(SessionSpaceActionPolicy.navigation(for: item.primaryAction), .opensTerminal)
     }
 
+    func testLegacyHerdrRestorationWithoutATerminalIDCreatesAReplacement() {
+        let hostID = UUID(uuidString: "89898989-8989-4989-8989-898989898989")!
+        let legacy = SessionRestorationPlan(
+            hostID: hostID,
+            multiplexer: .herdr,
+            multiplexerTarget: "w3:p9",
+            workingDirectory: "/repo",
+            capturedAt: Date(timeIntervalSince1970: 1))
+        let remote = RemoteSession(
+            id: "w3:p9",
+            name: "work",
+            kind: .herdr,
+            terminalID: "term_current")
+
+        let action = SessionSpaceActionPlan.restore(legacy, remoteSessions: [remote])
+
+        XCTAssertEqual(
+            action?.command,
+            .create(kind: .herdr, name: "repo", directory: "/repo"))
+    }
+
     func testStaleSnapshotHasNoNavigationCommandAlertOrStoreSideEffects() {
         let hostID = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
         let session = RemoteSession(id: "$1", name: "work", kind: .tmux, isAttached: false, isAlive: true, windowCount: 1)
@@ -115,6 +136,438 @@ final class SessionSpacePresentationTests: XCTestCase {
         XCTAssertNil(SessionSpaceActionPolicy.validatedNavigation(for: "Attach", item: item, snapshot: snapshot, hostID: hostID, generation: 2, isConnected: true))
         XCTAssertNil(SessionSpaceActionPolicy.validatedNavigation(for: "Kill", item: item, snapshot: snapshot, hostID: UUID(), generation: 1, isConnected: true))
         XCTAssertNil(SessionSpaceActionPolicy.validatedNavigation(for: "Attach", item: item, snapshot: snapshot, hostID: hostID, generation: 1, isConnected: false))
+    }
+
+    func testCreateAndAttachPlansPersistRestorationOnlyAfterTheTypedCommandSucceeds() {
+        let hostID = UUID(uuidString: "abababab-abab-abab-abab-abababababab")!
+        let remote = RemoteSession(
+            id: "$9",
+            name: "existing",
+            kind: .tmux,
+            isAttached: false,
+            isAlive: true,
+            workingDirectory: "/srv/existing")
+
+        let create = SessionSpaceActionPlan.create(
+            hostID: hostID,
+            kind: .zellij,
+            name: "api",
+            directory: "/srv/api")
+        XCTAssertEqual(create?.command, .create(kind: .zellij, name: "api", directory: "/srv/api"))
+        XCTAssertEqual(create?.navigation, .opensTerminal)
+        XCTAssertTrue(create?.refreshAfterCommand ?? false)
+        XCTAssertEqual(
+            create?.restorationOnSuccess,
+            .save(SessionRestorationPlan(
+                hostID: hostID,
+                multiplexer: .zellij,
+                multiplexerTarget: "api",
+                workingDirectory: "/srv/api",
+                capturedAt: create!.capturedAt)))
+
+        let attach = SessionSpaceActionPlan.attach(hostID: hostID, session: remote)
+        XCTAssertEqual(attach?.command, .attach(remote))
+        XCTAssertEqual(attach?.navigation, .opensTerminal)
+        XCTAssertEqual(
+            attach?.restorationOnSuccess,
+            .save(SessionRestorationPlan(
+                hostID: hostID,
+                multiplexer: .tmux,
+                multiplexerTarget: "$9",
+                workingDirectory: "/srv/existing",
+                capturedAt: attach!.capturedAt)))
+    }
+
+    func testKillPlanRefreshesAndClearsOnlyTheMatchingRestoration() {
+        let session = RemoteSession(id: "$2", name: "api", kind: .tmux)
+        let kill = SessionSpaceActionPlan.kill(session: session)
+
+        XCTAssertEqual(kill.command, .kill(session))
+        XCTAssertTrue(kill.refreshAfterCommand)
+        XCTAssertEqual(kill.navigation, .staysInList)
+        XCTAssertEqual(kill.restorationOnSuccess, .clearMatching(kind: .tmux, target: "$2"))
+    }
+
+    @MainActor
+    func testFailedCreateDoesNotRouteOrPersistRestoration() async {
+        let hostID = UUID(uuidString: "12121212-1212-1212-1212-121212121212")!
+        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 4)
+        let context = SessionSpaceActionContext(
+            snapshot: snapshot,
+            hostID: hostID,
+            connectionGeneration: 4,
+            isConnected: true)
+        let events = SessionActionEventRecorder()
+        let executor = RecordingSessionSpaceExecutor(events: events, error: SessionActionTestError.failed)
+        let store = RecordingSessionRestorationStore(events: events)
+        let action = SessionSpaceActionPlan.create(hostID: hostID, kind: .tmux, name: "api")!
+
+        do {
+            _ = try await SessionSpaceActionCoordinator.run(
+                action,
+                expectedHostID: hostID,
+                expectedGeneration: 4,
+                context: { context },
+                executor: executor,
+                restorationStore: store)
+            XCTFail("expected the remote command failure")
+        } catch SessionActionTestError.failed {
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(events.events, ["execute"])
+        XCTAssertTrue(store.savedPlans.isEmpty)
+        XCTAssertTrue(store.clearedHostIDs.isEmpty)
+    }
+
+    @MainActor
+    func testSuccessfulCreateRoutesAndPersistsOnlyAfterRemoteAcknowledgement() async throws {
+        let hostID = UUID(uuidString: "13131313-1313-1313-1313-131313131313")!
+        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 7)
+        let context = SessionSpaceActionContext(
+            snapshot: snapshot,
+            hostID: hostID,
+            connectionGeneration: 7,
+            isConnected: true)
+        let events = SessionActionEventRecorder()
+        let executor = RecordingSessionSpaceExecutor(events: events)
+        let store = RecordingSessionRestorationStore(events: events)
+        let action = SessionSpaceActionPlan.create(
+            hostID: hostID,
+            kind: .zellij,
+            name: "release",
+            directory: "/srv/release")!
+
+        let intent = try await SessionSpaceActionCoordinator.run(
+            action,
+            expectedHostID: hostID,
+            expectedGeneration: 7,
+            context: { context },
+            executor: executor,
+            restorationStore: store)
+
+        XCTAssertEqual(intent, .attachSession(.target("release", kind: .zellij)))
+        XCTAssertEqual(events.events, ["execute", "save"])
+        XCTAssertEqual(store.savedPlans.single?.multiplexerTarget, "release")
+    }
+
+    @MainActor
+    func testAcknowledgedCreatePersistsAndRoutesTheActualRemoteHandle() async throws {
+        let hostID = UUID(uuidString: "20202020-2020-2020-2020-202020202020")!
+        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 6)
+        let context = SessionSpaceActionContext(
+            snapshot: snapshot,
+            hostID: hostID,
+            connectionGeneration: 6,
+            isConnected: true)
+        let events = SessionActionEventRecorder()
+        let remote = RemoteSession(
+            id: "$7",
+            name: "release",
+            kind: .tmux,
+            workingDirectory: "/srv/release")
+        let executor = RecordingSessionSpaceExecutor(
+            events: events,
+            acknowledgement: SessionCommandAcknowledgement(session: remote))
+        let store = RecordingSessionRestorationStore(events: events)
+        let action = SessionSpaceActionPlan.create(
+            hostID: hostID,
+            kind: .tmux,
+            name: "release",
+            directory: "/srv/release")!
+
+        let intent = try await SessionSpaceActionCoordinator.run(
+            action,
+            expectedHostID: hostID,
+            expectedGeneration: 6,
+            context: { context },
+            executor: executor,
+            restorationStore: store)
+
+        XCTAssertEqual(intent, .attachSession(remote))
+        XCTAssertEqual(store.savedPlans.single?.multiplexerTarget, "$7")
+        XCTAssertEqual(store.savedPlans.single?.workingDirectory, "/srv/release")
+    }
+
+    @MainActor
+    func testAcknowledgedHerdrCreatePersistsPaneAndTerminalHandles() async throws {
+        let hostID = UUID(uuidString: "21212121-2121-4121-8121-212121212121")!
+        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 6)
+        let context = SessionSpaceActionContext(
+            snapshot: snapshot,
+            hostID: hostID,
+            connectionGeneration: 6,
+            isConnected: true)
+        let events = SessionActionEventRecorder()
+        let remote = RemoteSession(
+            id: "w9:p1",
+            name: "release",
+            kind: .herdr,
+            terminalID: "term_root_9",
+            workingDirectory: "/srv/release")
+        let executor = RecordingSessionSpaceExecutor(
+            events: events,
+            acknowledgement: SessionCommandAcknowledgement(session: remote))
+        let store = RecordingSessionRestorationStore(events: events)
+        let action = SessionSpaceActionPlan.create(
+            hostID: hostID,
+            kind: .herdr,
+            name: "release",
+            directory: "/srv/release")!
+
+        let intent = try await SessionSpaceActionCoordinator.run(
+            action,
+            expectedHostID: hostID,
+            expectedGeneration: 6,
+            context: { context },
+            executor: executor,
+            restorationStore: store)
+
+        XCTAssertEqual(intent, .attachSession(remote))
+        XCTAssertEqual(store.savedPlans.single?.multiplexerTarget, "w9:p1")
+        XCTAssertEqual(store.savedPlans.single?.multiplexerAttachmentTarget, "term_root_9")
+    }
+
+    @MainActor
+    func testFailedKillKeepsMatchingRestorationAndDoesNotRefresh() async {
+        let hostID = UUID(uuidString: "14141414-1414-1414-1414-141414141414")!
+        let session = RemoteSession.target("$4", kind: .tmux)
+        let plan = SessionRestorationPlan(
+            hostID: hostID,
+            multiplexer: .tmux,
+            multiplexerTarget: "$4",
+            capturedAt: Date(timeIntervalSince1970: 1))
+        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 2)
+        let context = SessionSpaceActionContext(
+            snapshot: snapshot,
+            hostID: hostID,
+            connectionGeneration: 2,
+            isConnected: true)
+        let events = SessionActionEventRecorder()
+        let executor = RecordingSessionSpaceExecutor(events: events, error: SessionActionTestError.failed)
+        let store = RecordingSessionRestorationStore(events: events, plans: [hostID: plan])
+
+        do {
+            _ = try await SessionSpaceActionCoordinator.run(
+                .kill(session: session),
+                expectedHostID: hostID,
+                expectedGeneration: 2,
+                context: { context },
+                executor: executor,
+                restorationStore: store,
+                refresh: { events.append("refresh") })
+            XCTFail("expected the remote command failure")
+        } catch SessionActionTestError.failed {
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(events.events, ["execute"])
+        XCTAssertEqual(store.plans[hostID], plan)
+    }
+
+    @MainActor
+    func testSuccessfulKillClearsBeforeRefreshingTheVisibleRestorationState() async throws {
+        let hostID = UUID(uuidString: "15151515-1515-1515-1515-151515151515")!
+        let session = RemoteSession.target("$5", kind: .tmux)
+        let plan = SessionRestorationPlan(
+            hostID: hostID,
+            multiplexer: .tmux,
+            multiplexerTarget: "$5",
+            capturedAt: Date(timeIntervalSince1970: 1))
+        let snapshot = SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 3)
+        let context = SessionSpaceActionContext(
+            snapshot: snapshot,
+            hostID: hostID,
+            connectionGeneration: 3,
+            isConnected: true)
+        let events = SessionActionEventRecorder()
+        let executor = RecordingSessionSpaceExecutor(events: events)
+        let store = RecordingSessionRestorationStore(events: events, plans: [hostID: plan])
+        var visibleRestoration: SessionRestorationPlan? = plan
+
+        let intent = try await SessionSpaceActionCoordinator.run(
+            .kill(session: session),
+            expectedHostID: hostID,
+            expectedGeneration: 3,
+            context: { context },
+            executor: executor,
+            restorationStore: store,
+            refresh: {
+                events.append("refresh")
+                visibleRestoration = await store.loadPlan(for: hostID)
+            })
+
+        XCTAssertNil(intent)
+        XCTAssertEqual(events.events, ["execute", "load", "clear", "refresh", "load"])
+        XCTAssertNil(store.plans[hostID])
+        XCTAssertNil(visibleRestoration)
+    }
+
+    @MainActor
+    func testGenerationChangeWhileCommandIsSuspendedDiscardsNavigationAndRestoration() async throws {
+        let hostID = UUID(uuidString: "16161616-1616-1616-1616-161616161616")!
+        let state = SessionActionContextBox(SessionSpaceActionContext(
+            snapshot: SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 8),
+            hostID: hostID,
+            connectionGeneration: 8,
+            isConnected: true))
+        let events = SessionActionEventRecorder()
+        let gate = SessionActionGate()
+        let executor = RecordingSessionSpaceExecutor(events: events, gate: gate)
+        let store = RecordingSessionRestorationStore(events: events)
+        let action = SessionSpaceActionPlan.create(hostID: hostID, kind: .tmux, name: "stale")!
+
+        let task = Task { @MainActor in
+            try await SessionSpaceActionCoordinator.run(
+                action,
+                expectedHostID: hostID,
+                expectedGeneration: 8,
+                context: { state.value },
+                executor: executor,
+                restorationStore: store)
+        }
+        await gate.waitUntilStarted()
+        state.value.connectionGeneration = 9
+        state.value.snapshot.connectionGeneration = 9
+        await gate.release()
+
+        let intent = try await task.value
+        XCTAssertNil(intent)
+        XCTAssertEqual(events.events, ["execute"])
+        XCTAssertTrue(store.savedPlans.isEmpty)
+    }
+
+    @MainActor
+    func testStaleExecutorFailureIsDiscardedInsteadOfSurfacingOnTheNewConnection() async throws {
+        let hostID = UUID(uuidString: "17171717-1717-1717-1717-171717171717")!
+        let state = SessionActionContextBox(SessionSpaceActionContext(
+            snapshot: SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 8),
+            hostID: hostID,
+            connectionGeneration: 8,
+            isConnected: true))
+        let events = SessionActionEventRecorder()
+        let gate = SessionActionGate()
+        let executor = RecordingSessionSpaceExecutor(
+            events: events,
+            error: SessionActionTestError.failed,
+            gate: gate)
+        let action = SessionSpaceActionPlan.create(hostID: hostID, kind: .tmux, name: "stale")!
+
+        let task = Task { @MainActor in
+            try await SessionSpaceActionCoordinator.run(
+                action,
+                expectedHostID: hostID,
+                expectedGeneration: 8,
+                context: { state.value },
+                executor: executor)
+        }
+        await gate.waitUntilStarted()
+        state.value.connectionGeneration = 9
+        state.value.snapshot.connectionGeneration = 9
+        await gate.release()
+
+        let intent = try await task.value
+        XCTAssertNil(intent)
+        XCTAssertEqual(events.events, ["execute"])
+    }
+
+    @MainActor
+    func testGenerationChangeWhileRestorationSaveIsSuspendedCannotCommitAStalePlan() async throws {
+        let hostID = UUID(uuidString: "18181818-1818-1818-1818-181818181818")!
+        let state = SessionActionContextBox(SessionSpaceActionContext(
+            snapshot: SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 3),
+            hostID: hostID,
+            connectionGeneration: 3,
+            isConnected: true))
+        let events = SessionActionEventRecorder()
+        let gate = SessionActionGate()
+        let store = RecordingSessionRestorationStore(events: events, mutationGate: gate)
+        let action = SessionSpaceActionPlan.create(hostID: hostID, kind: .tmux, name: "stale-save")!
+
+        let task = Task { @MainActor in
+            try await SessionSpaceActionCoordinator.run(
+                action,
+                expectedHostID: hostID,
+                expectedGeneration: 3,
+                context: { state.value },
+                executor: RecordingSessionSpaceExecutor(events: events),
+                restorationStore: store)
+        }
+        await gate.waitUntilStarted()
+        state.value.connectionGeneration = 4
+        state.value.snapshot.connectionGeneration = 4
+        await gate.release()
+
+        let intent = try await task.value
+        XCTAssertNil(intent)
+        XCTAssertTrue(store.savedPlans.isEmpty)
+        XCTAssertNil(store.plans[hostID])
+    }
+
+    @MainActor
+    func testGenerationChangeWhileRestorationClearIsSuspendedCannotClearTheNewConnectionsPlan() async throws {
+        let hostID = UUID(uuidString: "19191919-1919-1919-1919-191919191919")!
+        let session = RemoteSession.target("$9", kind: .tmux)
+        let plan = SessionRestorationPlan(
+            hostID: hostID,
+            multiplexer: .tmux,
+            multiplexerTarget: "$9",
+            capturedAt: Date(timeIntervalSince1970: 1))
+        let state = SessionActionContextBox(SessionSpaceActionContext(
+            snapshot: SessionSpaceSnapshot(hostID: hostID, connectionGeneration: 5),
+            hostID: hostID,
+            connectionGeneration: 5,
+            isConnected: true))
+        let events = SessionActionEventRecorder()
+        let gate = SessionActionGate()
+        let store = RecordingSessionRestorationStore(
+            events: events,
+            plans: [hostID: plan],
+            mutationGate: gate)
+
+        let task = Task { @MainActor in
+            try await SessionSpaceActionCoordinator.run(
+                .kill(session: session),
+                expectedHostID: hostID,
+                expectedGeneration: 5,
+                context: { state.value },
+                executor: RecordingSessionSpaceExecutor(events: events),
+                restorationStore: store,
+                refresh: { events.append("refresh") })
+        }
+        await gate.waitUntilStarted()
+        state.value.connectionGeneration = 6
+        state.value.snapshot.connectionGeneration = 6
+        await gate.release()
+
+        let intent = try await task.value
+        XCTAssertNil(intent)
+        XCTAssertEqual(store.plans[hostID], plan)
+        XCTAssertTrue(store.clearedHostIDs.isEmpty)
+    }
+
+    func testMissingRestorationTargetCreatesAndPersistsADeterministicReplacement() {
+        let hostID = UUID(uuidString: "cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd")!
+        let restoration = SessionRestorationPlan(
+            hostID: hostID,
+            multiplexer: .tmux,
+            multiplexerTarget: "$gone",
+            workingDirectory: "/srv/api rocks",
+            capturedAt: Date(timeIntervalSince1970: 1))
+
+        let action = SessionSpaceActionPlan.restore(restoration, remoteSessions: [])
+
+        XCTAssertEqual(
+            action?.command,
+            .create(kind: .tmux, name: "api-rocks", directory: "/srv/api rocks"))
+        XCTAssertEqual(action?.navigation, .opensTerminal)
+        guard case .save(let replacement) = action?.restorationOnSuccess else {
+            return XCTFail("expected a replacement restoration plan")
+        }
+        XCTAssertEqual(replacement.multiplexerTarget, "api-rocks")
+        XCTAssertEqual(replacement.workingDirectory, "/srv/api rocks")
     }
 
     func testPersistedRestorationIsReconciledWithDiscoveredSessions() {
@@ -134,13 +587,26 @@ final class SessionSpacePresentationTests: XCTestCase {
 
     func testRestorationPolicyDistinguishesReattachFromBareShellFallback() {
         let hostID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
-        let reattach = SessionRestorationPlan(hostID: hostID, multiplexer: .herdr, multiplexerTarget: "hd_01", workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
+        let reattach = SessionRestorationPlan(
+            hostID: hostID,
+            multiplexer: .herdr,
+            multiplexerTarget: "w3:p9",
+            multiplexerAttachmentTarget: "term_65909b7e020c13",
+            workingDirectory: "/repo",
+            capturedAt: Date(timeIntervalSince1970: 0))
         let replacement = SessionRestorationPlan(hostID: hostID, multiplexer: .tmux, workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
         let fallback = SessionRestorationPlan(hostID: hostID, workingDirectory: "/repo", capturedAt: Date(timeIntervalSince1970: 0))
 
-        let reattachRemote = RemoteSession(id: "hd_01", name: "hd_01", kind: .herdr, isAttached: false, isAlive: true, windowCount: 1)
+        let reattachRemote = RemoteSession(
+            id: "w3:p9",
+            name: "work",
+            kind: .herdr,
+            terminalID: "term_65909b7e020c13",
+            isAttached: false,
+            isAlive: true,
+            windowCount: 1)
 
-        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [reattachRemote], restoration: reattach, transport: .init()).restorationItem?.provenance, .restoration(kind: .herdr, target: "hd_01"))
+        XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [reattachRemote], restoration: reattach, transport: .init()).restorationItem?.provenance, .restoration(kind: .herdr, target: "w3:p9"))
         XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [reattachRemote], restoration: reattach, transport: .init()).restorationItem?.primaryAction, "Reattach")
         XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: replacement, transport: .init()).restorationItem?.provenance, .replacementMultiplexer(kind: .tmux, directory: "/repo"))
         XCTAssertEqual(SessionSpacePresentation(agentSessions: [], remoteSessions: [], restoration: replacement, transport: .init()).restorationItem?.primaryAction, "Create replacement session")
@@ -274,6 +740,19 @@ final class SessionSpacePresentationTests: XCTestCase {
         XCTAssertEqual(attach?.multiplexerTarget, "$2")
         XCTAssertEqual(attach?.workingDirectory, "/work")
 
+        let herdr = RemoteSession(
+            id: "w3:p9",
+            name: "agent",
+            kind: .herdr,
+            terminalID: "term_65909b7e020c13",
+            workingDirectory: "/work")
+        let herdrAttach = recorder.planForAttach(
+            hostID: hostID,
+            session: herdr,
+            capturedAt: capturedAt)
+        XCTAssertEqual(herdrAttach?.multiplexerTarget, "w3:p9")
+        XCTAssertEqual(herdrAttach?.multiplexerAttachmentTarget, "term_65909b7e020c13")
+
         let create = recorder.planForCreate(hostID: hostID, kind: .screen, name: "created", capturedAt: capturedAt)
         XCTAssertEqual(create?.multiplexer, .screen)
         XCTAssertEqual(create?.multiplexerTarget, "created")
@@ -298,6 +777,131 @@ final class SessionSpacePresentationTests: XCTestCase {
     }
 }
 
+private enum SessionActionTestError: Error {
+    case failed
+}
+
+@MainActor
+private final class SessionActionEventRecorder {
+    private(set) var events: [String] = []
+    func append(_ event: String) { events.append(event) }
+}
+
+@MainActor
+private final class SessionActionContextBox {
+    var value: SessionSpaceActionContext
+    init(_ value: SessionSpaceActionContext) { self.value = value }
+}
+
+private actor SessionActionGate {
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func suspend() async {
+        started = true
+        let waitingForStart = startWaiters
+        startWaiters.removeAll()
+        waitingForStart.forEach { $0.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+@MainActor
+private final class RecordingSessionSpaceExecutor: SessionSpaceCommandExecuting {
+    let events: SessionActionEventRecorder
+    let error: (any Error)?
+    let gate: SessionActionGate?
+    let acknowledgement: SessionCommandAcknowledgement
+
+    init(
+        events: SessionActionEventRecorder,
+        error: (any Error)? = nil,
+        gate: SessionActionGate? = nil,
+        acknowledgement: SessionCommandAcknowledgement = SessionCommandAcknowledgement()
+    ) {
+        self.events = events
+        self.error = error
+        self.gate = gate
+        self.acknowledgement = acknowledgement
+    }
+
+    func executeSessionCommand(_ command: MultiplexerCommand) async throws -> SessionCommandAcknowledgement {
+        events.append("execute")
+        if let gate { await gate.suspend() }
+        if let error { throw error }
+        return acknowledgement
+    }
+}
+
+@MainActor
+private final class RecordingSessionRestorationStore: SessionRestorationStoring {
+    let events: SessionActionEventRecorder
+    var plans: [HostID: SessionRestorationPlan]
+    private(set) var savedPlans: [SessionRestorationPlan] = []
+    private(set) var clearedHostIDs: [HostID] = []
+    let mutationGate: SessionActionGate?
+
+    init(
+        events: SessionActionEventRecorder,
+        plans: [HostID: SessionRestorationPlan] = [:],
+        mutationGate: SessionActionGate? = nil
+    ) {
+        self.events = events
+        self.plans = plans
+        self.mutationGate = mutationGate
+    }
+
+    func loadPlan(for hostID: HostID) async -> SessionRestorationPlan? {
+        events.append("load")
+        return plans[hostID]
+    }
+
+    func apply(
+        _ mutation: SessionRestorationMutation,
+        expectedHostID: HostID,
+        ifCurrent: @escaping @MainActor () -> Bool
+    ) async -> Bool {
+        if let mutationGate { await mutationGate.suspend() }
+        guard ifCurrent() else { return false }
+        switch mutation {
+        case .save(let plan):
+            guard plan.hostID == expectedHostID else { return false }
+            events.append("save")
+            savedPlans.append(plan)
+            plans[plan.hostID] = plan
+        case .clearMatching(let kind, let target):
+            events.append("load")
+            if let plan = plans[expectedHostID],
+               plan.multiplexer == kind,
+               plan.multiplexerTarget == target {
+                events.append("clear")
+                clearedHostIDs.append(expectedHostID)
+                plans.removeValue(forKey: expectedHostID)
+            }
+        }
+        return true
+    }
+}
+
+private extension Array {
+    var single: Element? { count == 1 ? first : nil }
+}
+
 private actor RecordingRunner: CommandRunner {
     func run(_ command: String) async throws -> String { "" }
 }
@@ -309,6 +913,7 @@ private struct ProviderAdapter: MultiplexerAdapter {
     func discoverSessions(runner: any CommandRunner) async throws -> [RemoteSession] { try result.get() }
     func attach(_ session: RemoteSession) -> String { "attach" }
     func create(name: String, directory: String?) -> String { "create" }
+    func createDetached(name: String, directory: String?) -> String { "create detached" }
     func listWindows(session: RemoteSession, runner: any CommandRunner) async throws -> [RemoteWindow] { [] }
     func focus(window: RemoteWindow) -> String { "focus" }
     func kill(_ session: RemoteSession) -> String { "kill" }

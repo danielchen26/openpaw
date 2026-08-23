@@ -187,6 +187,18 @@ struct AppShell: View {
     }
 #endif
 
+/// Opens one independent SSH exec channel per session-control command over the currently connected transport. The
+/// interactive PTY may be blocked inside tmux, screen, or a full-screen program; control traffic must never be typed
+/// into that user-owned terminal stream.
+struct ActiveSSHCommandRunner: CommandRunner {
+    let activeConnection: @Sendable () async -> SSHConnection?
+
+    func run(_ command: String) async throws -> String {
+        guard let connection = await activeConnection() else { throw TransportError.notConnected }
+        return try await SSHCommandRunner(connection: connection).run(command)
+    }
+}
+
 @MainActor
 @Observable
 final class AppWiring {
@@ -222,6 +234,7 @@ final class AppWiring {
     /// forwards to, and a fresh copy would reset that router. `@ObservationIgnored` because caching it is not a state
     /// change any view should observe.
     @ObservationIgnored private var cachedRoot: RootView?
+    @ObservationIgnored private let sessionCommandRunner: any CommandRunner
 
     func rootView() -> RootView {
         if let cachedRoot { return cachedRoot }
@@ -240,8 +253,8 @@ final class AppWiring {
                     )
                 )
             },
-            sessionSpaceProvider: LiveMultiplexerSessionSpaceProvider(runner: terminal, restorationStore: restorationStore),
-            sessionCommandExecutor: TerminalSessionCommandExecutor(terminal: terminal),
+            sessionSpaceProvider: LiveMultiplexerSessionSpaceProvider(runner: sessionCommandRunner, restorationStore: restorationStore),
+            sessionCommandExecutor: TerminalSessionCommandExecutor(terminal: terminal, runner: sessionCommandRunner),
             restorationStore: restorationStore
         )
         cachedRoot = created
@@ -269,6 +282,10 @@ final class AppWiring {
         // the ordering is guaranteed by the backend's own control flow.
         let pins = LockedBox<[String]>([])
         let transportBox = LockedBox<SSHTransport?>(nil)
+        let sessionCommandRunner = ActiveSSHCommandRunner(activeConnection: {
+            guard let transport = transportBox.get() else { return nil }
+            return await transport.connection
+        })
         // The prompt has to reach the model, which does not exist yet, so the sink starts empty and is filled below.
         let promptSink = LockedBox<(@Sendable (TransportError) -> Void)?>(nil)
 
@@ -376,6 +393,7 @@ final class AppWiring {
             )
         #endif
         self.asrModels = asrModels
+        self.sessionCommandRunner = sessionCommandRunner
 
         let stored = UserDefaults.standard.double(forKey: Self.fontSizeKey)
         terminalFontSize = stored > 0 ? CGFloat(stored) : TerminalSurface.defaultFontSize
@@ -565,19 +583,6 @@ final class AppWiring {
 
     func persistHosts() {
         hosts.save(model.hostStore)
-    }
-}
-
-@MainActor
-final class TerminalSessionCommandExecutor: SessionSpaceCommandExecuting {
-    private let terminal: any TerminalBackend
-
-    init(terminal: any TerminalBackend) {
-        self.terminal = terminal
-    }
-
-    func executeSessionCommand(_ command: String) async throws {
-        try await terminal.send(text: command + "\n")
     }
 }
 

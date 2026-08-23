@@ -30,6 +30,77 @@ public enum MultiplexerError: Error, Sendable, Hashable {
     case unsupportedOperation(kind: MultiplexerKind, operation: String)
 }
 
+/// A session operation the UI is allowed to send through the interactive terminal.
+///
+/// The enum is deliberately closed. Callers choose an operation and typed targets; only this module turns that choice
+/// into shell text. That preserves ordinary SSH compatibility without reintroducing a free-form command seam.
+public enum MultiplexerCommand: Sendable, Hashable {
+    case attach(RemoteSession)
+    case create(kind: MultiplexerKind, name: String, directory: String?)
+    case focus(kind: MultiplexerKind, window: RemoteWindow)
+    case kill(RemoteSession)
+    case rename(RemoteSession, to: String)
+    case changeDirectory(String)
+
+    public func rendered() throws -> String {
+        switch self {
+        case .attach(let session):
+            try Self.validate(session.id, field: "session")
+            if session.kind == .herdr {
+                guard let terminalID = session.terminalID else {
+                    throw MultiplexerCommandError.invalidValue(field: "Herdr terminal")
+                }
+                try Self.validate(terminalID, field: "Herdr terminal")
+            }
+            return MultiplexerAdapters.adapter(for: session.kind).attach(session)
+        case .create(let kind, let name, let directory):
+            try Self.validate(name, field: "session name")
+            if let directory, !directory.isEmpty {
+                try Self.validate(directory, field: "directory", maximumUTF8Count: 4_096)
+            }
+            return MultiplexerAdapters.adapter(for: kind).create(name: name, directory: directory)
+        case .focus(let kind, let window):
+            try Self.validate(window.id, field: "window")
+            try Self.validate(window.sessionID, field: "session")
+            try Self.validate(window.name, field: "window name")
+            if kind == .herdr {
+                guard let terminalID = window.terminalID else {
+                    throw MultiplexerCommandError.invalidValue(field: "Herdr terminal")
+                }
+                try Self.validate(terminalID, field: "Herdr terminal")
+            }
+            guard window.index >= 0 else { throw MultiplexerCommandError.invalidValue(field: "window index") }
+            return MultiplexerAdapters.adapter(for: kind).focus(window: window)
+        case .kill(let session):
+            try Self.validate(session.id, field: "session")
+            return MultiplexerAdapters.adapter(for: session.kind).kill(session)
+        case .rename(let session, let name):
+            try Self.validate(session.id, field: "session")
+            try Self.validate(name, field: "session name")
+            return MultiplexerAdapters.adapter(for: session.kind).rename(session, to: name)
+        case .changeDirectory(let directory):
+            try Self.validate(directory, field: "directory", maximumUTF8Count: 4_096)
+            return "cd \(shellQuoted(directory))"
+        }
+    }
+
+    private static func validate(
+        _ value: String,
+        field: String,
+        maximumUTF8Count: Int = 512
+    ) throws {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              value.utf8.count <= maximumUTF8Count,
+              value.rangeOfCharacter(from: .controlCharacters) == nil else {
+            throw MultiplexerCommandError.invalidValue(field: field)
+        }
+    }
+}
+
+public enum MultiplexerCommandError: Error, Sendable, Hashable {
+    case invalidValue(field: String)
+}
+
 // MARK: - Models
 
 public enum MultiplexerKind: String, Sendable, Codable, Hashable, CaseIterable {
@@ -55,6 +126,8 @@ public struct RemoteSession: Sendable, Hashable, Codable, Identifiable {
     public var id: String
     public var name: String
     public var kind: MultiplexerKind
+    /// Herdr's terminal transport handle. Herdr manages panes by ``id`` but attaches a stream by this separate ID.
+    public var terminalID: String?
     public var isAttached: Bool
     /// False for sessions the multiplexer reports as dead/exited but still lists.
     public var isAlive: Bool
@@ -69,6 +142,7 @@ public struct RemoteSession: Sendable, Hashable, Codable, Identifiable {
         id: String,
         name: String,
         kind: MultiplexerKind,
+        terminalID: String? = nil,
         isAttached: Bool = false,
         isAlive: Bool = true,
         windowCount: Int = 0,
@@ -80,6 +154,7 @@ public struct RemoteSession: Sendable, Hashable, Codable, Identifiable {
         self.id = id
         self.name = name
         self.kind = kind
+        self.terminalID = terminalID
         self.isAttached = isAttached
         self.isAlive = isAlive
         self.windowCount = windowCount
@@ -97,6 +172,7 @@ public struct RemoteSession: Sendable, Hashable, Codable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, kind
+        case terminalID = "terminal_id"
         case isAttached = "is_attached"
         case isAlive = "is_alive"
         case windowCount = "window_count"
@@ -113,6 +189,8 @@ public struct RemoteWindow: Sendable, Hashable, Codable, Identifiable {
     public var sessionID: String
     public var index: Int
     public var name: String
+    /// Herdr terminal transport handle when this synthetic window represents a pane.
+    public var terminalID: String?
     public var isActive: Bool
     public var paneCount: Int
     public var currentCommand: String?
@@ -123,6 +201,7 @@ public struct RemoteWindow: Sendable, Hashable, Codable, Identifiable {
         sessionID: String,
         index: Int,
         name: String,
+        terminalID: String? = nil,
         isActive: Bool = false,
         paneCount: Int = 1,
         currentCommand: String? = nil,
@@ -132,6 +211,7 @@ public struct RemoteWindow: Sendable, Hashable, Codable, Identifiable {
         self.sessionID = sessionID
         self.index = index
         self.name = name
+        self.terminalID = terminalID
         self.isActive = isActive
         self.paneCount = paneCount
         self.currentCommand = currentCommand
@@ -142,6 +222,7 @@ public struct RemoteWindow: Sendable, Hashable, Codable, Identifiable {
         case id
         case sessionID = "session_id"
         case index, name
+        case terminalID = "terminal_id"
         case isActive = "is_active"
         case paneCount = "pane_count"
         case currentCommand = "current_command"
@@ -203,6 +284,8 @@ public protocol MultiplexerAdapter: Sendable {
     /// The command line to type into the PTY to attach.
     func attach(_ session: RemoteSession) -> String
     func create(name: String, directory: String?) -> String
+    /// A command that creates the session and exits, allowing the PTY runner to acknowledge success before attaching.
+    func createDetached(name: String, directory: String?) -> String
     func listWindows(session: RemoteSession, runner: any CommandRunner) async throws -> [RemoteWindow]
     func focus(window: RemoteWindow) -> String
     func kill(_ session: RemoteSession) -> String
@@ -227,9 +310,11 @@ public enum MultiplexerAdapters {
 
 /// Shared parsing constants.
 public enum Multiplexer {
-    /// ASCII unit separator. Used as the tmux `-F` field delimiter because it
-    /// cannot appear in session, window or path names, unlike tabs or colons.
-    public static let fieldSeparator = "\u{1F}"
+    /// Printable delimiter used by tmux's `q:` format modifier.
+    ///
+    /// tmux rewrites control and non-ASCII separator characters to `_` in `-F` output. A printable ASCII delimiter,
+    /// combined with tmux's backslash escaping for every field, survives both interactive PTYs and SSH exec channels.
+    public static let fieldSeparator = "|"
 }
 
 /// Markers that mean "this multiplexer simply has nothing running", which is a
@@ -248,8 +333,30 @@ private func splitLines(_ text: String) -> [String] {
     text.split(whereSeparator: { $0 == "\n" || $0 == "\r\n" || $0 == "\r" }).map(String.init)
 }
 
-private func fields(_ line: String) -> [String] {
-    line.components(separatedBy: Multiplexer.fieldSeparator)
+/// Splits tmux `q:` formatted output. tmux backslash-escapes shell metacharacters, including the printable `|`
+/// delimiter and literal backslashes. A trailing escape is malformed rather than being silently discarded.
+private func fields(_ line: String) -> [String]? {
+    var result: [String] = []
+    var field = ""
+    var isEscaped = false
+
+    for character in line {
+        if isEscaped {
+            field.append(character)
+            isEscaped = false
+        } else if character == "\\" {
+            isEscaped = true
+        } else if character == Character(Multiplexer.fieldSeparator) {
+            result.append(field)
+            field = ""
+        } else {
+            field.append(character)
+        }
+    }
+
+    guard !isEscaped else { return nil }
+    result.append(field)
+    return result
 }
 
 private func epochDate(_ raw: String) -> Date? {
@@ -263,26 +370,32 @@ public struct TmuxAdapter: MultiplexerAdapter {
     /// Explicit `-F` formats: tmux's default human output is unparseable for
     /// names containing spaces or brackets.
     public static let sessionFormat = [
-        "#{session_id}", "#{session_name}", "#{session_attached}", "#{session_windows}",
-        "#{session_created}", "#{session_activity}", "#{session_path}",
+        "#{q:session_id}", "#{q:session_name}", "#{q:session_attached}", "#{q:session_windows}",
+        "#{q:session_created}", "#{q:session_activity}", "#{q:session_path}",
     ].joined(separator: Multiplexer.fieldSeparator)
 
     public static let windowFormat = [
-        "#{window_id}", "#{window_index}", "#{window_name}", "#{window_active}",
-        "#{window_panes}", "#{pane_current_command}", "#{pane_current_path}",
+        "#{q:window_id}", "#{q:window_index}", "#{q:window_name}", "#{q:window_active}",
+        "#{q:window_panes}", "#{q:pane_current_command}", "#{q:pane_current_path}",
     ].joined(separator: Multiplexer.fieldSeparator)
 
     public static let paneFormat = [
-        "#{pane_id}", "#{pane_index}", "#{pane_active}", "#{pane_width}", "#{pane_height}",
-        "#{pane_current_command}", "#{pane_current_path}", "#{pane_title}",
+        "#{q:pane_id}", "#{q:pane_index}", "#{q:pane_active}", "#{q:pane_width}", "#{q:pane_height}",
+        "#{q:pane_current_command}", "#{q:pane_current_path}", "#{q:pane_title}",
     ].joined(separator: Multiplexer.fieldSeparator)
 
     public let kind = MultiplexerKind.tmux
 
     public init() {}
 
+    /// tmux rewrites control and non-ASCII separators to underscores in `-F` output. Every field uses tmux's `q:`
+    /// modifier, so a printable `|` delimiter remains literal while delimiter-like field data is backslash-escaped.
+    static func shellFormatArgument(_ format: String) -> String {
+        shellQuoted(format)
+    }
+
     public var discoverCommand: String {
-        "tmux list-sessions -F \(shellQuoted(Self.sessionFormat))"
+        "tmux list-sessions -F \(Self.shellFormatArgument(Self.sessionFormat))"
     }
 
     public func discoverSessions(runner: any CommandRunner) async throws -> [RemoteSession] {
@@ -298,8 +411,7 @@ public struct TmuxAdapter: MultiplexerAdapter {
     }
 
     public func parseSession(_ line: String) throws -> RemoteSession {
-        let parts = fields(line)
-        guard parts.count >= 7 else {
+        guard let parts = fields(line), parts.count >= 7 else {
             throw MultiplexerError.malformedOutput(kind: .tmux, detail: line)
         }
         return RemoteSession(
@@ -320,7 +432,7 @@ public struct TmuxAdapter: MultiplexerAdapter {
         -> [RemoteWindow]
     {
         let command =
-            "tmux list-windows -t \(shellQuoted(session.id)) -F \(shellQuoted(Self.windowFormat))"
+            "tmux list-windows -t \(shellQuoted(session.id)) -F \(Self.shellFormatArgument(Self.windowFormat))"
         let output: String
         do {
             output = try await runner.run(command)
@@ -333,8 +445,7 @@ public struct TmuxAdapter: MultiplexerAdapter {
     }
 
     public func parseWindow(_ line: String, sessionID: String) throws -> RemoteWindow {
-        let parts = fields(line)
-        guard parts.count >= 7, let index = Int(parts[1]) else {
+        guard let parts = fields(line), parts.count >= 7, let index = Int(parts[1]) else {
             throw MultiplexerError.malformedOutput(kind: .tmux, detail: line)
         }
         return RemoteWindow(
@@ -353,7 +464,7 @@ public struct TmuxAdapter: MultiplexerAdapter {
         -> [RemotePane]
     {
         let command =
-            "tmux list-panes -t \(shellQuoted(window.id)) -F \(shellQuoted(Self.paneFormat))"
+            "tmux list-panes -t \(shellQuoted(window.id)) -F \(Self.shellFormatArgument(Self.paneFormat))"
         let output: String
         do {
             output = try await runner.run(command)
@@ -366,8 +477,7 @@ public struct TmuxAdapter: MultiplexerAdapter {
     }
 
     public func parsePane(_ line: String, windowID: String) throws -> RemotePane {
-        let parts = fields(line)
-        guard parts.count >= 8, let index = Int(parts[1]), let width = Int(parts[3]),
+        guard let parts = fields(line), parts.count >= 8, let index = Int(parts[1]), let width = Int(parts[3]),
             let height = Int(parts[4])
         else {
             throw MultiplexerError.malformedOutput(kind: .tmux, detail: line)
@@ -391,6 +501,14 @@ public struct TmuxAdapter: MultiplexerAdapter {
 
     public func create(name: String, directory: String?) -> String {
         var command = "tmux new-session -A -s \(shellQuoted(name))"
+        if let directory, !directory.isEmpty {
+            command += " -c \(shellQuoted(directory))"
+        }
+        return command
+    }
+
+    public func createDetached(name: String, directory: String?) -> String {
+        var command = "tmux new-session -d -s \(shellQuoted(name))"
         if let directory, !directory.isEmpty {
             command += " -c \(shellQuoted(directory))"
         }
@@ -515,6 +633,14 @@ public struct ZellijAdapter: MultiplexerAdapter {
 
     public func create(name: String, directory: String?) -> String {
         let launch = "zellij --session \(shellQuoted(name))"
+        if let directory, !directory.isEmpty {
+            return "cd \(shellQuoted(directory)) && \(launch)"
+        }
+        return launch
+    }
+
+    public func createDetached(name: String, directory: String?) -> String {
+        let launch = "zellij attach --create-background \(shellQuoted(name))"
         if let directory, !directory.isEmpty {
             return "cd \(shellQuoted(directory)) && \(launch)"
         }
@@ -647,6 +773,14 @@ public struct ScreenAdapter: MultiplexerAdapter {
         return launch
     }
 
+    public func createDetached(name: String, directory: String?) -> String {
+        let launch = "screen -dmS \(shellQuoted(name))"
+        if let directory, !directory.isEmpty {
+            return "cd \(shellQuoted(directory)) && \(launch)"
+        }
+        return launch
+    }
+
     public func focus(window: RemoteWindow) -> String {
         "screen -S \(shellQuoted(window.sessionID)) -X select \(window.index)"
     }
@@ -694,6 +828,15 @@ public struct HerdrAdapter: MultiplexerAdapter {
         var panes: [AgentDTO]
     }
 
+    private struct WorkspaceCreateResult: Decodable {
+        var root_pane: RootPane
+
+        struct RootPane: Decodable {
+            var pane_id: String
+            var terminal_id: String
+        }
+    }
+
     private struct TabList: Decodable {
         var tabs: [TabDTO]
     }
@@ -705,6 +848,7 @@ public struct HerdrAdapter: MultiplexerAdapter {
 
     private struct AgentDTO: Decodable {
         var pane_id: String
+        var terminal_id: String
         var agent: String?
         var agent_status: String?
         var cwd: String?
@@ -820,6 +964,7 @@ public struct HerdrAdapter: MultiplexerAdapter {
                 id: dto.pane_id,
                 name: dto.displayName(tabLabels: tabLabels),
                 kind: .herdr,
+                terminalID: dto.terminal_id,
                 // Herdr has no "attached" concept; the focused pane is the one the user is looking at.
                 isAttached: dto.focused ?? false,
                 isAlive: true,
@@ -843,6 +988,7 @@ public struct HerdrAdapter: MultiplexerAdapter {
                 sessionID: session.id,
                 index: 0,
                 name: session.name,
+                terminalID: session.terminalID,
                 isActive: session.isAttached,
                 paneCount: 1,
                 currentCommand: nil,
@@ -852,13 +998,34 @@ public struct HerdrAdapter: MultiplexerAdapter {
     }
 
     public func attach(_ session: RemoteSession) -> String {
-        "herdr agent attach \(shellQuoted(session.id))"
+        "herdr terminal attach \(shellQuoted(session.terminalID ?? ""))"
     }
 
-    /// Herdr has no "new session" command that a phone should invoke: a session is a server daemon. Creating work
-    /// means creating a tab, which is where an agent is then started.
+    public func paneProbeCommand(_ session: RemoteSession) -> String {
+        "herdr pane get \(shellQuoted(session.id))"
+    }
+
+    /// Herdr reports socket API failures in an exit-zero JSON envelope. A successful process exit therefore is not an
+    /// acknowledgement by itself: the envelope must contain the exact pane that was requested before OpenPaw enters
+    /// the interactive terminal or persists restoration state.
+    public func validatePaneProbeResponse(_ json: String, expectedPaneID: String) throws {
+        guard let data = json.data(using: .utf8),
+              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw MultiplexerError.malformedOutput(kind: .herdr, detail: "pane probe was not acknowledged")
+        }
+        let error = envelope["error"]
+        guard error == nil || error is NSNull,
+              let result = envelope["result"] as? [String: Any],
+              let paneID = result["pane_id"] as? String,
+              paneID == expectedPaneID else {
+            throw MultiplexerError.malformedOutput(kind: .herdr, detail: "pane probe was not acknowledged")
+        }
+    }
+
+    /// OpenPaw presents Herdr workspaces through their root panes. A workspace creation receipt gives the exact pane id
+    /// the phone must attach, unlike a label which is neither unique nor a valid terminal target.
     public func create(name: String, directory: String?) -> String {
-        var command = "herdr tab create"
+        var command = "herdr workspace create"
         if let directory, !directory.isEmpty {
             command += " --cwd \(shellQuoted(directory))"
         }
@@ -866,8 +1033,46 @@ public struct HerdrAdapter: MultiplexerAdapter {
         return command
     }
 
+    public func createDetached(name: String, directory: String?) -> String {
+        var command = "herdr workspace create"
+        if let directory, !directory.isEmpty {
+            command += " --cwd \(shellQuoted(directory))"
+        }
+        command += " --label \(shellQuoted(name)) --no-focus"
+        return command
+    }
+
+    public func parseCreatedSession(
+        _ json: String,
+        name: String,
+        directory: String?
+    ) throws -> RemoteSession {
+        guard let data = json.data(using: .utf8),
+              let envelope = try? Self.decoder().decode(Envelope<WorkspaceCreateResult>.self, from: data),
+              let result = envelope.result else {
+            throw MultiplexerError.malformedOutput(kind: .herdr, detail: json)
+        }
+        let paneID = result.root_pane.pane_id
+        let terminalID = result.root_pane.terminal_id
+        guard !paneID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              paneID.rangeOfCharacter(from: .controlCharacters) == nil,
+              !terminalID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              terminalID.rangeOfCharacter(from: .controlCharacters) == nil else {
+            throw MultiplexerError.malformedOutput(kind: .herdr, detail: json)
+        }
+        return RemoteSession(
+            id: paneID,
+            name: name,
+            kind: .herdr,
+            terminalID: terminalID,
+            isAttached: false,
+            isAlive: true,
+            windowCount: 1,
+            workingDirectory: directory)
+    }
+
     public func focus(window: RemoteWindow) -> String {
-        "herdr agent focus \(shellQuoted(window.sessionID))"
+        "herdr terminal attach \(shellQuoted(window.terminalID ?? ""))"
     }
 
     public func kill(_ session: RemoteSession) -> String {
@@ -875,6 +1080,6 @@ public struct HerdrAdapter: MultiplexerAdapter {
     }
 
     public func rename(_ session: RemoteSession, to newName: String) -> String {
-        "herdr agent rename \(shellQuoted(session.id)) \(shellQuoted(newName))"
+        "herdr pane rename \(shellQuoted(session.id)) \(shellQuoted(newName))"
     }
 }

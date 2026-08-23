@@ -4,6 +4,72 @@ import XCTest
 
 final class MultiplexerAdapterTests: XCTestCase {
 
+    // MARK: typed execution boundary
+
+    func testTypedCommandsRenderOnlyFixedMultiplexerTemplates() throws {
+        let tmux = RemoteSession.target("agent main", kind: .tmux)
+        let zellij = RemoteSession.target("agent-main", kind: .zellij)
+
+        XCTAssertEqual(
+            try MultiplexerCommand.attach(tmux).rendered(),
+            "tmux attach-session -t 'agent main'")
+        XCTAssertEqual(
+            try MultiplexerCommand.create(kind: .tmux, name: "api", directory: "/srv/api rocks").rendered(),
+            "tmux new-session -A -s api -c '/srv/api rocks'")
+        XCTAssertEqual(
+            try MultiplexerCommand.rename(zellij, to: "api next").rendered(),
+            "zellij --session agent-main action rename-session 'api next'")
+        XCTAssertEqual(
+            try MultiplexerCommand.changeDirectory("/srv/api rocks").rendered(),
+            "cd '/srv/api rocks'")
+    }
+
+    func testTypedCommandsRejectEmptyOrControlCharacterIdentifiers() {
+        assertInvalidCommand(.attach(.target("bad\nidentifier", kind: .tmux)), field: "session")
+        assertInvalidCommand(.create(kind: .tmux, name: "", directory: nil), field: "session name")
+        assertInvalidCommand(
+            .focus(
+                kind: .tmux,
+                window: RemoteWindow(id: "@1\r", sessionID: "$0", index: 1, name: "logs")),
+            field: "window")
+        assertInvalidCommand(.changeDirectory("/srv/api\u{0000}secrets"), field: "directory")
+        assertInvalidCommand(.attach(.target("w3:p9", kind: .herdr)), field: "Herdr terminal")
+        assertInvalidCommand(
+            .focus(
+                kind: .herdr,
+                window: RemoteWindow(id: "w3:p9", sessionID: "w3:p9", index: 0, name: "agent")),
+            field: "Herdr terminal")
+    }
+
+    func testEveryMultiplexerHasAFixedAcknowledgedBackgroundCreateTemplate() {
+        XCTAssertEqual(
+            TmuxAdapter().createDetached(name: "api", directory: "/srv/api rocks"),
+            "tmux new-session -d -s api -c '/srv/api rocks'")
+        XCTAssertEqual(
+            ZellijAdapter().createDetached(name: "api", directory: "/srv/api rocks"),
+            "cd '/srv/api rocks' && zellij attach --create-background api")
+        XCTAssertEqual(
+            ScreenAdapter().createDetached(name: "api", directory: "/srv/api rocks"),
+            "cd '/srv/api rocks' && screen -dmS api")
+        XCTAssertEqual(
+            HerdrAdapter().createDetached(name: "api", directory: "/srv/api rocks"),
+            "herdr workspace create --cwd '/srv/api rocks' --label api --no-focus")
+    }
+
+    private func assertInvalidCommand(
+        _ command: MultiplexerCommand,
+        field: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertThrowsError(try command.rendered(), file: file, line: line) { error in
+            guard case MultiplexerCommandError.invalidValue(let actualField) = error else {
+                return XCTFail("unexpected error \(error)", file: file, line: line)
+            }
+            XCTAssertEqual(actualField, field, file: file, line: line)
+        }
+    }
+
     // MARK: tmux
 
     private var tmuxSessionOutput: String {
@@ -36,8 +102,46 @@ final class MultiplexerAdapterTests: XCTestCase {
 
         let commands = await runner.commands()
         XCTAssertEqual(commands.count, 1)
-        XCTAssertTrue(commands[0].hasPrefix("tmux list-sessions -F '#{session_id}"))
-        XCTAssertTrue(commands[0].contains("#{session_activity}"))
+        XCTAssertTrue(commands[0].hasPrefix("tmux list-sessions -F '#{q:session_id}"))
+        XCTAssertTrue(commands[0].contains("#{q:session_activity}"))
+    }
+
+    func testTmuxParsesShellEscapedFieldsWithoutDelimiterCollisions() throws {
+        let line = "\\$7|probe\\ name\\|x|0|1|1755697800|1755701400|/Users/dev/openpaw\\ dir\\|probe\\\\dollar\\$"
+        let session = try TmuxAdapter().parseSession(line)
+
+        XCTAssertEqual(session.id, "$7")
+        XCTAssertEqual(session.name, "probe name|x")
+        XCTAssertEqual(session.workingDirectory, "/Users/dev/openpaw dir|probe\\dollar$")
+    }
+
+    func testTmuxReadCommandsDoNotSendRawControlCharactersThroughAnInteractivePTY() async throws {
+        let runner = StubRunner([
+            ("tmux list-sessions", .output("")),
+            ("tmux list-windows", .output("")),
+            ("tmux list-panes", .output("")),
+        ])
+        let adapter = TmuxAdapter()
+        let session = RemoteSession.target("$0", kind: .tmux)
+        let window = RemoteWindow(id: "@0", sessionID: session.id, index: 0, name: "shell")
+
+        _ = try await adapter.discoverSessions(runner: runner)
+        _ = try await adapter.listWindows(session: session, runner: runner)
+        _ = try await adapter.listPanes(window: window, runner: runner)
+
+        let commands = await runner.commands()
+        XCTAssertEqual(commands.count, 3)
+        for command in commands {
+            XCTAssertFalse(
+                command.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) },
+                "tmux format arguments must not contain raw terminal control bytes: \(String(reflecting: command))")
+            XCTAssertTrue(
+                command.contains(Multiplexer.fieldSeparator),
+                "the parser separator must be transmitted literally so tmux emits the same value")
+            XCTAssertFalse(
+                command.contains("$(printf"),
+                "tmux rewrites control-byte separators to underscores even when the shell creates them")
+        }
     }
 
     func testTmuxReturnsEmptyListWhenNoServerRunning() async throws {
@@ -96,8 +200,8 @@ final class MultiplexerAdapterTests: XCTestCase {
         XCTAssertEqual(parsedPanes[1].windowID, "@0")
 
         let commands = await runner.commands()
-        XCTAssertEqual(commands[0], "tmux list-windows -t '$0' -F \(shellQuoted(TmuxAdapter.windowFormat))")
-        XCTAssertEqual(commands[1], "tmux list-panes -t @0 -F \(shellQuoted(TmuxAdapter.paneFormat))")
+        XCTAssertEqual(commands[0], "tmux list-windows -t '$0' -F \(TmuxAdapter.shellFormatArgument(TmuxAdapter.windowFormat))")
+        XCTAssertEqual(commands[1], "tmux list-panes -t @0 -F \(TmuxAdapter.shellFormatArgument(TmuxAdapter.paneFormat))")
     }
 
     func testTmuxRejectsTruncatedRows() {
@@ -267,6 +371,7 @@ final class MultiplexerAdapterTests: XCTestCase {
         let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
 
         XCTAssertEqual(sessions.map(\.id), ["w3:p1", "w3:p9"])
+        XCTAssertEqual(sessions.map(\.terminalID), ["term_65909b7e01df01", "term_65909b7e020c13"])
         // The pane title is what the user recognises the agent by, not the agent binary name.
         XCTAssertEqual(sessions.map(\.name), ["π - tianchichen", "修复Codex和Claude不可用的问题"])
         XCTAssertEqual(sessions.map(\.isAttached), [false, true])
@@ -282,12 +387,18 @@ final class MultiplexerAdapterTests: XCTestCase {
         // `herdr list` does not exist, and `herdr agent list` omits the bare shells the phone creates.
         XCTAssertEqual(executed, ["herdr pane list", "herdr tab list"])
 
-        let session = RemoteSession.target("w3:p9", kind: .herdr)
-        XCTAssertEqual(adapter.attach(session), "herdr agent attach w3:p9")
+        let session = RemoteSession(
+            id: "w3:p9",
+            name: "fix the build",
+            kind: .herdr,
+            terminalID: "term_65909b7e020c13")
+        XCTAssertEqual(adapter.paneProbeCommand(session), "herdr pane get w3:p9")
+        XCTAssertEqual(adapter.attach(session), "herdr terminal attach term_65909b7e020c13")
         XCTAssertEqual(adapter.kill(session), "herdr pane close w3:p9")
-        XCTAssertEqual(adapter.rename(session, to: "api 2"), "herdr agent rename w3:p9 'api 2'")
-        XCTAssertEqual(adapter.create(name: "api", directory: "/srv/a b"), "herdr tab create --cwd '/srv/a b' --label api --focus")
-        XCTAssertEqual(adapter.create(name: "api", directory: nil), "herdr tab create --label api --focus")
+        XCTAssertEqual(adapter.rename(session, to: "api 2"), "herdr pane rename w3:p9 'api 2'")
+        XCTAssertEqual(adapter.create(name: "api", directory: "/srv/a b"), "herdr workspace create --cwd '/srv/a b' --label api --focus")
+        XCTAssertEqual(adapter.create(name: "api", directory: nil), "herdr workspace create --label api --focus")
+        XCTAssertEqual(adapter.createDetached(name: "api", directory: nil), "herdr workspace create --label api --no-focus")
     }
 
     func testHerdrWithNoServerRunningIsAnEmptyListNotAnError() async throws {
@@ -320,10 +431,26 @@ final class MultiplexerAdapterTests: XCTestCase {
         }
     }
 
+    func testHerdrRejectsAnExitZeroPaneProbeErrorEnvelope() {
+        let json = #"{"error":{"code":"pane_not_found","message":"nope"},"id":"cli:pane:get"}"#
+
+        XCTAssertThrowsError(try HerdrAdapter().validatePaneProbeResponse(json, expectedPaneID: "w3:p9")) { error in
+            guard case MultiplexerError.malformedOutput(let kind, _) = error else {
+                return XCTFail("unexpected error \(error)")
+            }
+            XCTAssertEqual(kind, .herdr)
+        }
+    }
+
     func testHerdrFallsBackToTheAgentNameWhenThePaneHasNoTitle() throws {
-        let json = #"{"result":{"panes":[{"pane_id":"w1:p1","agent":"codex","terminal_title_stripped":"  "}]}}"#
+        let json = #"{"result":{"panes":[{"pane_id":"w1:p1","terminal_id":"term_1","agent":"codex","terminal_title_stripped":"  "}]}}"#
         let sessions = try HerdrAdapter().parseSessions(json)
         XCTAssertEqual(sessions.map(\.name), ["codex"])
+    }
+
+    func testHerdrRejectsAPaneListingWithoutATerminalID() {
+        let json = #"{"result":{"panes":[{"pane_id":"w1:p1","agent":"codex"}]}}"#
+        XCTAssertThrowsError(try HerdrAdapter().parseSessions(json))
     }
 
     func testHerdrTreatsAnAgentPaneAsItsOwnSingleWindow() async throws {
@@ -334,7 +461,38 @@ final class MultiplexerAdapterTests: XCTestCase {
         let windows = try await adapter.listWindows(session: claude, runner: runner)
         XCTAssertEqual(windows.map(\.id), ["w3:p9"])
         XCTAssertEqual(windows.first?.name, "修复Codex和Claude不可用的问题")
-        XCTAssertEqual(windows.first.map(adapter.focus(window:)), "herdr agent focus w3:p9")
+        XCTAssertEqual(windows.first?.terminalID, "term_65909b7e020c13")
+        XCTAssertEqual(
+            windows.first.map(adapter.focus(window:)),
+            "herdr terminal attach term_65909b7e020c13")
+    }
+
+    func testHerdrParsesTheAcknowledgedWorkspaceRootPaneReceipt() throws {
+        let response = #"{"id":"cli:workspace:create","result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1","terminal_id":"term_root_9"}}}"#
+
+        let session = try HerdrAdapter().parseCreatedSession(
+            response,
+            name: "api",
+            directory: "/srv/api")
+
+        XCTAssertEqual(session, RemoteSession(
+            id: "w9:p1",
+            name: "api",
+            kind: .herdr,
+            terminalID: "term_root_9",
+            isAttached: false,
+            isAlive: true,
+            windowCount: 1,
+            workingDirectory: "/srv/api"))
+    }
+
+    func testHerdrRejectsAWorkspaceReceiptWithoutATerminalID() {
+        let response = #"{"id":"cli:workspace:create","result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}"#
+
+        XCTAssertThrowsError(try HerdrAdapter().parseCreatedSession(
+            response,
+            name: "api",
+            directory: nil))
     }
 
     /// Verbatim `herdr pane list` output: one agent pane, and one bare shell created from the phone. A shell pane has

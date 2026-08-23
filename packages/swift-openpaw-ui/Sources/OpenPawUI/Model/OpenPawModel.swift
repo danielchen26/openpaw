@@ -21,6 +21,29 @@ public enum TailscaleDiscoveryState: Sendable, Hashable {
     public var candidates: [TailscaleDeviceCandidate] { if case .candidates(let items) = self { items } else { [] } }
 }
 
+/// Exact ownership of one selected-host connection attempt.
+///
+/// Host id alone is insufficient because a user can switch A → B → A, and connection generation alone does not name
+/// which concurrent connect request won. A route may commit only while all four fields still match the model.
+public struct HostConnectionLease: Sendable, Hashable {
+    public var hostID: HostRecord.ID
+    public var connectionGeneration: Int
+    public var hostSelectionToken: Int
+    public var requestID: Int
+
+    public init(
+        hostID: HostRecord.ID,
+        connectionGeneration: Int,
+        hostSelectionToken: Int,
+        requestID: Int
+    ) {
+        self.hostID = hostID
+        self.connectionGeneration = connectionGeneration
+        self.hostSelectionToken = hostSelectionToken
+        self.requestID = requestID
+    }
+}
+
 @MainActor
 @Observable
 public final class OpenPawModel {
@@ -112,6 +135,7 @@ public final class OpenPawModel {
     private var tailscaleAdminGeneration = 0
     private var connectionPreflightGeneration = 0
     private var hostSelectionGeneration = 0
+    private var connectionRequestID = 0
 
     private var eventTask: Task<Void, Never>?
     private var stateTask: Task<Void, Never>?
@@ -748,8 +772,11 @@ public final class OpenPawModel {
         if hostSelectionGeneration == selectionGeneration { isSwitchingHost = false }
     }
 
-    public func connectSelectedHost() async {
-        guard !isSwitchingHost, let terminal, let host = selectedHost else { return }
+    @discardableResult
+    public func connectSelectedHost() async -> HostConnectionLease? {
+        guard !isSwitchingHost, let terminal, let host = selectedHost else { return nil }
+        connectionRequestID += 1
+        let requestID = connectionRequestID
         stopFollowing()
         cancelTailscaleDiscovery()
         clearHostDerivedState()
@@ -765,7 +792,8 @@ public final class OpenPawModel {
         connection = .connecting
         do {
             try await terminal.connect(host: host)
-            guard selectedHostID == targetHostID else { return }
+            guard connectionRequestID == requestID,
+                  selectedHostID == targetHostID else { return nil }
             if !connection.isConnected {
                 await withCheckedContinuation { continuation in
                     if connection.isConnected {
@@ -775,12 +803,17 @@ public final class OpenPawModel {
                     }
                 }
             }
-            guard selectedHostID == targetHostID, connection.isConnected else { return }
+            guard connectionRequestID == requestID,
+                  selectedHostID == targetHostID,
+                  connection.isConnected else { return nil }
             if let lifecycle = backend as? any StructuredBackendLifecycle {
                 do {
-                    guard try await connectStructuredBackend(lifecycle, hostID: targetHostID) else { return }
+                    guard try await connectStructuredBackend(lifecycle, hostID: targetHostID) else { return nil }
                     structuredBackendReady = true
-                    guard selectedHostID == targetHostID, connection.isConnected, structuredBackendReady else { return }
+                    guard connectionRequestID == requestID,
+                          selectedHostID == targetHostID,
+                          connection.isConnected,
+                          structuredBackendReady else { return nil }
                     await refresh()
                     startFollowing(session: selectedSessionID)
                 } catch {
@@ -796,7 +829,33 @@ public final class OpenPawModel {
         } catch {
             structuredBackendReady = false
             present(error, while: "connecting to \(host.nickname)")
+            return nil
         }
+        return connectionLease(hostID: targetHostID, requestID: requestID)
+    }
+
+    public var currentConnectionLease: HostConnectionLease? {
+        guard let hostID = selectedHostID, connection.isConnected else { return nil }
+        return HostConnectionLease(
+            hostID: hostID,
+            connectionGeneration: connectionGeneration,
+            hostSelectionToken: hostSelectionGeneration,
+            requestID: connectionRequestID)
+    }
+
+    public func ownsConnection(_ lease: HostConnectionLease) -> Bool {
+        connectionLease(hostID: lease.hostID, requestID: lease.requestID) == lease
+    }
+
+    private func connectionLease(hostID: HostRecord.ID, requestID: Int) -> HostConnectionLease? {
+        guard connectionRequestID == requestID,
+              selectedHostID == hostID,
+              connection.isConnected else { return nil }
+        return HostConnectionLease(
+            hostID: hostID,
+            connectionGeneration: connectionGeneration,
+            hostSelectionToken: hostSelectionGeneration,
+            requestID: requestID)
     }
 
     /// Connects one structured lifecycle with explicit ownership.
@@ -877,6 +936,7 @@ public final class OpenPawModel {
     }
 
     public func disconnect() async {
+        connectionRequestID += 1
         stopFollowing()
         cancelTailscaleDiscovery()
         clearHostDerivedState()

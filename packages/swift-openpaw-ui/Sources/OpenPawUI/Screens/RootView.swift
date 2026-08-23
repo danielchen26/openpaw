@@ -153,6 +153,8 @@ public final class ShellRouter {
     public var approvalItemID: String?
     /// Session the compact layout has pushed a transcript for.
     public var sessionID: String?
+    /// Multiplexer session the Terminal destination is entering. Cleared at the host-generation boundary.
+    public var attachedMultiplexerSession: RemoteSession?
 
     @available(*, deprecated, renamed: "sessionID")
     public var chatSessionID: String? {
@@ -167,15 +169,91 @@ public final class ShellRouter {
         destination = .inbox
     }
 
+    public func perform(_ intent: SessionRootIntent, model: OpenPawModel) {
+        switch intent {
+        case .openSessionTranscript(let sessionID):
+            model.selectedSessionID = sessionID
+            self.sessionID = sessionID
+            destination = .sessions
+        case .openTerminalSession:
+            sessionID = nil
+            attachedMultiplexerSession = nil
+            destination = .terminal
+        case .attachSession(let session):
+            sessionID = nil
+            attachedMultiplexerSession = session
+            destination = .terminal
+        case .resumeWorkspace(let resume):
+            switch resume {
+            case .agentSession(let sessionID):
+                perform(.openSessionTranscript(sessionID), model: model)
+            case .repository(let repository):
+                model.selectedRepo = repository
+                destination = .repo
+            case .terminal:
+                perform(.openTerminalSession, model: model)
+            }
+        }
+    }
+
     /// Clears navigation that names resources owned by one host while leaving the user's root tab in place.
     /// Future Preview and provider/import routes must join this one reset point rather than inventing another host
     /// generation boundary.
     public func invalidateHostScopedState() {
         sessionID = nil
+        invalidateConnectionScopedState()
         approvalItemID = nil
         repoPane = .diff
         repoFocusPath = nil
         diffMode = .workingTree
+    }
+
+    /// Clears routes owned by one terminal connection even when the selected host id did not change.
+    public func invalidateConnectionScopedState() {
+        attachedMultiplexerSession = nil
+    }
+}
+
+public enum SessionRootIntent: Sendable, Hashable {
+    case openSessionTranscript(String)
+    case openTerminalSession
+    case attachSession(RemoteSession)
+    case resumeWorkspace(WorkspaceResumeIntent)
+}
+
+public struct HomeResumeResolution: Sendable, Hashable {
+    public var intent: WorkspaceResumeIntent
+    public var connection: HostConnectionLease
+
+    public init(intent: WorkspaceResumeIntent, connection: HostConnectionLease) {
+        self.intent = intent
+        self.connection = connection
+    }
+}
+
+/// Resolves a Home card into its original intent only after the requested host owns a live connection.
+///
+/// Returning the intent instead of mutating the router keeps the host check and the route separate: callers can perform
+/// one final ownership check immediately before navigation, while tests can suspend connection and prove stale cards do
+/// not redirect a newer host.
+@MainActor
+public enum HomeResumeCoordinator {
+    public static func resolve(
+        host: HostRecord,
+        intent: WorkspaceResumeIntent,
+        model: OpenPawModel
+    ) async -> HomeResumeResolution? {
+        let alreadyReady = model.selectedHostID == host.id && model.connection.isConnected
+        if model.selectedHostID != host.id { await model.selectHost(host.id) }
+        guard model.selectedHostID == host.id else { return nil }
+        let connection: HostConnectionLease?
+        if alreadyReady {
+            connection = model.currentConnectionLease
+        } else {
+            connection = await model.connectSelectedHost()
+        }
+        guard let connection, model.ownsConnection(connection) else { return nil }
+        return HomeResumeResolution(intent: intent, connection: connection)
     }
 }
 
@@ -299,6 +377,7 @@ public struct RootView: View {
             }
         }
         .onChange(of: model.connectionGeneration) { _, _ in
+            router.invalidateConnectionScopedState()
             invalidateSessionSpace()
             Task { await refreshSessionSpace() }
         }
@@ -774,41 +853,31 @@ public struct RootView: View {
     }
 
     private func openHomeDevice(_ host: HostRecord, intent: WorkspaceResumeIntent) {
-        let canResumeSelectedHost = host.id == model.selectedHostID && model.connection.isConnected
-        model.selectedHostID = host.id
-        if canResumeSelectedHost {
-            routeHomeIntent(intent)
-        } else {
-            Task {
-                await model.connectSelectedHost()
-                if model.connection.isConnected {
-                    settings.recordConnection(to: host.id)
-                    router.destination = .terminal
-                }
-            }
+        Task {
+            guard let resolution = await HomeResumeCoordinator.resolve(
+                host: host,
+                intent: intent,
+                model: model),
+                model.ownsConnection(resolution.connection) else { return }
+            settings.recordConnection(to: host.id)
+            routeHomeIntent(resolution.intent)
         }
     }
 
     private func routeHomeIntent(_ intent: WorkspaceResumeIntent) {
-        switch intent {
-        case .agentSession(let sessionID):
-            openHomeAgent(sessionID)
-        case .repository(let repo):
-            openHomeRepository(repo)
-        case .terminal:
-            router.destination = .terminal
+        router.perform(.resumeWorkspace(intent), model: model)
+        if case .agentSession(let sessionID) = intent {
+            model.startFollowing(session: sessionID)
         }
     }
 
     private func openHomeAgent(_ sessionID: String) {
-        model.selectedSessionID = sessionID
-        router.sessionID = sessionID
-        router.destination = .sessions
+        router.perform(.openSessionTranscript(sessionID), model: model)
+        model.startFollowing(session: sessionID)
     }
 
     private func openHomeRepository(_ repo: String) {
-        model.selectedRepo = repo
-        router.destination = .repo
+        router.perform(.resumeWorkspace(.repository(repo)), model: model)
     }
 
     @ViewBuilder
@@ -904,17 +973,43 @@ public struct RootView: View {
         sessionSpace = SessionSpaceSnapshot(hostID: model.selectedHostID, connectionGeneration: model.connectionGeneration)
     }
 
-    private func runSessionCommand(_ command: String, refreshAfterCommand: Bool) {
+    private func runSessionAction(_ action: SessionSpaceActionPlan) {
+        do {
+            _ = try action.command.rendered()
+        } catch {
+            model.lastError = PresentedError(
+                title: "Session command rejected",
+                detail: "The session identifier is invalid. Refresh sessions and try again.",
+                isRecoverable: true)
+            return
+        }
+        guard let hostID = model.selectedHostID else { return }
+        let generation = model.connectionGeneration
         Task {
             do {
-                guard sessionSpace.hostID == model.selectedHostID,
-                      sessionSpace.connectionGeneration == model.connectionGeneration,
-                      model.connection.isConnected else {
-                    throw SessionSpaceActionError.unavailable
-                }
-                try await sessionCommandExecutor.executeSessionCommand(command)
-                if refreshAfterCommand { await refreshSessionSpace() }
+                let intent = try await SessionSpaceActionCoordinator.run(
+                    action,
+                    expectedHostID: hostID,
+                    expectedGeneration: generation,
+                    context: {
+                        SessionSpaceActionContext(
+                            snapshot: sessionSpace,
+                            hostID: model.selectedHostID,
+                            connectionGeneration: model.connectionGeneration,
+                            isConnected: model.connection.isConnected)
+                    },
+                    executor: sessionCommandExecutor,
+                    restorationStore: restorationStore,
+                    refresh: refreshSessionSpace)
+                guard let intent,
+                      model.selectedHostID == hostID,
+                      model.connectionGeneration == generation,
+                      model.connection.isConnected else { return }
+                router.perform(intent, model: model)
             } catch {
+                guard model.selectedHostID == hostID,
+                      model.connectionGeneration == generation,
+                      model.connection.isConnected else { return }
                 model.lastError = PresentedError(title: "Session command failed", detail: safeSessionActionMessage(error), isRecoverable: true)
             }
         }
@@ -931,28 +1026,36 @@ public struct RootView: View {
     private func attachSession(_ session: RemoteSession) {
         guard canUseCurrentSessionSpace() else { return }
         guard session.isAlive else { presentUnavailableSessionAction(); return }
-        recordAttachRestorationPlan(session)
-        runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).attach(session), refreshAfterCommand: false)
-        router.destination = .terminal
+        guard let hostID = model.selectedHostID,
+              let action = SessionSpaceActionPlan.attach(hostID: hostID, session: session) else {
+            presentUnavailableSessionAction()
+            return
+        }
+        runSessionAction(action)
     }
 
     private func createSession(_ name: String) {
         guard canUseCurrentSessionSpace() else { return }
-        let adapter = MultiplexerAdapters.adapter(for: sessionSpace.multiplexerForNewSessions)
-        runSessionCommand(adapter.create(name: name, directory: nil), refreshAfterCommand: false)
-        router.destination = .terminal
+        guard let hostID = model.selectedHostID,
+              let action = SessionSpaceActionPlan.create(
+                hostID: hostID,
+                kind: sessionSpace.multiplexerForNewSessions,
+                name: name) else {
+            presentUnavailableSessionAction()
+            return
+        }
+        runSessionAction(action)
     }
 
     private func renameSession(_ session: RemoteSession, to name: String) {
         guard canUseCurrentSessionSpace() else { return }
         guard session.isAlive else { presentUnavailableSessionAction(); return }
-        runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).rename(session, to: name), refreshAfterCommand: true)
+        runSessionAction(.rename(session: session, to: name))
     }
 
     private func killSession(_ session: RemoteSession) {
         guard canUseCurrentSessionSpace() else { return }
-        clearRestorationPlan(ifMatches: session)
-        runSessionCommand(MultiplexerAdapters.adapter(for: session.kind).kill(session), refreshAfterCommand: true)
+        runSessionAction(.kill(session: session))
     }
 
     private func restoreSession(_ plan: SessionRestorationPlan) {
@@ -960,42 +1063,14 @@ public struct RootView: View {
               sessionSpace.hostID == model.selectedHostID,
               sessionSpace.connectionGeneration == model.connectionGeneration,
               canUseCurrentSessionSpace() else { return }
-        let command: String?
-        if let kind = plan.multiplexer,
-           let target = plan.multiplexerTarget,
-           !sessionSpace.remoteSessions.contains(where: { $0.kind == kind && $0.id == target && $0.isAlive }) {
-            command = MultiplexerAdapters.adapter(for: kind).create(name: "openpaw", directory: plan.workingDirectory)
-        } else {
-            command = plan.restorationCommand()
+        guard let action = SessionSpaceActionPlan.restore(
+            plan,
+            remoteSessions: sessionSpace.remoteSessions) else {
+            presentUnavailableSessionAction()
+            return
         }
-        guard let command else { presentUnavailableSessionAction(); return }
-        runSessionCommand(command, refreshAfterCommand: false)
-        router.destination = .terminal
+        runSessionAction(action)
     }
-
-    private func recordAttachRestorationPlan(_ session: RemoteSession) {
-        guard let hostID = model.selectedHostID, sessionSpace.hostID == hostID else { return }
-        if let plan = SessionRestorationRecorder().planForAttach(hostID: hostID, session: session) {
-            Task { await restorationStore?.save(plan) }
-        }
-    }
-
-    private func recordCreateRestorationPlan(kind: MultiplexerKind, name: String) {
-        guard let hostID = model.selectedHostID, sessionSpace.hostID == hostID else { return }
-        if let plan = SessionRestorationRecorder().planForCreate(hostID: hostID, kind: kind, name: name) {
-            Task { await restorationStore?.save(plan) }
-        }
-    }
-
-    private func clearRestorationPlan(ifMatches session: RemoteSession) {
-        guard let hostID = model.selectedHostID, sessionSpace.hostID == hostID else { return }
-        Task {
-            guard let plan = await restorationStore?.loadPlan(for: hostID), plan.multiplexer == session.kind, plan.multiplexerTarget == session.id else { return }
-            await restorationStore?.clearPlan(for: hostID)
-        }
-    }
-
-    private enum SessionSpaceActionError: Error { case unavailable }
 
     private func presentUnavailableSessionAction() {
         model.lastError = PresentedError(title: "Session action unavailable", detail: "Refresh sessions and try again.", isRecoverable: true)
@@ -1207,9 +1282,8 @@ public struct RootView: View {
     }
 
     private func selectSession(_ session: SessionSummary) {
-        model.selectedSessionID = session.sessionID
+        router.perform(.openSessionTranscript(session.sessionID), model: model)
         model.startFollowing(session: session.sessionID)
-        router.sessionID = session.sessionID
     }
 
     /// Feeds the scrollback store from the PTY so search and copy work whichever surface the app injected. The

@@ -17,10 +17,10 @@ import Testing
 @Suite("SSHCommandRunner composed with OpenPawTerminalCore's multiplexer adapters")
 struct SSHCommandRunnerTests {
 
-    /// tmux output in the exact format `TmuxAdapter` asks for: fields joined by 0x1F.
+    /// Parser-compatible tmux output joined by the same printable delimiter as `TmuxAdapter`.
     ///
-    /// Building it from `Multiplexer.fieldSeparator` rather than a literal keeps this honest — if
-    /// the adapter changed separators, this fixture would follow rather than silently disagree.
+    /// Dedicated adapter tests cover tmux's q-escaped wire form. This cross-package fixture focuses on transporting
+    /// representative output over a real SSH exec channel.
     private static func tmuxSessionLine(
         id: String,
         name: String,
@@ -87,7 +87,7 @@ struct SSHCommandRunnerTests {
 
         let second = try #require(sessions.last)
         #expect(second.id == "$1")
-        // A name containing a space is exactly why the adapter uses 0x1F instead of whitespace.
+        // A name containing a space verifies that parsing is delimiter-based rather than whitespace-based.
         #expect(second.name == "scratch pad")
         #expect(!second.isAttached)
         #expect(second.windowCount == 1)

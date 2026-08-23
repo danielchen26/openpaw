@@ -202,6 +202,125 @@ public struct SessionSpaceActionPolicy: Sendable, Hashable {
     }
 }
 
+public enum SessionRestorationMutation: Sendable, Hashable {
+    case save(SessionRestorationPlan)
+    case clearMatching(kind: MultiplexerKind, target: String)
+}
+
+/// Everything a session-row action is allowed to do after the snapshot/host generation checks pass.
+///
+/// Restoration changes are explicitly success-only. A failed create must not leave a plan for a session that never
+/// existed, and a failed kill must not discard the only recovery information the user still has.
+public struct SessionSpaceActionPlan: Sendable, Hashable {
+    public var command: MultiplexerCommand
+    public var refreshAfterCommand: Bool
+    public var navigation: SessionSpaceNavigationPolicy
+    public var restorationOnSuccess: SessionRestorationMutation?
+    public var capturedAt: Date
+
+    public init(
+        command: MultiplexerCommand,
+        refreshAfterCommand: Bool,
+        navigation: SessionSpaceNavigationPolicy,
+        restorationOnSuccess: SessionRestorationMutation? = nil,
+        capturedAt: Date = Date()
+    ) {
+        self.command = command
+        self.refreshAfterCommand = refreshAfterCommand
+        self.navigation = navigation
+        self.restorationOnSuccess = restorationOnSuccess
+        self.capturedAt = capturedAt
+    }
+
+    public static func attach(
+        hostID: HostID,
+        session: RemoteSession,
+        capturedAt: Date = Date()
+    ) -> SessionSpaceActionPlan? {
+        guard let restoration = SessionRestorationRecorder().planForAttach(
+            hostID: hostID,
+            session: session,
+            capturedAt: capturedAt) else { return nil }
+        return SessionSpaceActionPlan(
+            command: .attach(session),
+            refreshAfterCommand: false,
+            navigation: .opensTerminal,
+            restorationOnSuccess: .save(restoration),
+            capturedAt: capturedAt)
+    }
+
+    public static func create(
+        hostID: HostID,
+        kind: MultiplexerKind,
+        name: String,
+        directory: String? = nil,
+        capturedAt: Date = Date()
+    ) -> SessionSpaceActionPlan? {
+        guard let restoration = SessionRestorationRecorder().planForCreate(
+            hostID: hostID,
+            kind: kind,
+            name: name,
+            directory: directory,
+            capturedAt: capturedAt) else { return nil }
+        return SessionSpaceActionPlan(
+            command: .create(kind: kind, name: name, directory: directory),
+            refreshAfterCommand: true,
+            navigation: .opensTerminal,
+            restorationOnSuccess: .save(restoration),
+            capturedAt: capturedAt)
+    }
+
+    public static func rename(session: RemoteSession, to name: String) -> SessionSpaceActionPlan {
+        SessionSpaceActionPlan(
+            command: .rename(session, to: name),
+            refreshAfterCommand: true,
+            navigation: .staysInList)
+    }
+
+    public static func kill(session: RemoteSession) -> SessionSpaceActionPlan {
+        SessionSpaceActionPlan(
+            command: .kill(session),
+            refreshAfterCommand: true,
+            navigation: .staysInList,
+            restorationOnSuccess: .clearMatching(kind: session.kind, target: session.id))
+    }
+
+    public static func restore(
+        _ restoration: SessionRestorationPlan,
+        remoteSessions: [RemoteSession],
+        capturedAt: Date = Date()
+    ) -> SessionSpaceActionPlan? {
+        if let kind = restoration.multiplexer,
+           let target = restoration.multiplexerTarget,
+           (!restoration.isReattachable
+            || !remoteSessions.contains(where: { $0.kind == kind && $0.id == target && $0.isAlive })) {
+            let replacementName = restoration.newSessionName
+            let replacement = SessionRestorationPlan(
+                hostID: restoration.hostID,
+                multiplexer: kind,
+                multiplexerTarget: replacementName,
+                workingDirectory: restoration.workingDirectory,
+                agentSessionID: restoration.agentSessionID,
+                capturedAt: capturedAt)
+            return SessionSpaceActionPlan(
+                command: .create(
+                    kind: kind,
+                    name: replacementName,
+                    directory: restoration.workingDirectory),
+                refreshAfterCommand: false,
+                navigation: .opensTerminal,
+                restorationOnSuccess: .save(replacement),
+                capturedAt: capturedAt)
+        }
+        guard let command = restoration.command() else { return nil }
+        return SessionSpaceActionPlan(
+            command: command,
+            refreshAfterCommand: false,
+            navigation: .opensTerminal,
+            capturedAt: capturedAt)
+    }
+}
+
 @MainActor
 public protocol SessionSpaceProviding: AnyObject {
     func snapshot(for model: OpenPawModel) async -> SessionSpaceSnapshot
@@ -256,8 +375,19 @@ public final class LiveMultiplexerSessionSpaceProvider: SessionSpaceProviding {
 @MainActor
 public protocol SessionRestorationStoring: AnyObject {
     func loadPlan(for hostID: HostID) async -> SessionRestorationPlan?
-    func save(_ plan: SessionRestorationPlan) async
-    func clearPlan(for hostID: HostID) async
+    /// Applies one success-only mutation after rechecking ownership inside the store's MainActor transaction.
+    /// Implementations may suspend before the check, but must not suspend between a `true` check and persistence.
+    func apply(
+        _ mutation: SessionRestorationMutation,
+        expectedHostID: HostID,
+        ifCurrent: @escaping @MainActor () -> Bool
+    ) async -> Bool
+}
+
+public extension SessionRestorationStoring {
+    func save(_ plan: SessionRestorationPlan) async {
+        _ = await apply(.save(plan), expectedHostID: plan.hostID, ifCurrent: { true })
+    }
 }
 
 public final class LocalSessionRestorationStore: SessionRestorationStoring {
@@ -283,18 +413,29 @@ public final class LocalSessionRestorationStore: SessionRestorationStoring {
         loadIfNeeded()[hostID]
     }
 
-    public func save(_ plan: SessionRestorationPlan) async {
+    public func apply(
+        _ mutation: SessionRestorationMutation,
+        expectedHostID: HostID,
+        ifCurrent: @escaping @MainActor () -> Bool
+    ) async -> Bool {
+        guard ifCurrent() else { return false }
         var current = loadIfNeeded()
-        current[plan.hostID] = plan
-        plans = bounded(current)
-        persist()
-    }
-
-    public func clearPlan(for hostID: HostID) async {
-        var current = loadIfNeeded()
-        current.removeValue(forKey: hostID)
-        plans = current
-        persist()
+        switch mutation {
+        case .save(let plan):
+            guard plan.hostID == expectedHostID else { return false }
+            current[expectedHostID] = plan
+            plans = bounded(current)
+            persist()
+        case .clearMatching(let kind, let target):
+            if let plan = current[expectedHostID],
+               plan.multiplexer == kind,
+               plan.multiplexerTarget == target {
+                current.removeValue(forKey: expectedHostID)
+                plans = current
+                persist()
+            }
+        }
+        return true
     }
 
     private func loadIfNeeded() -> [HostID: SessionRestorationPlan] {
@@ -330,12 +471,232 @@ public final class LocalSessionRestorationStore: SessionRestorationStoring {
 
 @MainActor
 public protocol SessionSpaceCommandExecuting: AnyObject {
-    func executeSessionCommand(_ command: String) async throws
+    func executeSessionCommand(_ command: MultiplexerCommand) async throws -> SessionCommandAcknowledgement
+}
+
+public struct SessionCommandAcknowledgement: Sendable, Hashable {
+    /// The exact remote handle discovered before attach or after acknowledged background creation.
+    public var session: RemoteSession?
+
+    public init(session: RemoteSession? = nil) {
+        self.session = session
+    }
 }
 
 public final class EmptySessionSpaceCommandExecutor: SessionSpaceCommandExecuting {
     public init() {}
-    public func executeSessionCommand(_ command: String) async throws {}
+    public func executeSessionCommand(_ command: MultiplexerCommand) async throws -> SessionCommandAcknowledgement {
+        SessionCommandAcknowledgement()
+    }
+}
+
+/// The complete host ownership state used before and after every suspension in a session action.
+///
+/// Keeping the snapshot in this value matters: a host can reconnect without changing its id, and rows discovered by
+/// the previous connection must not execute against the new terminal merely because the selected host still matches.
+public struct SessionSpaceActionContext: Sendable, Hashable {
+    public var snapshot: SessionSpaceSnapshot
+    public var hostID: HostID?
+    public var connectionGeneration: Int
+    public var isConnected: Bool
+
+    public init(
+        snapshot: SessionSpaceSnapshot,
+        hostID: HostID?,
+        connectionGeneration: Int,
+        isConnected: Bool
+    ) {
+        self.snapshot = snapshot
+        self.hostID = hostID
+        self.connectionGeneration = connectionGeneration
+        self.isConnected = isConnected
+    }
+
+    public func owns(hostID expectedHostID: HostID, generation expectedGeneration: Int) -> Bool {
+        isConnected
+            && hostID == expectedHostID
+            && connectionGeneration == expectedGeneration
+            && snapshot.hostID == expectedHostID
+            && snapshot.connectionGeneration == expectedGeneration
+    }
+}
+
+/// Executes one typed session action as a success-only transaction.
+///
+/// The caller supplies live ownership state instead of a captured Boolean so every await boundary is checked. Routing
+/// is returned only after the remote command, optional refresh, and restoration mutation complete while the same host
+/// generation still owns the action. A stale action therefore cannot navigate a newer connection or write its recovery
+/// state into the visible workflow.
+@MainActor
+public enum SessionSpaceActionCoordinator {
+    public static func run(
+        _ action: SessionSpaceActionPlan,
+        expectedHostID: HostID,
+        expectedGeneration: Int,
+        context: @escaping @MainActor () -> SessionSpaceActionContext,
+        executor: any SessionSpaceCommandExecuting,
+        restorationStore: (any SessionRestorationStoring)? = nil,
+        refresh: @escaping @MainActor () async -> Void = {}
+    ) async throws -> SessionRootIntent? {
+        _ = try action.command.rendered()
+        let stillOwnsAction: @MainActor @Sendable () -> Bool = {
+            context().owns(hostID: expectedHostID, generation: expectedGeneration)
+        }
+        guard stillOwnsAction() else { return nil }
+
+        let acknowledgement: SessionCommandAcknowledgement
+        do {
+            acknowledgement = try await executor.executeSessionCommand(action.command)
+        } catch {
+            guard stillOwnsAction() else { return nil }
+            throw error
+        }
+        guard stillOwnsAction() else { return nil }
+
+        if let restorationStore, let mutation = resolvedRestorationMutation(
+            action.restorationOnSuccess,
+            acknowledgement: acknowledgement) {
+            let committed = await restorationStore.apply(
+                mutation,
+                expectedHostID: expectedHostID,
+                ifCurrent: stillOwnsAction)
+            guard committed else { return nil }
+        }
+
+        if action.refreshAfterCommand {
+            await refresh()
+            guard stillOwnsAction() else { return nil }
+        }
+        guard stillOwnsAction() else { return nil }
+        return rootIntent(for: action, acknowledgement: acknowledgement)
+    }
+
+    private static func resolvedRestorationMutation(
+        _ mutation: SessionRestorationMutation?,
+        acknowledgement: SessionCommandAcknowledgement
+    ) -> SessionRestorationMutation? {
+        guard case .save(var plan) = mutation, let session = acknowledgement.session else { return mutation }
+        guard plan.multiplexer == session.kind else { return mutation }
+        plan.multiplexerTarget = session.id
+        plan.multiplexerAttachmentTarget = session.terminalID
+        if plan.workingDirectory == nil { plan.workingDirectory = session.workingDirectory }
+        return .save(plan)
+    }
+
+    private static func rootIntent(
+        for action: SessionSpaceActionPlan,
+        acknowledgement: SessionCommandAcknowledgement
+    ) -> SessionRootIntent? {
+        guard action.navigation == .opensTerminal else { return nil }
+        return switch action.command {
+        case .attach(let session): .attachSession(acknowledgement.session ?? session)
+        case .create(let kind, let name, _): .attachSession(acknowledgement.session ?? .target(name, kind: kind))
+        case .focus, .kill, .rename, .changeDirectory: .openTerminalSession
+        }
+    }
+}
+
+/// Executes only typed session operations. Commands that can complete outside the interactive display use the SSH
+/// command channel so success means the remote process exited successfully. Attach/create/focus operations stay in the
+/// live PTY because their purpose is to move the user's visible terminal into that session.
+public final class TerminalSessionCommandExecutor: SessionSpaceCommandExecuting {
+    private struct TerminalRunner: CommandRunner {
+        let terminal: any TerminalBackend
+        func run(_ command: String) async throws -> String {
+            try await terminal.run(command: command)
+        }
+    }
+
+    private let terminal: any TerminalBackend
+    private let runner: any CommandRunner
+
+    public init(terminal: any TerminalBackend) {
+        self.terminal = terminal
+        self.runner = TerminalRunner(terminal: terminal)
+    }
+
+    public init(terminal: any TerminalBackend, runner: any CommandRunner) {
+        self.terminal = terminal
+        self.runner = runner
+    }
+
+    public func executeSessionCommand(_ command: MultiplexerCommand) async throws -> SessionCommandAcknowledgement {
+        let rendered = try command.rendered()
+        switch command {
+        case .kill, .rename:
+            _ = try await runner.run(rendered)
+            return SessionCommandAcknowledgement()
+        case .focus(let kind, let window):
+            if kind == .herdr {
+                let requested = RemoteSession.target(window.sessionID, kind: .herdr)
+                let adapter = HerdrAdapter()
+                let output = try await runner.run(adapter.paneProbeCommand(requested))
+                try adapter.validatePaneProbeResponse(output, expectedPaneID: requested.id)
+                try await terminal.send(text: rendered + "\n")
+                return SessionCommandAcknowledgement(session: requested)
+            }
+            _ = try await runner.run(rendered)
+            return SessionCommandAcknowledgement()
+        case .attach(let requested):
+            let session = try await acknowledgedSession(matching: requested)
+            let attach = MultiplexerAdapters.adapter(for: session.kind).attach(session)
+            try await terminal.send(text: attach + "\n")
+            return SessionCommandAcknowledgement(session: session)
+        case .create(let kind, let name, let directory):
+            let adapter = MultiplexerAdapters.adapter(for: kind)
+            let output = try await runner.run(adapter.createDetached(name: name, directory: directory))
+            let session = if kind == .herdr {
+                try HerdrAdapter().parseCreatedSession(output, name: name, directory: directory)
+            } else {
+                try await acknowledgedCreatedSession(kind: kind, name: name)
+            }
+            try await terminal.send(text: adapter.attach(session) + "\n")
+            return SessionCommandAcknowledgement(session: session)
+        case .changeDirectory(let directory):
+            _ = try await runner.run("test -d \(shellQuoted(directory))")
+            try await terminal.send(text: rendered + "\n")
+            return SessionCommandAcknowledgement()
+        }
+    }
+
+    private func acknowledgedSession(matching requested: RemoteSession) async throws -> RemoteSession {
+        if requested.kind == .herdr {
+            let adapter = HerdrAdapter()
+            let output = try await runner.run(adapter.paneProbeCommand(requested))
+            try adapter.validatePaneProbeResponse(output, expectedPaneID: requested.id)
+            return requested
+        }
+        let sessions = try await MultiplexerAdapters.adapter(for: requested.kind)
+            .discoverSessions(runner: runner)
+        guard let session = sessions.first(where: { candidate in
+            candidate.isAlive && Self.matches(candidate, target: requested.id)
+        }) else {
+            throw SessionSpaceCommandExecutionError.sessionUnavailable(
+                kind: requested.kind,
+                target: requested.id)
+        }
+        return session
+    }
+
+    private func acknowledgedCreatedSession(kind: MultiplexerKind, name: String) async throws -> RemoteSession {
+        let sessions = try await MultiplexerAdapters.adapter(for: kind)
+            .discoverSessions(runner: runner)
+        guard let session = sessions.first(where: { candidate in
+            candidate.isAlive && Self.matches(candidate, target: name)
+        }) else {
+            throw SessionSpaceCommandExecutionError.creationNotAcknowledged(kind: kind, name: name)
+        }
+        return session
+    }
+
+    private static func matches(_ session: RemoteSession, target: String) -> Bool {
+        session.id == target || session.name == target || session.id.hasSuffix(".\(target)")
+    }
+}
+
+public enum SessionSpaceCommandExecutionError: Error, Sendable, Hashable {
+    case sessionUnavailable(kind: MultiplexerKind, target: String)
+    case creationNotAcknowledged(kind: MultiplexerKind, name: String)
 }
 
 public struct SessionRestorationRecorder: Sendable {
@@ -347,13 +708,25 @@ public struct SessionRestorationRecorder: Sendable {
             hostID: hostID,
             multiplexer: session.kind,
             multiplexerTarget: session.id,
+            multiplexerAttachmentTarget: session.terminalID,
             workingDirectory: session.workingDirectory,
             capturedAt: capturedAt)
     }
 
-    public func planForCreate(hostID: HostID, kind: MultiplexerKind, name: String, capturedAt: Date = Date()) -> SessionRestorationPlan? {
+    public func planForCreate(
+        hostID: HostID,
+        kind: MultiplexerKind,
+        name: String,
+        directory: String? = nil,
+        capturedAt: Date = Date()
+    ) -> SessionRestorationPlan? {
         guard !name.isEmpty else { return nil }
-        return SessionRestorationPlan(hostID: hostID, multiplexer: kind, multiplexerTarget: name, capturedAt: capturedAt)
+        return SessionRestorationPlan(
+            hostID: hostID,
+            multiplexer: kind,
+            multiplexerTarget: name,
+            workingDirectory: directory,
+            capturedAt: capturedAt)
     }
 
     public func bareShellPlanIfAppropriate(hostID: HostID, remoteDirectory: String, existingPlan: SessionRestorationPlan?, capturedAt: Date = Date()) -> SessionRestorationPlan? {

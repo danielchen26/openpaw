@@ -10,6 +10,7 @@ final class SessionRestorationTests: XCTestCase {
     private func plan(
         multiplexer: MultiplexerKind? = .tmux,
         target: String? = "agent main",
+        attachmentTarget: String? = nil,
         directory: String? = "/Users/dev/openpaw",
         agentSessionID: String? = "sess_cc-openpaw"
     ) -> SessionRestorationPlan {
@@ -17,6 +18,7 @@ final class SessionRestorationTests: XCTestCase {
             hostID: hostID,
             multiplexer: multiplexer,
             multiplexerTarget: target,
+            multiplexerAttachmentTarget: attachmentTarget,
             workingDirectory: directory,
             agentSessionID: agentSessionID,
             capturedAt: capturedAt)
@@ -37,8 +39,13 @@ final class SessionRestorationTests: XCTestCase {
             plan(multiplexer: .screen, target: "31183.agent-main").commands(),
             ["screen -x 31183.agent-main"])
         XCTAssertEqual(
-            plan(multiplexer: .herdr, target: "hd_01").commands(),
-            ["herdr agent attach hd_01"])
+            plan(
+                multiplexer: .herdr,
+                target: "w3:p9",
+                attachmentTarget: "term_65909b7e020c13").commands(),
+            ["herdr terminal attach term_65909b7e020c13"])
+        XCTAssertFalse(plan(multiplexer: .herdr, target: "w3:p9").isReattachable)
+        XCTAssertNil(plan(multiplexer: .herdr, target: "w3:p9").command())
     }
 
     func testCreatesASessionWhenThereIsNoTarget() {
@@ -61,6 +68,19 @@ final class SessionRestorationTests: XCTestCase {
             plan(multiplexer: nil, target: nil, directory: "/srv/a b").commands(),
             ["cd '/srv/a b'"])
         XCTAssertTrue(plan(multiplexer: nil, target: nil, directory: nil).commands().isEmpty)
+    }
+
+    func testRestorationExposesOneTypedCommandInsteadOfAnArbitraryShellString() throws {
+        XCTAssertEqual(
+            try plan().command()?.rendered(),
+            "tmux attach-session -t 'agent main'")
+        XCTAssertEqual(
+            try plan(target: nil, directory: "/srv/api rocks").command()?.rendered(),
+            "tmux new-session -A -s api-rocks -c '/srv/api rocks'")
+        XCTAssertEqual(
+            try plan(multiplexer: nil, target: nil, directory: "/srv/api rocks").command()?.rendered(),
+            "cd '/srv/api rocks'")
+        XCTAssertNil(plan(multiplexer: nil, target: nil, directory: nil).command())
     }
 
     func testPlanCodesWithSnakeCaseKeys() throws {

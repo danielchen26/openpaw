@@ -8,6 +8,8 @@ public struct SessionRestorationPlan: Sendable, Hashable, Codable {
     public var multiplexer: MultiplexerKind?
     /// The multiplexer session handle to reattach to.
     public var multiplexerTarget: String?
+    /// Herdr's terminal transport handle. Its pane handle remains in ``multiplexerTarget`` for management and probing.
+    public var multiplexerAttachmentTarget: String?
     public var workingDirectory: String?
     /// The agent session the transcript was showing, so the UI can reopen it.
     public var agentSessionID: String?
@@ -17,6 +19,7 @@ public struct SessionRestorationPlan: Sendable, Hashable, Codable {
         hostID: HostID,
         multiplexer: MultiplexerKind? = nil,
         multiplexerTarget: String? = nil,
+        multiplexerAttachmentTarget: String? = nil,
         workingDirectory: String? = nil,
         agentSessionID: String? = nil,
         capturedAt: Date
@@ -24,6 +27,7 @@ public struct SessionRestorationPlan: Sendable, Hashable, Codable {
         self.hostID = hostID
         self.multiplexer = multiplexer
         self.multiplexerTarget = multiplexerTarget
+        self.multiplexerAttachmentTarget = multiplexerAttachmentTarget
         self.workingDirectory = workingDirectory
         self.agentSessionID = agentSessionID
         self.capturedAt = capturedAt
@@ -31,25 +35,36 @@ public struct SessionRestorationPlan: Sendable, Hashable, Codable {
 
     /// True when there is a multiplexer session to reattach to.
     public var isReattachable: Bool {
-        multiplexer != nil && !(multiplexerTarget ?? "").isEmpty
+        guard let multiplexer, !(multiplexerTarget ?? "").isEmpty else { return false }
+        return multiplexer != .herdr || !(multiplexerAttachmentTarget ?? "").isEmpty
+    }
+
+    /// The typed operation to send through a fresh PTY to land back where the user left off.
+    public func command() -> MultiplexerCommand? {
+        guard let multiplexer else {
+            guard let directory = workingDirectory, !directory.isEmpty else { return nil }
+            return .changeDirectory(directory)
+        }
+        if let target = multiplexerTarget, !target.isEmpty {
+            guard isReattachable else { return nil }
+            return .attach(RemoteSession(
+                id: target,
+                name: target,
+                kind: multiplexer,
+                terminalID: multiplexerAttachmentTarget))
+        }
+        return .create(kind: multiplexer, name: newSessionName, directory: workingDirectory)
     }
 
     /// The exact command sequence to type into a fresh PTY to land back where
-    /// the user left off.
+    /// the user left off. Retained for compatibility with older callers; new execution paths use ``command()``.
     ///
     /// Reattaching restores the multiplexer session's own working directory, so
     /// no `cd` is emitted in that case; creating one applies the captured
     /// directory instead.
     public func commands() -> [String] {
-        guard let multiplexer else {
-            guard let directory = workingDirectory, !directory.isEmpty else { return [] }
-            return ["cd \(shellQuoted(directory))"]
-        }
-        let adapter = MultiplexerAdapters.adapter(for: multiplexer)
-        if let target = multiplexerTarget, !target.isEmpty {
-            return [adapter.attach(.target(target, kind: multiplexer))]
-        }
-        return [adapter.create(name: newSessionName, directory: workingDirectory)]
+        guard let command = command(), let rendered = try? command.rendered() else { return [] }
+        return [rendered]
     }
 
     public func restorationCommand() -> String? {
@@ -73,6 +88,7 @@ public struct SessionRestorationPlan: Sendable, Hashable, Codable {
         case hostID = "host_id"
         case multiplexer
         case multiplexerTarget = "multiplexer_target"
+        case multiplexerAttachmentTarget = "multiplexer_attachment_target"
         case workingDirectory = "working_directory"
         case agentSessionID = "agent_session_id"
         case capturedAt = "captured_at"

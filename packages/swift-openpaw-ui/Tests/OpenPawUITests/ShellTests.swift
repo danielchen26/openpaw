@@ -373,6 +373,183 @@ struct RootNavigationTests {
         #expect(router.diffMode == .workingTree)
     }
 
+    @MainActor
+    @Test("A same-host connection generation change clears the attached multiplexer route")
+    func routerInvalidatesConnectionScopedRoutes() {
+        let router = ShellRouter()
+        router.destination = .terminal
+        router.attachedMultiplexerSession = .target("$old", kind: .tmux)
+
+        router.invalidateConnectionScopedState()
+
+        #expect(router.destination == .terminal)
+        #expect(router.attachedMultiplexerSession == nil)
+    }
+
+    @MainActor
+    @Test("Session root intents centralize transcript, terminal, and workspace resume routing")
+    func sessionRootIntentsOwnTheirRouteMutations() {
+        let model = PreviewBackend.model(.populated)
+        let router = ShellRouter()
+
+        router.perform(.openSessionTranscript("session-next"), model: model)
+        #expect(router.destination == .sessions)
+        #expect(router.sessionID == "session-next")
+        #expect(model.selectedSessionID == "session-next")
+
+        router.perform(.openTerminalSession, model: model)
+        #expect(router.destination == .terminal)
+        #expect(router.sessionID == nil)
+
+        let remote = RemoteSession.target("$9", kind: .tmux)
+        router.perform(.attachSession(remote), model: model)
+        #expect(router.destination == .terminal)
+        #expect(router.attachedMultiplexerSession == remote)
+
+        router.perform(.resumeWorkspace(.repository("openpaw")), model: model)
+        #expect(router.destination == .repo)
+        #expect(model.selectedRepo == "openpaw")
+
+        router.perform(.resumeWorkspace(.agentSession("session-restored")), model: model)
+        #expect(router.destination == .sessions)
+        #expect(router.sessionID == "session-restored")
+        #expect(model.selectedSessionID == "session-restored")
+
+        router.invalidateHostScopedState()
+        #expect(router.attachedMultiplexerSession == nil)
+    }
+
+    @MainActor
+    @Test("A disconnected Home resume connects and preserves the requested repository intent")
+    func disconnectedHomeResumePreservesItsIntentAfterConnection() async {
+        let first = hostRecord()
+        let host = HostRecord(nickname: "Build", hostname: "build", username: "dev", auth: .agentForwarding)
+        let backend = RecordingBackend()
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, host]), backend: backend, terminal: terminal)
+
+        let resolution = await HomeResumeCoordinator.resolve(
+            host: host,
+            intent: .repository("openpaw"),
+            model: model)
+
+        #expect(resolution?.intent == .repository("openpaw"))
+        #expect(resolution.map { model.ownsConnection($0.connection) } == true)
+        #expect(model.selectedHostID == host.id)
+        #expect(model.connection.isConnected)
+        #expect(terminal.connectedHosts == [host.id])
+    }
+
+    @MainActor
+    @Test("A Home resume whose host changes while connecting is discarded")
+    func staleHomeResumeDoesNotRouteAfterConnection() async {
+        let first = HostRecord(nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Two", hostname: "two", username: "dev", auth: .agentForwarding)
+        let gate = SuspendedLifecycleGate()
+        let backend = LifecycleRecordingBackend()
+        backend.suspendedHostID = first.id
+        backend.connectGate = gate
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend, terminal: terminal)
+
+        let resume = Task { @MainActor in
+            await HomeResumeCoordinator.resolve(
+                host: first,
+                intent: .agentSession("session-first"),
+                model: model)
+        }
+        await gate.waitUntilStarted()
+        await model.selectHost(second.id)
+        await gate.release()
+
+        #expect(await resume.value == nil)
+        #expect(model.selectedHostID == second.id)
+    }
+
+    @MainActor
+    @Test("Disconnected Home resumes preserve agent, repository, and terminal intent")
+    func disconnectedHomeResumePreservesEveryIntentAfterConnection() async {
+        let intents: [WorkspaceResumeIntent] = [
+            .agentSession("session-restored"),
+            .repository("openpaw"),
+            .terminal,
+        ]
+
+        for intent in intents {
+            let first = hostRecord()
+            let host = HostRecord(nickname: "Build", hostname: "build", username: "dev", auth: .agentForwarding)
+            let terminal = RecordingTerminalBackend()
+            let model = OpenPawModel(
+                hostStore: HostStore(hosts: [first, host]),
+                backend: RecordingBackend(),
+                terminal: terminal)
+
+            let resolved = await HomeResumeCoordinator.resolve(host: host, intent: intent, model: model)
+
+            #expect(resolved?.intent == intent)
+            #expect(resolved.map { model.ownsConnection($0.connection) } == true)
+            #expect(model.selectedHostID == host.id)
+            #expect(model.connection.isConnected)
+        }
+    }
+
+    @MainActor
+    @Test("A Home resume is discarded after an ABA host switch and newer reconnect")
+    func homeResumeRejectsABASwitchBackToTheSameHost() async {
+        let first = HostRecord(nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Two", hostname: "two", username: "dev", auth: .agentForwarding)
+        let gate = SuspendedLifecycleGate()
+        let terminal = RecordingTerminalBackend()
+        terminal.firstConnectGate = gate
+        let model = OpenPawModel(
+            hostStore: HostStore(hosts: [first, second]),
+            backend: RecordingBackend(),
+            terminal: terminal)
+
+        let staleResume = Task { @MainActor in
+            await HomeResumeCoordinator.resolve(
+                host: first,
+                intent: .agentSession("stale-agent"),
+                model: model)
+        }
+        await gate.waitUntilStarted()
+        await model.selectHost(second.id)
+        await model.selectHost(first.id)
+        await model.connectSelectedHost()
+        await gate.release()
+
+        #expect(await staleResume.value == nil)
+        #expect(model.selectedHostID == first.id)
+        #expect(model.connection.isConnected)
+    }
+
+    @MainActor
+    @Test("A Home resume is discarded when a newer same-host reconnect takes ownership")
+    func homeResumeRejectsNewerSameHostReconnect() async {
+        let host = HostRecord(nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let gate = SuspendedLifecycleGate()
+        let terminal = RecordingTerminalBackend()
+        terminal.firstConnectGate = gate
+        let model = OpenPawModel(
+            hostStore: HostStore(hosts: [host]),
+            backend: RecordingBackend(),
+            terminal: terminal)
+
+        let staleResume = Task { @MainActor in
+            await HomeResumeCoordinator.resolve(
+                host: host,
+                intent: .terminal,
+                model: model)
+        }
+        await gate.waitUntilStarted()
+        await model.connectSelectedHost()
+        await gate.release()
+
+        #expect(await staleResume.value == nil)
+        #expect(model.selectedHostID == host.id)
+        #expect(model.connection.isConnected)
+    }
+
     @Test("The shared host switcher exposes one status, transport, and action vocabulary")
     func sharedHostSwitcherPresentationIsLayoutIndependent() {
         let host = HostRecord(
@@ -659,7 +836,11 @@ private final class RecordingTerminalBackend: TerminalBackend, @unchecked Sendab
     let outputStream = AsyncStream<Data> { $0.finish() }
     private(set) var connectedHosts: [HostRecord.ID] = []
     private(set) var disconnectCount = 0
+    private(set) var sentTexts: [String] = []
+    private(set) var runCommands: [String] = []
+    var runResponses: [String: String] = [:]
     var failConnect = false
+    var firstConnectGate: SuspendedLifecycleGate?
     init() {
         var cont: AsyncStream<ConnectionState>.Continuation!
         stateStream = AsyncStream { cont = $0 }
@@ -671,6 +852,7 @@ private final class RecordingTerminalBackend: TerminalBackend, @unchecked Sendab
     var failConnectWith: TransportError?
     func connect(host: HostRecord) async throws {
         connectedHosts.append(host.id)
+        if connectedHosts.count == 1, let firstConnectGate { await firstConnectGate.suspend() }
         if let failConnectWith {
             continuation.yield(.failed(failConnectWith))
             throw failConnectWith
@@ -679,10 +861,194 @@ private final class RecordingTerminalBackend: TerminalBackend, @unchecked Sendab
         continuation.yield(.connected(.ssh))
     }
     func disconnect() async { disconnectCount += 1; continuation.yield(.disconnected(reason: nil)) }
-    func send(text: String) async throws {}
+    func send(text: String) async throws { sentTexts.append(text) }
     func send(chord: KeyChord, applicationCursorKeys: Bool) async throws {}
     func resize(columns: Int, rows: Int) async throws {}
-    func run(command: String) async throws -> String { "" }
+    func run(command: String) async throws -> String {
+        runCommands.append(command)
+        return runResponses[command] ?? ""
+    }
+}
+
+private actor RecordingSessionCommandRunner: CommandRunner {
+    private var recordedCommands: [String] = []
+    private let responses: [String: String]
+
+    init(responses: [String: String]) {
+        self.responses = responses
+    }
+
+    func run(_ command: String) async throws -> String {
+        recordedCommands.append(command)
+        return responses[command] ?? ""
+    }
+
+    func commands() -> [String] { recordedCommands }
+}
+
+@Suite("Typed session command execution")
+struct TypedSessionCommandExecutionTests {
+    @MainActor
+    @Test("Attach preflights the real target before entering the interactive PTY")
+    func acknowledgedManagementAndInteractiveAttachUseTheRightChannels() async throws {
+        let terminal = RecordingTerminalBackend()
+        let executor = TerminalSessionCommandExecutor(terminal: terminal)
+        let session = RemoteSession.target("agent main", kind: .tmux)
+        terminal.runResponses[TmuxAdapter().discoverCommand] = [
+            "$9", "agent main", "0", "1", "1755697800", "1755701400", "/srv/api",
+        ].joined(separator: Multiplexer.fieldSeparator)
+
+        _ = try await executor.executeSessionCommand(.kill(session))
+        #expect(terminal.runCommands == ["tmux kill-session -t 'agent main'"])
+        #expect(terminal.sentTexts.isEmpty)
+
+        _ = try await executor.executeSessionCommand(.attach(session))
+        #expect(terminal.sentTexts == ["tmux attach-session -t '$9'\n"])
+        #expect(terminal.runCommands == [
+            "tmux kill-session -t 'agent main'",
+            TmuxAdapter().discoverCommand,
+        ])
+    }
+
+    @MainActor
+    @Test("Create is acknowledged in the background before attaching the actual remote session")
+    func createWaitsForRemoteAcknowledgementBeforeInteractiveAttach() async throws {
+        let terminal = RecordingTerminalBackend()
+        let executor = TerminalSessionCommandExecutor(terminal: terminal)
+        let preparation = TmuxAdapter().createDetached(name: "release", directory: "/srv/release")
+        terminal.runResponses[TmuxAdapter().discoverCommand] = [
+            "$3", "release", "0", "1", "1755697800", "1755701400", "/srv/release",
+        ].joined(separator: Multiplexer.fieldSeparator)
+
+        _ = try await executor.executeSessionCommand(
+            .create(kind: .tmux, name: "release", directory: "/srv/release"))
+
+        #expect(terminal.runCommands == [preparation, TmuxAdapter().discoverCommand])
+        #expect(terminal.sentTexts == ["tmux attach-session -t '$3'\n"])
+    }
+
+    @MainActor
+    @Test("Create uses an independent control runner after the interactive terminal enters tmux")
+    func createDoesNotProbeThroughTheInteractiveTerminal() async throws {
+        let terminal = RecordingTerminalBackend()
+        let preparation = TmuxAdapter().createDetached(name: "release", directory: nil)
+        let control = RecordingSessionCommandRunner(responses: [
+            preparation: "",
+            TmuxAdapter().discoverCommand: [
+                "$3", "release", "0", "1", "1755697800", "1755701400", "/srv/release",
+            ].joined(separator: Multiplexer.fieldSeparator),
+        ])
+        let executor = TerminalSessionCommandExecutor(terminal: terminal, runner: control)
+
+        _ = try await executor.executeSessionCommand(.create(kind: .tmux, name: "release", directory: nil))
+
+        #expect(terminal.runCommands.isEmpty)
+        #expect(await control.commands() == [preparation, TmuxAdapter().discoverCommand])
+        #expect(terminal.sentTexts == ["tmux attach-session -t '$3'\n"])
+    }
+
+    @MainActor
+    @Test("An unacknowledged create never enters or persists an invented session")
+    func unacknowledgedCreateDoesNotAttach() async {
+        let terminal = RecordingTerminalBackend()
+        let executor = TerminalSessionCommandExecutor(terminal: terminal)
+        let preparation = TmuxAdapter().createDetached(name: "missing", directory: nil)
+
+        do {
+            _ = try await executor.executeSessionCommand(
+                .create(kind: .tmux, name: "missing", directory: nil))
+            Issue.record("expected acknowledgement failure")
+        } catch let error as SessionSpaceCommandExecutionError {
+            #expect(error == .creationNotAcknowledged(kind: .tmux, name: "missing"))
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+
+        #expect(terminal.runCommands == [preparation, TmuxAdapter().discoverCommand])
+        #expect(terminal.sentTexts.isEmpty)
+    }
+
+    @MainActor
+    @Test("Focus and directory readiness are acknowledged before terminal navigation")
+    func focusAndDirectoryUseAcknowledgedFixedTemplates() async throws {
+        let terminal = RecordingTerminalBackend()
+        let executor = TerminalSessionCommandExecutor(terminal: terminal)
+        let window = RemoteWindow(id: "@2", sessionID: "$1", index: 2, name: "logs")
+
+        _ = try await executor.executeSessionCommand(.focus(kind: .tmux, window: window))
+        _ = try await executor.executeSessionCommand(.changeDirectory("/srv/api rocks"))
+
+        #expect(terminal.runCommands == [
+            "tmux select-window -t @2",
+            "test -d '/srv/api rocks'",
+        ])
+        #expect(terminal.sentTexts == ["cd '/srv/api rocks'\n"])
+    }
+
+    @MainActor
+    @Test("Herdr creation manages the root pane but attaches its terminal ID")
+    func herdrCreateUsesAcknowledgedRootPaneReceipt() async throws {
+        let terminal = RecordingTerminalBackend()
+        let executor = TerminalSessionCommandExecutor(terminal: terminal)
+        let preparation = HerdrAdapter().createDetached(name: "api", directory: "/srv/api")
+        terminal.runResponses[preparation] = #"{"id":"cli:workspace:create","result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1","terminal_id":"term_root_9"}}}"#
+
+        let acknowledgement = try await executor.executeSessionCommand(
+            .create(kind: .herdr, name: "api", directory: "/srv/api"))
+
+        #expect(acknowledgement.session?.id == "w9:p1")
+        #expect(acknowledgement.session?.terminalID == "term_root_9")
+        #expect(terminal.runCommands == [preparation])
+        #expect(terminal.sentTexts == ["herdr terminal attach term_root_9\n"])
+    }
+
+    @MainActor
+    @Test("Herdr attach probes the exact pane before opening its terminal stream")
+    func herdrAttachUsesPaneProbeAndTerminalAttach() async throws {
+        let terminal = RecordingTerminalBackend()
+        let executor = TerminalSessionCommandExecutor(terminal: terminal)
+        let session = RemoteSession(
+            id: "w3:p9",
+            name: "fix the build",
+            kind: .herdr,
+            terminalID: "term_65909b7e020c13")
+        terminal.runResponses["herdr pane get w3:p9"] = #"{"id":"cli:pane:get","result":{"pane_id":"w3:p9","terminal_id":"term_65909b7e020c13"}}"#
+
+        let acknowledgement = try await executor.executeSessionCommand(.attach(session))
+
+        #expect(acknowledgement.session == session)
+        #expect(terminal.runCommands == ["herdr pane get w3:p9"])
+        #expect(terminal.sentTexts == ["herdr terminal attach term_65909b7e020c13\n"])
+    }
+
+    @MainActor
+    @Test("Herdr attach rejects an exit-zero error envelope before opening the terminal")
+    func herdrAttachRejectsPaneProbeErrorEnvelope() async {
+        let terminal = RecordingTerminalBackend()
+        let executor = TerminalSessionCommandExecutor(terminal: terminal)
+        let session = RemoteSession(
+            id: "w3:p9",
+            name: "missing pane",
+            kind: .herdr,
+            terminalID: "term_65909b7e020c13")
+        terminal.runResponses["herdr pane get w3:p9"] = #"{"error":{"code":"pane_not_found","message":"nope"},"id":"cli:pane:get"}"#
+
+        do {
+            _ = try await executor.executeSessionCommand(.attach(session))
+            Issue.record("expected the pane probe error envelope to stop attachment")
+        } catch let error as MultiplexerError {
+            if case .malformedOutput(let kind, _) = error {
+                #expect(kind == .herdr)
+            } else {
+                Issue.record("unexpected multiplexer error: \(error)")
+            }
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+
+        #expect(terminal.runCommands == ["herdr pane get w3:p9"])
+        #expect(terminal.sentTexts.isEmpty)
+    }
 }
 
 @Suite("Structured backend lifecycle")
@@ -1455,13 +1821,15 @@ struct AddDeviceFlowTests {
 
         backend.tailscaleDelayNanoseconds = 0
         model.refreshTailscaleDevices()
-        try await Task.sleep(nanoseconds: 5_000_000)
+        for _ in 0..<100 where model.tailscaleDiscovery.candidates.isEmpty {
+            try await Task.sleep(for: .milliseconds(1))
+        }
         #expect(model.tailscaleDiscovery.candidates.map(\.id) == ["node-late"])
     }
 
     @Test("Candidate accessibility label includes exact safety semantics")
     func candidateAccessibilityLabelIncludesSafetySemantics() {
-        #expect(Self.candidate.accessibilityLabel == "Studio, studio.tail123.ts.net, Tailscale discovery candidate, not trusted or saved")
+        #expect(Self.candidate.accessibilityLabel == "Studio, studio.tail123.ts.net, candidate from paired host Tailscale discovery, not trusted or saved")
     }
 }
 

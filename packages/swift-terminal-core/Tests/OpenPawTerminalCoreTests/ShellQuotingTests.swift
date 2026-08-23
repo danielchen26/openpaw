@@ -46,6 +46,17 @@ final class ShellQuotingTests: XCTestCase {
             "screen -x '1.a b'")
         XCTAssertEqual(
             HerdrAdapter().create(name: "api", directory: "/srv/a b"),
-            "herdr tab create --cwd '/srv/a b' --label api --focus")
+            "herdr workspace create --cwd '/srv/a b' --label api --focus")
+        let herdr = RemoteSession(
+            id: "w3:p9; close all",
+            name: "agent",
+            kind: .herdr,
+            terminalID: "term_9; cat secrets")
+        XCTAssertEqual(
+            HerdrAdapter().attach(herdr),
+            "herdr terminal attach 'term_9; cat secrets'")
+        XCTAssertEqual(
+            HerdrAdapter().kill(herdr),
+            "herdr pane close 'w3:p9; close all'")
     }
 }

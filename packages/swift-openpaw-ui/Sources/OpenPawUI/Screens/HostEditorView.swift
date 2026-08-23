@@ -503,13 +503,13 @@ public struct HostEditorView: View {
     private var credentials: some View {
         Panel(label: "Authentication") {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
-                Picker("Authentication", selection: $draft.authKind) {
+                HStack(spacing: OpenPawTheme.Space.tight) {
                     ForEach(HostDraft.AuthKind.allCases, id: \.self) { kind in
-                        Text(kind.displayName).tag(kind)
+                        authKindButton(kind)
                     }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Authentication")
 
                 Text(draft.authKind.explanation)
                     .font(OpenPawTheme.Human.caption)
@@ -536,6 +536,26 @@ public struct HostEditorView: View {
                 }
             }
         }
+    }
+
+    private func authKindButton(_ kind: HostDraft.AuthKind) -> some View {
+        let isSelected = draft.authKind == kind
+        return Button {
+            draft.authKind = kind
+        } label: {
+            Text(kind.displayName)
+                .font(OpenPawTheme.Machine.body)
+                .foregroundStyle(isSelected ? OpenPawTheme.textPrimary : OpenPawTheme.textSecondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+                .background(isSelected ? OpenPawTheme.well : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.chip, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(kind.displayName)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
     private var transport: some View {
