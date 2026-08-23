@@ -38,7 +38,8 @@ use crate::auth::AuthedDevice;
 const TOKEN_MODE: u32 = 0o600;
 const PAGE_LIMIT: usize = 50;
 const MAX_AUTHORIZATION_SESSIONS: usize = 128;
-const REPO_CURSOR_VERSION: u8 = 1;
+const MAX_REPO_CURSORS: usize = 256;
+const REPO_CURSOR_TTL: Duration = Duration::minutes(10);
 
 /// Public OAuth client configuration for built-in providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +151,7 @@ pub struct ProviderManager {
     token_store: TokenStore,
     clients: HashMap<ProviderId, ProviderClient>,
     sessions: RwLock<HashMap<String, Arc<AuthorizationSession>>>,
+    repo_cursors: RwLock<HashMap<String, RepoCursorState>>,
 }
 
 impl ProviderManager {
@@ -182,6 +184,7 @@ impl ProviderManager {
             token_store: TokenStore::new(state_dir),
             clients,
             sessions: RwLock::new(HashMap::new()),
+            repo_cursors: RwLock::new(HashMap::new()),
         }
     }
 
@@ -421,7 +424,10 @@ impl ProviderManager {
         repos.sort_by(|left, right| repo_sort_key(left).cmp(&repo_sort_key(right)));
         let fingerprint = repo_fingerprint(&repos);
         let offset = match cursor {
-            Some(cursor) => decode_repo_cursor(&cursor, provider, &fingerprint)?,
+            Some(cursor) => {
+                self.resolve_repo_cursor(&cursor, provider, &fingerprint)
+                    .await?
+            }
             None => 0,
         };
         if offset > repos.len() {
@@ -434,9 +440,72 @@ impl ProviderManager {
             .collect();
         Ok(ProviderRepoPage {
             repos: page,
-            next_cursor: (next_offset < repos.len())
-                .then(|| encode_repo_cursor(provider, next_offset, &fingerprint)),
+            next_cursor: if next_offset < repos.len() {
+                Some(
+                    self.store_repo_cursor(provider, next_offset, fingerprint)
+                        .await,
+                )
+            } else {
+                None
+            },
         })
+    }
+
+    async fn resolve_repo_cursor(
+        &self,
+        cursor: &str,
+        provider: ProviderId,
+        fingerprint: &str,
+    ) -> Result<usize, ProviderError> {
+        self.purge_repo_cursors().await;
+        let cursors = self.repo_cursors.read().await;
+        let state = cursors.get(cursor).ok_or_else(invalid_cursor)?;
+        if state.provider != provider
+            || state.fingerprint != fingerprint
+            || OffsetDateTime::now_utc() >= state.expires_at
+        {
+            return Err(invalid_cursor());
+        }
+        Ok(state.offset)
+    }
+
+    async fn store_repo_cursor(
+        &self,
+        provider: ProviderId,
+        offset: usize,
+        fingerprint: String,
+    ) -> String {
+        let now = OffsetDateTime::now_utc();
+        let mut cursors = self.repo_cursors.write().await;
+        purge_repo_cursor_map(&mut cursors, now);
+        while cursors.len() >= MAX_REPO_CURSORS {
+            if let Some(oldest) = cursors
+                .iter()
+                .min_by_key(|(_, state)| state.created_at)
+                .map(|(cursor, _)| cursor.clone())
+            {
+                cursors.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        let cursor = opaque_repo_cursor_id();
+        cursors.insert(
+            cursor.clone(),
+            RepoCursorState {
+                provider,
+                offset,
+                fingerprint,
+                created_at: now,
+                expires_at: now + REPO_CURSOR_TTL,
+            },
+        );
+        cursor
+    }
+
+    async fn purge_repo_cursors(&self) {
+        let mut cursors = self.repo_cursors.write().await;
+        purge_repo_cursor_map(&mut cursors, OffsetDateTime::now_utc());
     }
 
     /// Internal seam for the later workspace import slice. Not exposed over HTTP.
@@ -499,12 +568,13 @@ impl ProviderManager {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct RepoCursor {
-    v: u8,
+#[derive(Clone)]
+struct RepoCursorState {
     provider: ProviderId,
     offset: usize,
     fingerprint: String,
+    created_at: OffsetDateTime,
+    expires_at: OffsetDateTime,
 }
 
 fn repo_sort_key(repo: &Repository) -> (&str, &str, &str, &str) {
@@ -533,34 +603,12 @@ fn repo_fingerprint(repos: &[Repository]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
-fn encode_repo_cursor(provider: ProviderId, offset: usize, fingerprint: &str) -> String {
-    let cursor = RepoCursor {
-        v: REPO_CURSOR_VERSION,
-        provider,
-        offset,
-        fingerprint: fingerprint.to_owned(),
-    };
-    let bytes = serde_json::to_vec(&cursor).expect("repo cursor serializes");
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+fn opaque_repo_cursor_id() -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(uuid::Uuid::new_v4().as_bytes())
 }
 
-fn decode_repo_cursor(
-    cursor: &str,
-    provider: ProviderId,
-    fingerprint: &str,
-) -> Result<usize, ProviderError> {
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(cursor)
-        .map_err(|_| invalid_cursor())?;
-    let decoded: RepoCursor = serde_json::from_slice(&bytes).map_err(|_| invalid_cursor())?;
-    if decoded.v != REPO_CURSOR_VERSION
-        || decoded.provider != provider
-        || decoded.fingerprint != fingerprint
-        || decoded.offset == 0
-    {
-        return Err(invalid_cursor());
-    }
-    Ok(decoded.offset)
+fn purge_repo_cursor_map(cursors: &mut HashMap<String, RepoCursorState>, now: OffsetDateTime) {
+    cursors.retain(|_, state| now < state.expires_at);
 }
 
 fn invalid_cursor() -> ProviderError {
@@ -906,29 +954,90 @@ mod tests {
             owner: "owner".to_owned(),
             name: format!("repo-{id:03}"),
             https_url: format!("https://github.com/owner/repo-{id:03}.git"),
-            is_private: id % 2 == 0,
+            is_private: id.is_multiple_of(2),
         }
     }
 
-    #[test]
-    fn repo_cursor_is_opaque_provider_bound_and_fingerprint_bound() {
+    #[tokio::test]
+    async fn repo_cursor_cache_is_opaque_provider_bound_fingerprint_bound_and_replayable() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ProviderManager::new(dir.path(), ProviderClientsConfig::default());
         let repos: Vec<_> = (0..75).rev().map(repo).collect();
         let mut sorted = repos.clone();
         sorted.sort_by(|left, right| repo_sort_key(left).cmp(&repo_sort_key(right)));
         let fingerprint = repo_fingerprint(&sorted);
-        let cursor = encode_repo_cursor(ProviderId::Github, PAGE_LIMIT, &fingerprint);
+        let cursor = manager
+            .store_repo_cursor(ProviderId::Github, PAGE_LIMIT, fingerprint.clone())
+            .await;
 
         assert!(!cursor.contains("50"));
         assert!(!cursor.contains("repo-050"));
         assert_eq!(
-            decode_repo_cursor(&cursor, ProviderId::Github, &fingerprint).unwrap(),
+            manager
+                .resolve_repo_cursor(&cursor, ProviderId::Github, &fingerprint)
+                .await
+                .unwrap(),
             PAGE_LIMIT
         );
-        assert!(decode_repo_cursor(&cursor, ProviderId::HuggingFace, &fingerprint).is_err());
+        assert_eq!(
+            manager
+                .resolve_repo_cursor(&cursor, ProviderId::Github, &fingerprint)
+                .await
+                .unwrap(),
+            PAGE_LIMIT,
+            "cursor replays the same page without advancing"
+        );
+        assert!(
+            manager
+                .resolve_repo_cursor(&cursor, ProviderId::HuggingFace, &fingerprint)
+                .await
+                .is_err()
+        );
+        assert!(
+            manager
+                .resolve_repo_cursor("guessed-cursor", ProviderId::Github, &fingerprint)
+                .await
+                .is_err()
+        );
 
         sorted.push(repo(999));
         let stale_fingerprint = repo_fingerprint(&sorted);
-        assert!(decode_repo_cursor(&cursor, ProviderId::Github, &stale_fingerprint).is_err());
-        assert!(decode_repo_cursor("not base64", ProviderId::Github, &fingerprint).is_err());
+        assert!(
+            manager
+                .resolve_repo_cursor(&cursor, ProviderId::Github, &stale_fingerprint)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_cursor_cache_expires_and_is_capacity_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ProviderManager::new(dir.path(), ProviderClientsConfig::default());
+        let fingerprint = repo_fingerprint(&[repo(1)]);
+        let now = OffsetDateTime::now_utc();
+        manager.repo_cursors.write().await.insert(
+            "expired".to_owned(),
+            RepoCursorState {
+                provider: ProviderId::Github,
+                offset: PAGE_LIMIT,
+                fingerprint: fingerprint.clone(),
+                created_at: now - Duration::minutes(20),
+                expires_at: now - Duration::seconds(1),
+            },
+        );
+        assert!(
+            manager
+                .resolve_repo_cursor("expired", ProviderId::Github, &fingerprint)
+                .await
+                .is_err()
+        );
+
+        for offset in 1..=(MAX_REPO_CURSORS + 20) {
+            manager
+                .store_repo_cursor(ProviderId::Github, offset, fingerprint.clone())
+                .await;
+        }
+        assert!(manager.repo_cursors.read().await.len() <= MAX_REPO_CURSORS);
     }
 }

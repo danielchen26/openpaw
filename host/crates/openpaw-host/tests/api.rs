@@ -252,7 +252,7 @@ async fn provider_fixture_server(repo_count: usize) -> String {
                 } else if first.starts_with("POST /login/oauth/access_token ") {
                     json!({"access_token":"provider-access-token-secret","refresh_token":"provider-refresh-token-secret","expires_in":3600,"scope":"repo","token_type":"bearer"}).to_string()
                 } else if first.starts_with("GET /user/repos") {
-                    let repos: Vec<_> = (0..repo_count).rev().map(|id| json!({"id": id, "name": format!("repo-{id:03}"), "private": id % 2 == 0, "clone_url": format!("https://github.com/owner/repo-{id:03}.git"), "owner": {"login":"owner"}})).collect();
+                    let repos: Vec<_> = (0..repo_count).rev().map(|id| json!({"id": id, "name": format!("repo-{id:03}"), "private": id.is_multiple_of(2), "clone_url": format!("https://github.com/owner/repo-{id:03}.git"), "owner": {"login":"owner"}})).collect();
                     serde_json::to_string(&repos).unwrap()
                 } else {
                     json!({"message":"raw provider payload token secret /Users/example/.ssh"})
@@ -271,17 +271,40 @@ async fn provider_fixture_server(repo_count: usize) -> String {
 }
 
 fn assert_no_provider_secret_leaks(value: &Value) {
-    fn walk(value: &Value, out: &mut Vec<String>) {
+    fn walk(value: &Value, path: &str, out: &mut Vec<String>) {
         match value {
             Value::Object(map) => {
                 for (k, v) in map {
+                    let key = k.to_lowercase();
+                    let next_path = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    let authorization_key_allowed = key == "authorization_id";
+                    let forbidden_key = [
+                        "token",
+                        "secret",
+                        "credential",
+                        "password",
+                        "env",
+                        "header",
+                        "device_code",
+                    ]
+                    .iter()
+                    .any(|needle| key.contains(needle))
+                        || (key.contains("authorization") && !authorization_key_allowed);
+                    assert!(
+                        !forbidden_key,
+                        "provider response leaked sensitive key at {next_path}: {value}"
+                    );
                     out.push(k.clone());
-                    walk(v, out);
+                    walk(v, &next_path, out);
                 }
             }
             Value::Array(items) => {
-                for item in items {
-                    walk(item, out);
+                for (index, item) in items.iter().enumerate() {
+                    walk(item, &format!("{path}[{index}]"), out);
                 }
             }
             Value::String(s) => out.push(s.clone()),
@@ -289,12 +312,15 @@ fn assert_no_provider_secret_leaks(value: &Value) {
         }
     }
     let mut strings = Vec::new();
-    walk(value, &mut strings);
+    walk(value, "", &mut strings);
     let joined = strings.join(" ").to_lowercase();
     for forbidden in [
         "provider-access-token-secret",
         "provider-refresh-token-secret",
         "provider-device-code-secret",
+        "access_token",
+        "refresh_token",
+        "device_code",
         "authorization:",
         "bearer ",
         "credentials",
@@ -302,6 +328,9 @@ fn assert_no_provider_secret_leaks(value: &Value) {
         "env",
         "headers",
         "/users/",
+        "/tmp/",
+        "/var/folders/",
+        "state/",
         "raw provider payload",
     ] {
         assert!(
@@ -2531,6 +2560,7 @@ async fn signed_provider_routes_paginate_and_sanitize_responses() {
 
     let mut seen = Vec::new();
     let mut cursor = None;
+    let mut first_cursor = None;
     loop {
         let path = cursor.as_ref().map_or_else(
             || "/v1/providers/github/repos".to_owned(),
@@ -2546,6 +2576,9 @@ async fn signed_provider_routes_paginate_and_sanitize_responses() {
                 .map(|repo| repo["id"].as_str().unwrap().to_owned()),
         );
         cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if first_cursor.is_none() {
+            first_cursor.clone_from(&cursor);
+        }
         if cursor.is_none() {
             break;
         }
@@ -2553,6 +2586,17 @@ async fn signed_provider_routes_paginate_and_sanitize_responses() {
     seen.sort();
     seen.dedup();
     assert_eq!(seen.len(), 125);
+
+    let mut tampered = first_cursor.expect("first page has next cursor");
+    tampered.replace_range(0..1, if tampered.starts_with('A') { "B" } else { "A" });
+    let tampered_error: Value = h
+        .get(&format!("/v1/providers/github/repos?cursor={tampered}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(tampered_error["error"], "invalid_cursor");
+    assert_no_provider_secret_leaks(&tampered_error);
 
     let bad: Value = h
         .get("/v1/providers/github/repos?cursor=not-a-valid-cursor")
