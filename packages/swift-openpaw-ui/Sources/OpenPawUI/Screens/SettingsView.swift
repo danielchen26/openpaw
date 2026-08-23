@@ -420,28 +420,59 @@ public struct SettingsView: View {
 
     private var appearance: some View {
         Panel(label: "Appearance") {
-            VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
-                Text("Theme").microLabel()
-                Picker("Theme", selection: bind(\.terminalTheme)) {
-                    ForEach(TerminalTheme.allCases, id: \.self) { theme in
-                        Text(theme.displayName).tag(theme)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .id(SettingsControl.terminalGround.id)
-                .accessibilityIdentifier(SettingsControl.terminalGround.accessibilityIdentifier)
-                Text("Sets the app chrome and terminal ground preview from the same theme tokens.")
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                Text("App chrome status").microLabel()
+                Text("OpenPaw currently ships one dark app chrome.")
+                    .font(OpenPawTheme.Machine.body)
+                    .foregroundStyle(OpenPawTheme.textPrimary)
+                Text("Light and high-contrast app chrome are not available yet. Terminal ground is configured in Terminal settings.")
                     .font(OpenPawTheme.Human.caption)
                     .foregroundStyle(OpenPawTheme.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+                    unavailableAppearanceMode("Light app chrome")
+                    unavailableAppearanceMode("High-contrast app chrome")
+                }
             }
         }
+    }
+
+    private func unavailableAppearanceMode(_ title: String) -> some View {
+        HStack {
+            Text(title)
+                .font(OpenPawTheme.Machine.body)
+                .foregroundStyle(OpenPawTheme.textSecondary)
+            Spacer()
+            Text("Unavailable")
+                .font(OpenPawTheme.Human.caption)
+                .foregroundStyle(OpenPawTheme.textTertiary)
+        }
+        .frame(minHeight: 44)
+        .padding(.horizontal, OpenPawTheme.Space.small)
+        .background(OpenPawTheme.well.opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous))
     }
 
     private var terminal: some View {
         Panel(label: "Terminal") {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+                    Text("Terminal ground").microLabel()
+                    Picker("Terminal ground", selection: bind(\.terminalTheme)) {
+                        ForEach(TerminalTheme.allCases, id: \.self) { theme in
+                            Text(theme.displayName).tag(theme)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .id(SettingsControl.terminalGround.id)
+                    .accessibilityIdentifier(SettingsControl.terminalGround.accessibilityIdentifier)
+                    Text("Controls only the terminal surface and sample preview. App chrome stays on OpenPaw's dark palette.")
+                        .font(OpenPawTheme.Human.caption)
+                        .foregroundStyle(OpenPawTheme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
                     Text("Cell size").microLabel()
                     Stepper(value: bind(\.terminalFontSize), in: OpenPawSettings.fontSizeRange, step: 1) {

@@ -31,7 +31,7 @@ struct SettingsNavigationTests {
 
     @Test func searchRoutesControlsToTheirOwningCategory() {
         let owners: [SettingsControl: SettingsCategory] = [
-            .terminalGround: .appearance,
+            .terminalGround: .terminal,
             .biometricGate: .security,
             .dictationLanguage: .voice,
             .dictationRecogniser: .voice,
@@ -55,7 +55,7 @@ struct SettingsNavigationTests {
 
     @Test func everySearchControlRouteTargetsACategoryThatRendersThatControl() {
         let renderedControls: [SettingsCategory: Set<String>] = [
-            .appearance: [SettingsControl.terminalGround.id],
+            .appearance: [],
             .security: [SettingsControl.biometricGate.id],
             .voice: [
                 SettingsControl.dictationLanguage.id,
@@ -63,6 +63,7 @@ struct SettingsNavigationTests {
                 SettingsControl.dictationDestination.id,
             ],
             .terminal: [
+                SettingsControl.terminalGround.id,
                 SettingsControl.terminalCellSize.id,
                 SettingsControl.cursorKeys.id,
                 SettingsControl.shortcutBar.id,
@@ -83,6 +84,41 @@ struct SettingsNavigationTests {
                 "\(entry.title) routes to \(entry.destination.category.id), which does not render \(controlID)"
             )
         }
+    }
+
+
+    @Test func terminalGroundSearchRoutesToTerminalCategory() {
+        for query in ["terminal ground", "deep"] {
+            let results = SettingsSearchIndex.results(for: query)
+            #expect(results.contains { result in
+                result.destination.category == .terminal
+                    && result.destination.controlID == SettingsControl.terminalGround.id
+            }, "Expected \(query) to find Terminal ground in Terminal settings")
+        }
+    }
+
+    @Test func appearanceDoesNotOwnTerminalControls() {
+        let appearanceControlIDs = Set(SettingsSearchIndex.entries
+            .filter { $0.destination.category == .appearance }
+            .compactMap(\.destination.controlID))
+        #expect(!appearanceControlIDs.contains(SettingsControl.terminalGround.id))
+    }
+
+    @Test func appearanceModeSearchDoesNotPretendTerminalThemeIsChrome() {
+        for query in ["chrome", "light", "dark", "high contrast"] {
+            let results = SettingsSearchIndex.results(for: query)
+            #expect(results.contains { $0.destination.category == .appearance && $0.destination.controlID == nil })
+            #expect(!results.contains { $0.destination.controlID == SettingsControl.terminalGround.id })
+        }
+    }
+
+    @Test func appearanceUnavailableCopyIsTruthful() {
+        #expect(SettingsCategory.appearance.summary.contains("App chrome"))
+        let appearance = SettingsSearchIndex.results(for: "high contrast").first { $0.destination.category == .appearance }
+        #expect(appearance?.title == "App chrome status")
+        #expect(appearance?.subtitle.contains("one dark app chrome") == true)
+        #expect(appearance?.subtitle.contains("Light and high-contrast app chrome are not available") == true)
+        #expect(appearance?.subtitle.contains("Terminal ground") == true)
     }
 
     @Test func deepLinkDestinationsResolveToCategoryAndControl() {

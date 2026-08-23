@@ -285,9 +285,24 @@ enum ScreenCatalog {
                     SettingsView(
                         model: model,
                         settings: OpenPawSettings.preview(),
+                        initialDestination: SettingsDestination(category: .appearance)
+                    )
+                    .environment(\.horizontalSizeClass, .regular)
+                )
+            },
+            unavailableReason: ""
+        ),
+
+        Screen(
+            name: "SettingsView-regular-terminal-ground",
+            build: { model, _ in
+                AnyView(
+                    SettingsView(
+                        model: model,
+                        settings: OpenPawSettings.preview(),
                         initialDestination: SettingsDestination(
-                            category: .sessions,
-                            controlID: SettingsControl.scrollback.id
+                            category: .terminal,
+                            controlID: SettingsControl.terminalGround.id
                         )
                     )
                     .environment(\.horizontalSizeClass, .regular)

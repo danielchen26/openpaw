@@ -34,8 +34,8 @@ public enum SettingsCategory: String, CaseIterable, Identifiable, Hashable, Send
 
     public var summary: String {
         switch self {
-        case .appearance: "Theme and app chrome preferences."
-        case .terminal: "Cell size, cursor keys, and touch shortcuts."
+        case .appearance: "App chrome theme availability and accessibility appearance notes."
+        case .terminal: "Cell size, terminal ground, cursor keys, and touch shortcuts."
         case .voice: "Dictation language, recogniser, model downloads, and destination."
         case .connection: "Preview ports, transport notes, and host links."
         case .sessions: "Session event and scrollback budgets."
@@ -50,8 +50,8 @@ public enum SettingsCategory: String, CaseIterable, Identifiable, Hashable, Send
 
     public var keywords: [String] {
         switch self {
-        case .appearance: ["appearance", "theme", "chrome", "light", "dark"]
-        case .terminal: ["terminal", "cell", "font", "ground", "cursor", "shortcuts"]
+        case .appearance: ["appearance", "app chrome", "chrome", "light", "dark", "high contrast", "accessibility"]
+        case .terminal: ["terminal", "cell", "font", "ground", "terminal ground", "theme", "slate", "deep", "warm", "cursor", "shortcuts"]
         case .voice: ["voice", "dictation", "language", "recogniser", "recognizer", "speech", "qwen", "parakeet"]
         case .connection: ["connection", "host", "transport", "preview", "port", "tailscale", "mosh", "ssh"]
         case .sessions: ["session", "budget", "events", "profile", "scrollback"]
@@ -112,7 +112,20 @@ public struct SettingsSearchResult: Identifiable, Hashable, Sendable {
 
 public enum SettingsSearchIndex {
     public static let entries: [SettingsSearchResult] = [
-        .init(title: "Theme", subtitle: "Appearance", category: .appearance, destination: .init(category: .appearance, controlID: SettingsControl.terminalGround.id), keywords: ["theme", "ground", "appearance", "chrome", "slate", "deep", "warm"]),
+        .init(
+            title: "Terminal ground",
+            subtitle: "Terminal",
+            category: .terminal,
+            destination: .init(category: .terminal, controlID: SettingsControl.terminalGround.id),
+            keywords: ["theme", "ground", "terminal ground", "terminal", "slate", "deep", "warm"]
+        ),
+        .init(
+            title: "App chrome status",
+            subtitle: "OpenPaw currently ships one dark app chrome. Light and high-contrast app chrome are not available yet. Terminal ground is configured in Terminal settings.",
+            category: .appearance,
+            destination: .init(category: .appearance),
+            keywords: ["appearance", "app chrome", "chrome", "light", "dark", "high contrast", "theme", "accessibility"]
+        ),
         .init(title: "Require Face ID", subtitle: "Security", category: .security, destination: .init(category: .security, controlID: SettingsControl.biometricGate.id), keywords: ["face id", "touch id", "biometric", "passcode", "lock"]),
         .init(title: "Dictation language", subtitle: "Voice & Dictation", category: .voice, destination: .init(category: .voice, controlID: SettingsControl.dictationLanguage.id), keywords: ["language", "locale", "voice", "speech"]),
         .init(title: "Recogniser", subtitle: "Voice & Dictation", category: .voice, destination: .init(category: .voice, controlID: SettingsControl.dictationRecogniser.id), keywords: ["recogniser", "recognizer", "engine", "model", "qwen", "parakeet"]),
