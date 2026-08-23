@@ -178,6 +178,10 @@ public struct InboxView: View {
         .listRowBackground(OpenPawTheme.ink)
         .listRowSeparatorTint(OpenPawTheme.line)
         .listRowInsets(rowInsets)
+        .accessibilityIdentifier("inbox.item.\(item.id.rawValue)")
+        // This exact row owns horizontal drags for Deny/Dismiss. The root pager observes the same touch but the
+        // marker makes the policy refuse it, and `allowsFullSwipe: false` keeps Deny a two-step decision.
+        .destinationSwipeExclusion(.inboxRowAction)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if item.actions.contains(.deny) {
                 Button {

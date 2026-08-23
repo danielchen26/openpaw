@@ -649,6 +649,15 @@ extension TransportError {
         private static func storeDebugKey(_ data: Data, identifier: String, into keychain: KeychainStore) {
             do {
                 let reference = try KeychainReference(identifier: identifier)
+                // XCUITest relaunches the app many times while LaunchServices can retain the previous launch's
+                // environment. Replacing the same key on every launch creates a delete/add race with the process that
+                // is still terminating, and an otherwise healthy UI test then traps here before drawing a frame. An
+                // identical seed is already the requested state, so leave it in place and make relaunch idempotent.
+                if keychain.exists(reference),
+                   let existing = try? keychain.load(reference),
+                   existing == data {
+                    return
+                }
                 try keychain.store(secret: data, for: reference, requireBiometry: false)
             } catch {
                 assertionFailure("debug key seed failed: \(error)")

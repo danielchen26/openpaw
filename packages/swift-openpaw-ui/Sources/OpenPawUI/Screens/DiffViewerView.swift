@@ -920,6 +920,9 @@ struct DiffFilePane: View {
                         .textSelection(.enabled)
                         .padding(.vertical, OpenPawTheme.Space.small)
                     }
+                    // Code and selection own this axis. A horizontal review gesture scrolls the line instead of
+                    // leaving the repository destination.
+                    .destinationSwipeExclusion(.horizontalChildControl)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .background(OpenPawTheme.well)

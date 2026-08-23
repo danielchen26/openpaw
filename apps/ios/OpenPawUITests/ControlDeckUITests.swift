@@ -75,6 +75,28 @@ final class ControlDeckUITests: XCTestCase {
         )
     }
 
+    /// The control deck owns its horizontal gesture even though the root screen also supports horizontal paging.
+    /// One physical swipe must never perform both navigations.
+    func testSwipingTheStripDoesNotAlsoChangeTheRootDestination() throws {
+        let app = launchedApp()
+        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
+        app.buttons["Terminal"].tap()
+
+        let pager = app.otherElements["root.destination.pager"]
+        XCTAssertTrue(pager.waitForExistence(timeout: 10), "the root paging accessibility surface never appeared")
+        XCTAssertEqual(pager.value as? String, "Terminal")
+        XCTAssertTrue(app.buttons["Escape"].waitForExistence(timeout: 10), "the keys page never appeared")
+
+        swipeStrip(app, toward: .leading)
+
+        XCTAssertTrue(app.buttons["Settings"].waitForExistence(timeout: 5), "the deck did not reach destinations")
+        XCTAssertEqual(
+            pager.value as? String,
+            "Terminal",
+            "paging the control deck also changed the root destination"
+        )
+    }
+
     /// The microphone icon is gone from the permanent chrome.
     ///
     /// Requested directly: holding anywhere already dictates, so a microphone button sitting on screen at all

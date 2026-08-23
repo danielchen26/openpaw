@@ -57,6 +57,40 @@ public enum DestinationPageDecision: Sendable, Equatable {
     case ignore(DestinationPageSuppression)
 }
 
+public struct DestinationKeyboardModifiers: OptionSet, Sendable {
+    public let rawValue: UInt8
+
+    public init(rawValue: UInt8) {
+        self.rawValue = rawValue
+    }
+
+    public static let command = DestinationKeyboardModifiers(rawValue: 1 << 0)
+    public static let option = DestinationKeyboardModifiers(rawValue: 1 << 1)
+    public static let shift = DestinationKeyboardModifiers(rawValue: 1 << 2)
+    public static let control = DestinationKeyboardModifiers(rawValue: 1 << 3)
+}
+
+public enum DestinationKeyboardKey: Sendable, Equatable {
+    case leftArrow
+    case rightArrow
+    case other
+}
+
+/// Hardware keyboard paging is deliberately an exact chord so ordinary cursor navigation remains local to editors.
+public enum DestinationKeyboardShortcutPolicy {
+    public static func decision(
+        key: DestinationKeyboardKey,
+        modifiers: DestinationKeyboardModifiers
+    ) -> DestinationPageDecision? {
+        guard modifiers == [.command, .option] else { return nil }
+        return switch key {
+        case .leftArrow: .previous
+        case .rightArrow: .next
+        case .other: nil
+        }
+    }
+}
+
 /// The one source of truth for root destination paging.
 ///
 /// It deliberately requires both travel and velocity. Travel alone makes slow horizontal scrolling change tabs;

@@ -240,6 +240,9 @@ public struct TerminalScreenView: View {
             .defaultScrollAnchor(.bottomLeading)
             .background(settings.terminalTheme.background)
             .contentShape(Rectangle())
+            // A terminal normally allows a deliberate root fling. Only an active marked/selected text range turns
+            // this marker into a paging exclusion, so typing and selection remain intact without trapping the tab.
+            .destinationSwipeExclusion(.textSelection)
             // Pinch reports through the injected closure; this view never resizes the PTY itself.
             .gesture(
                 MagnifyGesture()

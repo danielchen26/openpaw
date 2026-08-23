@@ -119,6 +119,18 @@ struct DestinationPagingTests {
         #expect(DestinationPagingPolicy.destination(after: .next, from: .settings) == .settings)
     }
 
+    @Test("only Command-Option arrows request root paging")
+    func keyboardShortcutsRequireTheExactChord() {
+        let chord: DestinationKeyboardModifiers = [.command, .option]
+        #expect(DestinationKeyboardShortcutPolicy.decision(key: .leftArrow, modifiers: chord) == .previous)
+        #expect(DestinationKeyboardShortcutPolicy.decision(key: .rightArrow, modifiers: chord) == .next)
+        #expect(DestinationKeyboardShortcutPolicy.decision(key: .rightArrow, modifiers: [.command]) == nil)
+        #expect(DestinationKeyboardShortcutPolicy.decision(key: .rightArrow, modifiers: [.command, .option, .shift]) == nil)
+        #expect(DestinationKeyboardShortcutPolicy.decision(key: .rightArrow, modifiers: [.command, .option, .control]) == nil)
+        #expect(DestinationKeyboardShortcutPolicy.decision(key: .rightArrow, modifiers: []) == nil)
+        #expect(DestinationKeyboardShortcutPolicy.decision(key: .other, modifiers: chord) == nil)
+    }
+
     private func deliberateNext(
         isModalPresented: Bool = false,
         isHorizontalChildControlActive: Bool = false,

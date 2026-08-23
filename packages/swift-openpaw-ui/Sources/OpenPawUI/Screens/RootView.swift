@@ -254,8 +254,14 @@ public struct RootView: View {
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .overlay { pushToTalkLayer }
+        .overlay(alignment: .topLeading) { destinationSwipeLayer }
         .background(OpenPawTheme.ink)
         .tint(OpenPawTheme.textPrimary)
+        .onKeyPress(keys: [.leftArrow, .rightArrow], phases: .down) { press in
+            guard press.modifiers == [.command, .option] else { return .ignored }
+            let decision: DestinationPageDecision = press.key == .leftArrow ? .previous : .next
+            return pageRoot(decision) ? .handled : .ignored
+        }
         .task {
             // A device with hosts but no selection has nothing to show a status about. Adopting the first entry
             // is what the model does at init; doing it here too covers a store loaded after the model was built.
@@ -313,6 +319,35 @@ public struct RootView: View {
         } message: { error in
             Text(error.detail)
         }
+    }
+
+    // MARK: Root destination paging
+
+    /// Window-level observation keeps child controls alive while the pure policy decides whether a completed fling
+    /// belongs to the root. The bridge emits an intent only; this router remains the one owner of destination state.
+    @ViewBuilder
+    private var destinationSwipeLayer: some View {
+        #if os(iOS)
+            DestinationSwipeCatcher(
+                destination: router.destination,
+                isBackNavigationAvailable: router.sessionID != nil,
+                isModalPresented: currentSheet != nil || model.lastError != nil,
+                onIntent: { _ = pageRoot($0) }
+            )
+            // The window recognizer does not need a screen-sized view. Keeping its adjustable accessibility
+            // element to a point-sized frame prevents it from becoming an invisible accessibility blanket over
+            // every tappable row beneath it while VoiceOver can still reach it by identifier and rotor order.
+            .frame(width: 1, height: 1)
+            .ignoresSafeArea()
+        #endif
+    }
+
+    @discardableResult
+    private func pageRoot(_ decision: DestinationPageDecision) -> Bool {
+        let destination = DestinationPagingPolicy.destination(after: decision, from: router.destination)
+        guard destination != router.destination else { return false }
+        router.destination = destination
+        return true
     }
 
     // MARK: Hold anywhere to talk
@@ -417,6 +452,7 @@ public struct RootView: View {
         } view: {
             viewPage
         }
+        .destinationSwipeExclusion(.horizontalChildControl)
     }
 
     /// The key bar, at the very bottom of the screen and scrolling sideways.

@@ -53,6 +53,8 @@
 		1A2B3C00000000000000F101 /* DebugScenario.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F100 /* DebugScenario.swift */; };
 		1A2B3C00000000000000F103 /* DebugScenarioTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F102 /* DebugScenarioTests.swift */; };
 		1A2B3C00000000000000F105 /* ScenarioLaunchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F104 /* ScenarioLaunchUITests.swift */; };
+		1A2B3C00000000000000F107 /* RootTabSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F106 /* RootTabSwipeUITests.swift */; };
+		1A2B3C00000000000000F109 /* DestinationSwipeCatcherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F108 /* DestinationSwipeCatcherTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -114,6 +116,8 @@
 		1A2B3C00000000000000F100 /* DebugScenario.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugScenario.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F102 /* DebugScenarioTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugScenarioTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F104 /* ScenarioLaunchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScenarioLaunchUITests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000F106 /* RootTabSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabSwipeUITests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000F108 /* DestinationSwipeCatcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationSwipeCatcherTests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000B2 /* OpenPawUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenPawUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -206,6 +210,7 @@
 				1A2B3C00000000000000002D /* SSHTerminalBackendTests.swift */,
 				1A2B3C00000000000000002E /* HostAPIBackendTests.swift */,
 				1A2B3C00000000000000F102 /* DebugScenarioTests.swift */,
+				1A2B3C00000000000000F108 /* DestinationSwipeCatcherTests.swift */,
 			);
 			path = OpenPawAppTests;
 			sourceTree = "<group>";
@@ -226,6 +231,7 @@
 				1A2B3C00000000000000CB02 /* SessionCreationUITests.swift */,
 				1A2B3C0000000000000000C1 /* HomeInteractionUITests.swift */,
 				1A2B3C00000000000000F104 /* ScenarioLaunchUITests.swift */,
+				1A2B3C00000000000000F106 /* RootTabSwipeUITests.swift */,
 			);
 			path = OpenPawUITests;
 			sourceTree = "<group>";
@@ -392,6 +398,7 @@
 				1A2B3C000000000000000046 /* SSHTerminalBackendTests.swift in Sources */,
 				1A2B3C000000000000000047 /* HostAPIBackendTests.swift in Sources */,
 				1A2B3C00000000000000F103 /* DebugScenarioTests.swift in Sources */,
+				1A2B3C00000000000000F109 /* DestinationSwipeCatcherTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -412,6 +419,7 @@
 				1A2B3C00000000000000CB01 /* SessionCreationUITests.swift in Sources */,
 				1A2B3C0000000000000000C0 /* HomeInteractionUITests.swift in Sources */,
 				1A2B3C00000000000000F105 /* ScenarioLaunchUITests.swift in Sources */,
+				1A2B3C00000000000000F107 /* RootTabSwipeUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

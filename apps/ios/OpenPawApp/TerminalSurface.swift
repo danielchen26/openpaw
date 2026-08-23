@@ -31,12 +31,28 @@ struct TerminalSurface: UIViewRepresentable {
     static let maximumFontSize: CGFloat = 28
     static let defaultFontSize: CGFloat = 13
 
+    /// SwiftTerm's repeating caret animation is correct in the app, but XCTest waits for every UIView animation to
+    /// finish after each hardware key. A repeating animation never does, turning one three-key assertion into three
+    /// one-minute waits. This opt-in exists only in DEBUG simulator builds and changes only the caret style.
+    private static var usesSteadyCursorForUITests: Bool {
+        #if DEBUG && targetEnvironment(simulator)
+            ProcessInfo.processInfo.arguments.contains("-openpaw-ui-test-steady-terminal-cursor")
+        #else
+            false
+        #endif
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(backend: backend, onChangeFontSize: { size in fontSize = size })
     }
 
     func makeUIView(context: Context) -> OpenPawTerminalView {
-        let view = OpenPawTerminalView(frame: CGRect(x: 0, y: 0, width: 480, height: 640))
+        let options = TerminalOptions(cursorStyle: Self.usesSteadyCursorForUITests ? .steadyBlock : .blinkBlock)
+        let view = OpenPawTerminalView(
+            frame: CGRect(x: 0, y: 0, width: 480, height: 640),
+            font: nil,
+            options: options
+        )
         view.coordinator = context.coordinator
         view.terminalDelegate = context.coordinator
         view.applyOpenPawPalette()
