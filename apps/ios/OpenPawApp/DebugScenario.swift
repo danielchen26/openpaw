@@ -9,6 +9,8 @@
     /// Unknown, missing, or duplicated arguments return `nil`, which leaves `AppWiring` on its production path.
     enum DebugScenario: String, CaseIterable, Equatable {
         case empty
+        case noHosts
+        case hostSwitcher
         case connectedWorkspace
         case sessions
         case inboxRisks
@@ -17,6 +19,7 @@
 
         private static let launchFlag = "-openpaw-debug-scenario"
         private static let hostID = UUID(uuidString: "51CE0000-0000-4000-8000-000000000001") ?? UUID()
+        private static let buildHostID = UUID(uuidString: "51CE0000-0000-4000-8000-000000000002") ?? UUID()
 
         init?(arguments: [String]) {
             let flagIndices = arguments.indices.filter { arguments[$0] == Self.launchFlag }
@@ -45,10 +48,29 @@
                 multiplexerPreference: .tmux,
                 tags: ["fixture"]
             )
+            let buildHost = HostRecord(
+                id: Self.buildHostID,
+                nickname: "Build server",
+                hostname: "build-server.invalid",
+                port: 22,
+                username: "openpaw",
+                auth: .agentForwarding,
+                preferredTransport: .ssh,
+                multiplexerPreference: .tmux,
+                tags: ["fixture", "build"]
+            )
+            let hosts: [HostRecord] = switch self {
+            case .noHosts: []
+            case .hostSwitcher: [host, buildHost]
+            case .empty, .connectedWorkspace, .sessions, .inboxRisks, .repoProviders, .connectionFailures: [host]
+            }
+            let modelTerminal: (any TerminalBackend)? = self == .hostSwitcher
+                ? DebugScenarioTerminalBackend()
+                : terminal
             let model = OpenPawModel(
-                hostStore: HostStore(hosts: [host]),
+                hostStore: HostStore(hosts: hosts),
                 backend: backend,
-                terminal: terminal
+                terminal: modelTerminal
             )
             model.health = backend.healthInfo
             model.sessions = backend.sessionList
@@ -69,6 +91,10 @@
                     HostClientError.transport(PreviewBackend.TunnelClosed()),
                     while: "loading host state"
                 )
+            case .noHosts:
+                model.connection = .idle
+            case .hostSwitcher:
+                model.connection = .disconnected(reason: nil)
             case .empty, .connectedWorkspace, .sessions, .inboxRisks, .repoProviders:
                 model.connection = .connected(.ssh)
             }
@@ -77,7 +103,7 @@
 
         private var previewScenario: PreviewBackend.Scenario {
             switch self {
-            case .empty:
+            case .empty, .noHosts, .hostSwitcher:
                 .empty
             case .connectedWorkspace, .sessions, .repoProviders:
                 .populated
@@ -87,5 +113,25 @@
                 .disconnected
             }
         }
+    }
+
+    /// A simulator-only terminal that makes connection actions observable without dialing a network endpoint.
+    private final class DebugScenarioTerminalBackend: TerminalBackend, @unchecked Sendable {
+        private let stateContinuation: AsyncStream<ConnectionState>.Continuation
+        let stateStream: AsyncStream<ConnectionState>
+        let outputStream = AsyncStream<Data> { $0.finish() }
+
+        init() {
+            var continuation: AsyncStream<ConnectionState>.Continuation!
+            stateStream = AsyncStream { continuation = $0 }
+            stateContinuation = continuation
+        }
+
+        func connect(host: HostRecord) async throws { stateContinuation.yield(.connected(.ssh)) }
+        func disconnect() async { stateContinuation.yield(.disconnected(reason: nil)) }
+        func send(text: String) async throws {}
+        func send(chord: KeyChord, applicationCursorKeys: Bool) async throws {}
+        func resize(columns: Int, rows: Int) async throws {}
+        func run(command: String) async throws -> String { "" }
     }
 #endif

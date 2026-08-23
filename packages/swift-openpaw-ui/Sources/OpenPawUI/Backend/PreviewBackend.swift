@@ -167,12 +167,10 @@ public struct PreviewBackend: OpenPawBackend {
     @MainActor
     public static func model(_ kind: Scenario = .populated) -> OpenPawModel {
         let backend = PreviewBackend(kind)
-        let model = OpenPawModel(backend: backend)
         // Every scenario is a *paired* device, including `.empty` and `.disconnected`: you cannot be
         // disconnected from a host you do not have, and a header that reads "no host" beside a live connection
         // state is a contradiction rather than an empty state.
-        model.hostStore = HostStore(hosts: PreviewFixtures.hosts)
-        model.selectedHostID = model.hostStore.hosts.first?.id
+        let model = OpenPawModel(hostStore: HostStore(hosts: PreviewFixtures.hosts), backend: backend)
         model.health = backend.healthInfo
         model.sessions = backend.sessionList
         model.repos = backend.repoList

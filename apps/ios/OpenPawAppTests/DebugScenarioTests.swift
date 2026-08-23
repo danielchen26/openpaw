@@ -49,4 +49,27 @@ final class DebugScenarioTests: XCTestCase {
         XCTAssertEqual(reason, "the forwarded port closed")
         XCTAssertNotNil(model.lastError)
     }
+
+    func testNoHostsScenarioContainsNoSavedOrSelectedHost() {
+        let model = DebugScenario.noHosts.makeModel()
+
+        XCTAssertTrue(model.hostStore.hosts.isEmpty)
+        XCTAssertNil(model.selectedHostID)
+        XCTAssertEqual(model.connection, .idle)
+    }
+
+    func testHostSwitcherScenarioSelectsWithoutConnectingAndConnectsOnlyOnRequest() async throws {
+        let model = DebugScenario.hostSwitcher.makeModel()
+        let second = try XCTUnwrap(model.hostStore.hosts.last)
+
+        XCTAssertEqual(model.hostStore.hosts.map(\.nickname), ["Scenario host", "Build server"])
+        XCTAssertEqual(model.connection, .disconnected(reason: nil))
+
+        await model.selectHost(second.id)
+        XCTAssertEqual(model.selectedHostID, second.id)
+        XCTAssertFalse(model.connection.isConnected)
+
+        await model.connectSelectedHost()
+        XCTAssertEqual(model.connection, .connected(.ssh))
+    }
 }

@@ -24,6 +24,8 @@ public enum TailscaleDiscoveryState: Sendable, Hashable {
 @Observable
 public final class OpenPawModel {
 
+    private struct StructuredConnectSuperseded: Error {}
+
     // MARK: - Wiring
 
     public private(set) var backend: (any OpenPawBackend)?
@@ -58,6 +60,12 @@ public final class OpenPawModel {
     }
     /// Monotonic token for binding derived host/session rows to the exact connection that produced them.
     public private(set) var connectionGeneration = 0
+    /// True while the previous transport is being torn down for a newly selected host.
+    ///
+    /// Selection is deliberately separate from connection: a host chip may change immediately, but Connect remains
+    /// unavailable until the old transport has finished closing. That keeps a fast select-then-connect sequence from
+    /// letting the previous disconnect land on the new attempt.
+    public private(set) var isSwitchingHost = false
     /// Set when a host key is unknown or changed. A changed key is a hard block by contract, so the UI must not
     /// offer a "continue anyway" path for `.changed`.
     public var hostKeyPrompt: HostKeyPrompt?
@@ -90,10 +98,19 @@ public final class OpenPawModel {
 
     private var tailscaleDiscoveryTask: Task<Void, Never>?
     private var tailscaleDiscoveryGeneration = 0
+    private var hostSelectionGeneration = 0
 
     private var eventTask: Task<Void, Never>?
     private var stateTask: Task<Void, Never>?
+    private var stateTaskHostID: HostRecord.ID?
+    private var stateAttemptHasConnected = false
+    private var stateStreamGeneration = 0
     private var terminalConnectAcknowledgement: CheckedContinuation<Void, Never>?
+    /// Structured lifecycle connects are allowed to suspend while a tunnel opens. A newer request chains behind the
+    /// previous one, then tears down whatever it left behind before dialing. This prevents a late connect for host A
+    /// from reattaching after the user has selected or connected host B.
+    private var structuredConnectRequestID = 0
+    private var structuredConnectOperation: Task<Void, any Error>?
     private let reducer = TranscriptReducer()
 
     public init(
@@ -115,6 +132,12 @@ public final class OpenPawModel {
     }
 
     public func attach(backend: (any OpenPawBackend)?, terminal: (any TerminalBackend)?) {
+        stateStreamGeneration += 1
+        stateTask?.cancel()
+        stateTask = nil
+        stateTaskHostID = nil
+        stateAttemptHasConnected = false
+        resumeTerminalConnectAcknowledgement()
         self.backend = backend
         self.terminal = terminal
         structuredBackendReady = backend.map { !($0 is any StructuredBackendLifecycle) } ?? false
@@ -128,7 +151,7 @@ public final class OpenPawModel {
     }
 
     public var canRefreshRemoteState: Bool {
-        backend != nil && selectedHost != nil && structuredBackendReady
+        backend != nil && selectedHost != nil && connection.isConnected && structuredBackendReady
     }
 
     public var pendingInbox: [InboxItem] {
@@ -466,53 +489,41 @@ public final class OpenPawModel {
 
     public func canSendAgentAttachments() -> Bool { backend != nil && structuredBackendReady && connection.isConnected }
 
+    /// Selects a saved host without dialing it.
+    ///
+    /// The host id changes before the asynchronous teardown so every in-flight refresh and event stream becomes stale
+    /// immediately. The caller must make a separate `connectSelectedHost()` request after this transaction finishes.
+    public func selectHost(_ hostID: HostRecord.ID?) async {
+        guard hostID != selectedHostID else { return }
+        hostSelectionGeneration += 1
+        let selectionGeneration = hostSelectionGeneration
+        isSwitchingHost = true
+
+        stateTaskHostID = nil
+        stateAttemptHasConnected = false
+        selectedHostID = hostID
+
+        if let lifecycle = backend as? any StructuredBackendLifecycle { await lifecycle.disconnect() }
+        await terminal?.disconnect()
+
+        if hostSelectionGeneration == selectionGeneration { isSwitchingHost = false }
+    }
+
     public func connectSelectedHost() async {
-        guard let terminal, let host = selectedHost else { return }
+        guard !isSwitchingHost, let terminal, let host = selectedHost else { return }
         stopFollowing()
         cancelTailscaleDiscovery()
         clearHostDerivedState()
         structuredBackendReady = backend.map { !($0 is any StructuredBackendLifecycle) } ?? false
+        stateTaskHostID = nil
+        stateAttemptHasConnected = false
+        resumeTerminalConnectAcknowledgement()
         if let lifecycle = backend as? any StructuredBackendLifecycle { await lifecycle.disconnect() }
         await terminal.disconnect()
         let targetHostID = host.id
-        var terminalConnectedAcknowledged = false
-        func acknowledgeTerminalConnected() {
-            guard !terminalConnectedAcknowledged else { return }
-            terminalConnectedAcknowledged = true
-            self.resumeTerminalConnectAcknowledgement()
-        }
-        resumeTerminalConnectAcknowledgement()
-        stateTask?.cancel()
-        stateTask = Task { [weak self, terminal] in
-            var sawConnectedStateForAttempt = false
-            for await state in terminal.stateStream {
-                guard let self else {
-                    acknowledgeTerminalConnected()
-                    return
-                }
-                guard self.selectedHostID == targetHostID else {
-                    acknowledgeTerminalConnected()
-                    return
-                }
-                if state.isConnected {
-                    sawConnectedStateForAttempt = true
-                    acknowledgeTerminalConnected()
-                }
-                // A `.disconnected` before this attempt ever connected belongs to the previous connection's
-                // teardown, not to this one, so it must not overwrite the live status. A `.failed` is this attempt
-                // reporting why it could not connect: dropping it left the card claiming "Connecting" forever with
-                // no error and nothing to retry, which is exactly what an unknown host key produced.
-                if !sawConnectedStateForAttempt, case .disconnected = state { continue }
-                self.connection = state
-                if state.isTerminal, let lifecycle = self.backend as? any StructuredBackendLifecycle {
-                    self.structuredBackendReady = false
-                    await lifecycle.disconnect()
-                }
-                if case .failed(let error) = state {
-                    self.present(error, while: "connecting to \(host.nickname)")
-                }
-            }
-        }
+        stateTaskHostID = targetHostID
+        ensureTerminalStateTask(terminal)
+        connection = .connecting
         do {
             try await terminal.connect(host: host)
             guard selectedHostID == targetHostID else { return }
@@ -528,9 +539,8 @@ public final class OpenPawModel {
             guard selectedHostID == targetHostID, connection.isConnected else { return }
             if let lifecycle = backend as? any StructuredBackendLifecycle {
                 do {
-                    try await lifecycle.connect(hostID: targetHostID)
-                    guard selectedHostID == targetHostID, connection.isConnected else { return }
-                    structuredBackendReady = await lifecycle.isReady
+                    guard try await connectStructuredBackend(lifecycle, hostID: targetHostID) else { return }
+                    structuredBackendReady = true
                     guard selectedHostID == targetHostID, connection.isConnected, structuredBackendReady else { return }
                     await refresh()
                     startFollowing(session: selectedSessionID)
@@ -550,12 +560,89 @@ public final class OpenPawModel {
         }
     }
 
+    /// Connects one structured lifecycle with explicit ownership.
+    ///
+    /// `disconnect()` is intentionally issued twice in the host-switch race: once by the selection transaction to
+    /// cancel a well-behaved in-flight tunnel immediately, and once here after the previous connect has actually
+    /// returned. The second teardown is what contains a backend that ignored cancellation and completed late. A newer
+    /// request registers before waiting, so only the latest request may perform stale cleanup; the newer operation then
+    /// owns the final disconnect/connect pair and cannot be torn down by its predecessor.
+    private func connectStructuredBackend(
+        _ lifecycle: any StructuredBackendLifecycle,
+        hostID: HostRecord.ID
+    ) async throws -> Bool {
+        structuredConnectRequestID += 1
+        let requestID = structuredConnectRequestID
+        let previousOperation = structuredConnectOperation
+        let operation: Task<Void, any Error> = Task {
+            if let previousOperation { _ = try? await previousOperation.value }
+            guard structuredConnectRequestID == requestID,
+                selectedHostID == hostID,
+                connection.isConnected
+            else { throw StructuredConnectSuperseded() }
+            await lifecycle.disconnect()
+            guard structuredConnectRequestID == requestID,
+                selectedHostID == hostID,
+                connection.isConnected
+            else {
+                if structuredConnectRequestID == requestID { await lifecycle.disconnect() }
+                throw StructuredConnectSuperseded()
+            }
+            do {
+                try await lifecycle.connect(hostID: hostID)
+            } catch {
+                guard structuredConnectRequestID == requestID,
+                    selectedHostID == hostID,
+                    connection.isConnected
+                else {
+                    if structuredConnectRequestID == requestID { await lifecycle.disconnect() }
+                    throw StructuredConnectSuperseded()
+                }
+                await lifecycle.disconnect()
+                throw error
+            }
+            guard structuredConnectRequestID == requestID,
+                selectedHostID == hostID,
+                connection.isConnected
+            else {
+                if structuredConnectRequestID == requestID { await lifecycle.disconnect() }
+                throw StructuredConnectSuperseded()
+            }
+            let ready = await lifecycle.isReady
+            guard structuredConnectRequestID == requestID,
+                selectedHostID == hostID,
+                connection.isConnected,
+                ready
+            else {
+                if structuredConnectRequestID == requestID { await lifecycle.disconnect() }
+                throw StructuredConnectSuperseded()
+            }
+        }
+        structuredConnectOperation = operation
+        defer {
+            if structuredConnectRequestID == requestID { structuredConnectOperation = nil }
+        }
+
+        do {
+            try await operation.value
+            return true
+        } catch is StructuredConnectSuperseded {
+            return false
+        } catch {
+            guard structuredConnectRequestID == requestID,
+                selectedHostID == hostID,
+                connection.isConnected
+            else { return false }
+            throw error
+        }
+    }
+
     public func disconnect() async {
         stopFollowing()
         cancelTailscaleDiscovery()
         clearHostDerivedState()
-        stateTask?.cancel()
-        stateTask = nil
+        stateTaskHostID = nil
+        stateAttemptHasConnected = false
         resumeTerminalConnectAcknowledgement()
         if let lifecycle = backend as? any StructuredBackendLifecycle { await lifecycle.disconnect() }
         structuredBackendReady = false
@@ -568,19 +655,51 @@ public final class OpenPawModel {
         terminalConnectAcknowledgement = nil
     }
 
+    /// `TerminalBackend.stateStream` is a single event seam, so it has one consumer for the lifetime of the attached
+    /// terminal. Replacing that consumer per host can let a cancelled iterator steal the next attempt's `.connected`
+    /// event. Attempts are scoped by `stateTaskHostID` instead.
+    private func ensureTerminalStateTask(_ terminal: any TerminalBackend) {
+        guard stateTask == nil else { return }
+        stateStreamGeneration += 1
+        let streamGeneration = stateStreamGeneration
+        stateTask = Task { [weak self, terminal] in
+            for await state in terminal.stateStream {
+                guard let self, self.stateStreamGeneration == streamGeneration else { return }
+                guard let targetHostID = self.stateTaskHostID,
+                    self.selectedHostID == targetHostID
+                else { continue }
+                if state.isConnected {
+                    self.stateAttemptHasConnected = true
+                    self.resumeTerminalConnectAcknowledgement()
+                }
+                // A `.disconnected` before this attempt ever connected belongs to teardown, not the new host.
+                if !self.stateAttemptHasConnected, case .disconnected = state { continue }
+                self.connection = state
+                if state.isTerminal, let lifecycle = self.backend as? any StructuredBackendLifecycle {
+                    self.structuredBackendReady = false
+                    await lifecycle.disconnect()
+                }
+                if case .failed(let error) = state {
+                    self.present(error, while: "connecting to \(self.selectedHost?.nickname ?? "host")")
+                }
+            }
+            guard let self, self.stateStreamGeneration == streamGeneration else { return }
+            self.stateTask = nil
+            self.stateTaskHostID = nil
+            self.stateAttemptHasConnected = false
+            self.resumeTerminalConnectAcknowledgement()
+        }
+    }
+
     private func invalidateSelectedHostDerivedState() {
         stopFollowing()
         cancelTailscaleDiscovery()
         clearHostDerivedState()
+        stateTaskHostID = nil
+        stateAttemptHasConnected = false
         resumeTerminalConnectAcknowledgement()
-        structuredBackendReady = backend.map { !($0 is any StructuredBackendLifecycle) } ?? false
-        if backend is any StructuredBackendLifecycle {
-            structuredBackendReady = false
-            connection = .disconnected(reason: "Host selection changed")
-        }
-        if let lifecycle = backend as? any StructuredBackendLifecycle {
-            Task { await lifecycle.disconnect() }
-        }
+        structuredBackendReady = false
+        connection = .disconnected(reason: "Host selection changed")
     }
 
     private func clearHostDerivedState() {

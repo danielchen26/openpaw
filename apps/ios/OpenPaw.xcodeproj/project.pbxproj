@@ -55,6 +55,7 @@
 		1A2B3C00000000000000F105 /* ScenarioLaunchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F104 /* ScenarioLaunchUITests.swift */; };
 		1A2B3C00000000000000F107 /* RootTabSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F106 /* RootTabSwipeUITests.swift */; };
 		1A2B3C00000000000000F109 /* DestinationSwipeCatcherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F108 /* DestinationSwipeCatcherTests.swift */; };
+		1A2B3C00000000000000F111 /* HostSwitcherUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F110 /* HostSwitcherUITests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -118,6 +119,7 @@
 		1A2B3C00000000000000F104 /* ScenarioLaunchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScenarioLaunchUITests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F106 /* RootTabSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabSwipeUITests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F108 /* DestinationSwipeCatcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationSwipeCatcherTests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000F110 /* HostSwitcherUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSwitcherUITests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000B2 /* OpenPawUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenPawUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -232,6 +234,7 @@
 				1A2B3C0000000000000000C1 /* HomeInteractionUITests.swift */,
 				1A2B3C00000000000000F104 /* ScenarioLaunchUITests.swift */,
 				1A2B3C00000000000000F106 /* RootTabSwipeUITests.swift */,
+				1A2B3C00000000000000F110 /* HostSwitcherUITests.swift */,
 			);
 			path = OpenPawUITests;
 			sourceTree = "<group>";
@@ -420,6 +423,7 @@
 				1A2B3C0000000000000000C0 /* HomeInteractionUITests.swift in Sources */,
 				1A2B3C00000000000000F105 /* ScenarioLaunchUITests.swift in Sources */,
 				1A2B3C00000000000000F107 /* RootTabSwipeUITests.swift in Sources */,
+				1A2B3C00000000000000F111 /* HostSwitcherUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

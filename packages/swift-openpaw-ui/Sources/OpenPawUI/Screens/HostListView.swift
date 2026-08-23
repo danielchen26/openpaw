@@ -342,7 +342,8 @@ public struct HostListView: View {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             model.hostStore = try HostStore.import(from: try Data(contentsOf: url))
             if model.selectedHostID == nil || model.hostStore[model.selectedHostID ?? UUID()] == nil {
-                model.selectedHostID = model.hostStore.hosts.first?.id
+                let hostID = model.hostStore.hosts.first?.id
+                Task { await model.selectHost(hostID) }
             }
         } catch {
             transferError = "That file is not an OpenPaw host list: \(error)"
@@ -367,8 +368,8 @@ public struct HostListView: View {
     }
 
     private func connect(_ host: HostRecord) {
-        model.selectedHostID = host.id
         Task {
+            await model.selectHost(host.id)
             await model.connectSelectedHost()
             if model.connection.isConnected {
                 settings.recordConnection(to: host.id)
@@ -392,7 +393,8 @@ public struct HostListView: View {
         model.hostStore.remove(id: host.id)
         settings.forgetProfile(for: host.id)
         if model.selectedHostID == host.id {
-            model.selectedHostID = model.hostStore.hosts.first?.id
+            let hostID = model.hostStore.hosts.first?.id
+            Task { await model.selectHost(hostID) }
         }
         pendingDeletion = nil
     }

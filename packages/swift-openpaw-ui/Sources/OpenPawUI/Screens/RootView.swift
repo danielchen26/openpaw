@@ -166,6 +166,22 @@ public final class ShellRouter {
         approvalItemID = itemID
         destination = .inbox
     }
+
+    /// Clears navigation that names resources owned by one host while leaving the user's root tab in place.
+    /// Future Preview and provider/import routes must join this one reset point rather than inventing another host
+    /// generation boundary.
+    public func invalidateHostScopedState() {
+        sessionID = nil
+        approvalItemID = nil
+        repoPane = .diff
+        repoFocusPath = nil
+        diffMode = .workingTree
+    }
+}
+
+private enum ShellRequestedSheet {
+    case addDevice
+    case manageHosts
 }
 
 // MARK: - Root
@@ -197,6 +213,7 @@ public struct RootView: View {
     @State private var latchedModifiers: KeyModifiers = []
     /// Terminal actions the strip's view page triggers on the terminal screen.
     @State private var terminalControls = TerminalControlBus()
+    @State private var requestedSheet: ShellRequestedSheet?
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     #if os(iOS)
@@ -274,6 +291,7 @@ public struct RootView: View {
             await refreshSessionSpace()
         }
         .onChange(of: model.selectedHostID) { _, _ in
+            router.invalidateHostScopedState()
             invalidateSessionSpace()
             Task {
                 if model.canRefreshRemoteState { await model.refresh() }
@@ -305,6 +323,14 @@ public struct RootView: View {
                 HostKeySheet(prompt: prompt, onTrust: { trust(prompt) }, onCancel: { model.hostKeyPrompt = nil })
             case .approval(let item):
                 ApprovalSheet(model: model, item: item)
+            case .addDevice:
+                NavigationStack {
+                    AddDeviceFlow(model: model, settings: settings) { requestedSheet = nil }
+                }
+            case .manageHosts:
+                NavigationStack {
+                    HostListView(model: model, settings: settings)
+                }
             }
         }
         .alert(
@@ -703,27 +729,12 @@ public struct RootView: View {
     }
 
     private var hostChip: some View {
-        let status = ConnectionPresentation.make(model.connection)
-        return Button {
-            router.destination = .settings
-        } label: {
-            VStack(alignment: .leading, spacing: OpenPawTheme.Space.hair) {
-                Text(model.selectedHost?.nickname ?? "No host")
-                    .font(OpenPawTheme.Machine.body)
-                    .foregroundStyle(OpenPawTheme.textPrimary)
-                HStack(spacing: OpenPawTheme.Space.tight) {
-                    Circle()
-                        .fill(status.tone)
-                        .frame(width: 6, height: 6)
-                        .accessibilityHidden(true)
-                    Text(status.label).microLabel(status.tone)
-                }
-            }
-            .frame(minHeight: 44)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(model.selectedHost?.nickname ?? "No host"), \(status.label). Opens settings")
+        HostSwitcher(
+            model: model,
+            onAddDevice: { requestedSheet = .addDevice },
+            onManageHosts: { requestedSheet = .manageHosts },
+            onConnected: { settings.recordConnection(to: $0) }
+        )
     }
 
     // MARK: Destination content
@@ -747,7 +758,9 @@ public struct RootView: View {
                 scrollback: scrollback,
                 controls: terminalControls,
                 surface: terminalSurface,
-                onFontSizeChange: { _ in }
+                onFontSizeChange: { _ in },
+                onAddDevice: { requestedSheet = .addDevice },
+                onManageHosts: { requestedSheet = .manageHosts }
             )
         case .sessions:
             sessions(width: width)
@@ -1103,11 +1116,15 @@ public struct RootView: View {
     private enum ShellSheet: Identifiable {
         case hostKey(HostKeyPrompt)
         case approval(InboxItem)
+        case addDevice
+        case manageHosts
 
         var id: String {
             switch self {
             case .hostKey(let prompt): "host-key-\(prompt.id)"
             case .approval(let item): "approval-\(item.id.rawValue)"
+            case .addDevice: "add-device"
+            case .manageHosts: "manage-hosts"
             }
         }
     }
@@ -1118,7 +1135,13 @@ public struct RootView: View {
         if let prompt = model.hostKeyPrompt { return .hostKey(prompt) }
         guard let id = router.approvalItemID,
             let item = model.inbox.first(where: { $0.id.rawValue == id })
-        else { return nil }
+        else {
+            return switch requestedSheet {
+            case .addDevice: .addDevice
+            case .manageHosts: .manageHosts
+            case nil: nil
+            }
+        }
         return .approval(item)
     }
 
@@ -1129,6 +1152,7 @@ public struct RootView: View {
                 guard newValue == nil else { return }
                 model.hostKeyPrompt = nil
                 router.approvalItemID = nil
+                requestedSheet = nil
             }
         )
     }

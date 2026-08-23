@@ -88,6 +88,8 @@ public struct TerminalScreenView: View {
     private let controls: TerminalControlBus
     private let surface: () -> AnyView
     private let onFontSizeChange: (CGFloat) -> Void
+    private let onAddDevice: () -> Void
+    private let onManageHosts: () -> Void
 
     @State private var latched: KeyModifiers = []
     @State private var isSearching = false
@@ -107,7 +109,9 @@ public struct TerminalScreenView: View {
         scrollback: ScrollbackStore,
         controls: TerminalControlBus = TerminalControlBus(),
         surface: @escaping () -> AnyView,
-        onFontSizeChange: @escaping (CGFloat) -> Void
+        onFontSizeChange: @escaping (CGFloat) -> Void,
+        onAddDevice: @escaping () -> Void = {},
+        onManageHosts: @escaping () -> Void = {}
     ) {
         self.model = model
         self.settings = settings
@@ -115,6 +119,8 @@ public struct TerminalScreenView: View {
         self.controls = controls
         self.surface = surface
         self.onFontSizeChange = onFontSizeChange
+        self.onAddDevice = onAddDevice
+        self.onManageHosts = onManageHosts
     }
 
     public var body: some View {
@@ -156,30 +162,14 @@ public struct TerminalScreenView: View {
 
     private var header: some View {
         let status = ConnectionPresentation.make(model.connection)
-        let host = model.selectedHost?.nickname
         return VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
-            HStack(alignment: .firstTextBaseline, spacing: OpenPawTheme.Space.small) {
-                Image(systemName: host == nil ? "circle.dashed" : status.glyph)
-                    .font(OpenPawTheme.Machine.codeSmall)
-                    .foregroundStyle(host == nil ? OpenPawTheme.textTertiary : status.tone)
-                    .accessibilityHidden(true)
-                Text(host ?? "No host")
-                    .font(OpenPawTheme.Machine.headline)
-                    .foregroundStyle(host == nil ? OpenPawTheme.textSecondary : OpenPawTheme.textPrimary)
-                // With no host there is nothing a connection state could be true about, so it is not claimed.
-                // A header must never state two things that cannot both hold.
-                if host != nil {
-                    Text(status.label).microLabel(status.tone)
-                    if let transport = ConnectionPresentation.transportLabel(model.connection) {
-                        Text(transport).microLabel()
-                    }
-                } else {
-                    Text("add one in settings").microLabel()
-                }
-                Spacer(minLength: OpenPawTheme.Space.small)
-                connectionButton
-            }
-            if host != nil, let detail = status.detail {
+            HostSwitcher(
+                model: model,
+                onAddDevice: onAddDevice,
+                onManageHosts: onManageHosts,
+                onConnected: { settings.recordConnection(to: $0) }
+            )
+            if model.selectedHost != nil, let detail = status.detail {
                 Text(detail)
                     .font(OpenPawTheme.Human.caption)
                     .foregroundStyle(OpenPawTheme.textSecondary)
@@ -192,39 +182,6 @@ public struct TerminalScreenView: View {
         // Glass, like the strip at the other end of the screen. Scrollback passing under the header is what says
         // the terminal is a continuous surface the chrome floats on rather than a pane boxed in by two bars.
         .glassChrome(overTerminal: true, edge: .bottom)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(headerVoiceLabel(status))
-    }
-
-    private func headerVoiceLabel(_ status: ConnectionPresentation) -> String {
-        guard let host = model.selectedHost?.nickname else { return "No host selected" }
-        guard let detail = status.detail else { return "\(host), \(status.label)" }
-        return "\(host), \(status.label). \(detail)"
-    }
-
-    @ViewBuilder
-    private var connectionButton: some View {
-        if model.connection.isConnected {
-            Button("Disconnect") { Task { await model.disconnect() } }
-                .buttonStyle(.plain)
-                .font(OpenPawTheme.Machine.label)
-                .frame(minHeight: 44)
-                .foregroundStyle(OpenPawTheme.textSecondary)
-        } else {
-            Button("Connect") { Task { await connect() } }
-                .buttonStyle(.plain)
-                .font(OpenPawTheme.Machine.label)
-                .frame(minHeight: 44)
-                .foregroundStyle(OpenPawTheme.textPrimary)
-                .disabled(model.selectedHost == nil)
-        }
-    }
-
-    private func connect() async {
-        await model.connectSelectedHost()
-        if model.connection.isConnected, let id = model.selectedHostID {
-            settings.recordConnection(to: id)
-        }
     }
 
     // MARK: Terminal

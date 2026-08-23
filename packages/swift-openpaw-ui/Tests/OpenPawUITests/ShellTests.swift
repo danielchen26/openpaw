@@ -262,6 +262,7 @@ struct RootNavigationTests {
         #expect(missingBackend.canRefreshRemoteState == false)
 
         let ready = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend)
+        ready.connection = .connected(.ssh)
         #expect(ready.canRefreshRemoteState)
 
         ready.selectedHostID = UUID()
@@ -284,7 +285,113 @@ struct RootNavigationTests {
         #expect(model.connectionGeneration == initial + 3)
 
         model.selectedHostID = second.id
-        #expect(model.connectionGeneration == initial + 4)
+        #expect(model.connectionGeneration > initial + 3)
+    }
+
+    @MainActor
+    @Test("Selecting a saved host is a disconnecting transaction, not an implicit connection")
+    func selectingHostClearsEveryHostScopedModelValueBeforeAnExplicitConnect() async throws {
+        let model = PreviewBackend.model(.populated)
+        let terminal = RecordingTerminalBackend()
+        model.attach(backend: model.backend, terminal: terminal)
+        let second = HostRecord(
+            nickname: "Build server",
+            hostname: "build.tailnet.example",
+            username: "openpaw",
+            auth: .agentForwarding,
+            preferredTransport: .ssh
+        )
+        model.hostStore.upsert(second)
+        let generation = model.connectionGeneration
+
+        #expect(model.health != nil)
+        #expect(!model.sessions.isEmpty)
+        #expect(!model.inbox.isEmpty)
+        #expect(!model.repos.isEmpty)
+        #expect(model.selectedSessionID != nil)
+        #expect(model.selectedRepo != nil)
+
+        await model.selectHost(second.id)
+
+        #expect(model.selectedHostID == second.id)
+        #expect(model.connectionGeneration > generation)
+        #expect(model.connection == .disconnected(reason: "Host selection changed"))
+        #expect(model.health == nil)
+        #expect(model.sessions.isEmpty)
+        #expect(model.selectedSessionID == nil)
+        #expect(model.inbox.isEmpty)
+        #expect(model.repos.isEmpty)
+        #expect(model.selectedRepo == nil)
+        #expect(terminal.connectedHosts.isEmpty)
+        #expect(terminal.disconnectCount == 1)
+
+        await model.connectSelectedHost()
+        #expect(terminal.connectedHosts == [second.id])
+    }
+
+    @MainActor
+    @Test("A host change rejects a refresh that belonged to the previous host")
+    func hostSelectionStalesAnInflightRefresh() async throws {
+        let first = hostRecord()
+        let second = HostRecord(
+            nickname: "Build server", hostname: "build", username: "openpaw", auth: .agentForwarding)
+        let backend = RecordingBackend()
+        backend.refreshDelayNanoseconds = 50_000_000
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend)
+        model.connection = .connected(.ssh)
+
+        let refresh = Task { await model.refresh() }
+        while backend.callCount("health") == 0 { await Task.yield() }
+        await model.selectHost(second.id)
+        await refresh.value
+
+        #expect(model.selectedHostID == second.id)
+        #expect(model.health == nil)
+        #expect(model.sessions.isEmpty)
+        #expect(model.inbox.isEmpty)
+        #expect(model.repos.isEmpty)
+    }
+
+    @MainActor
+    @Test("Host changes clear every host-scoped shell route while keeping the root destination")
+    func routerInvalidatesHostScopedRoutes() {
+        let router = ShellRouter()
+        router.destination = .repo
+        router.sessionID = "session-old"
+        router.approvalItemID = "inbox-old"
+        router.repoPane = .preview
+        router.repoFocusPath = "Sources/Old.swift"
+        router.diffMode = .staged
+
+        router.invalidateHostScopedState()
+
+        #expect(router.destination == .repo)
+        #expect(router.sessionID == nil)
+        #expect(router.approvalItemID == nil)
+        #expect(router.repoPane == .diff)
+        #expect(router.repoFocusPath == nil)
+        #expect(router.diffMode == .workingTree)
+    }
+
+    @Test("The shared host switcher exposes one status, transport, and action vocabulary")
+    func sharedHostSwitcherPresentationIsLayoutIndependent() {
+        let host = HostRecord(
+            nickname: "Build server", hostname: "build", username: "openpaw",
+            auth: .agentForwarding, preferredTransport: .ssh)
+
+        let disconnected = HostSwitcherPresentation(host: host, connection: .disconnected(reason: nil))
+        #expect(disconnected.title == "Build server")
+        #expect(disconnected.value == "disconnected · SSH")
+        #expect(disconnected.connectionActions == [.connect])
+
+        let connected = HostSwitcherPresentation(host: host, connection: .connected(.ssh))
+        #expect(connected.value == "connected · SSH")
+        #expect(connected.connectionActions == [.reconnect, .disconnect])
+
+        let empty = HostSwitcherPresentation(host: nil, connection: .idle)
+        #expect(empty.title == "No host")
+        #expect(empty.value == "Add a device")
+        #expect(empty.connectionActions.isEmpty)
     }
 
     @MainActor
@@ -370,6 +477,7 @@ private class RecordingBackend: OpenPawBackend, @unchecked Sendable {
     var tailscaleResponse = TailscaleDevicesResponse(version: 1, candidates: [])
     var tailscaleError: (any Error)?
     var tailscaleDelayNanoseconds: UInt64 = 0
+    var refreshDelayNanoseconds: UInt64 = 0
 
     private func record(_ name: String) {
         lock.lock()
@@ -379,6 +487,7 @@ private class RecordingBackend: OpenPawBackend, @unchecked Sendable {
 
     func health() async throws -> HealthInfo {
         record("health")
+        if refreshDelayNanoseconds > 0 { try await Task.sleep(nanoseconds: refreshDelayNanoseconds) }
         return HealthInfo(
             version: "test", protocolVersion: "1.0", agents: [.claudeCode], capabilities: [], previewPorts: [],
             adapterVersions: [:])
@@ -386,11 +495,13 @@ private class RecordingBackend: OpenPawBackend, @unchecked Sendable {
 
     func sessions() async throws -> [SessionSummary] {
         record("sessions")
+        if refreshDelayNanoseconds > 0 { try await Task.sleep(nanoseconds: refreshDelayNanoseconds) }
         return []
     }
 
     func inbox(status: InboxStatus?) async throws -> [InboxItem] {
         record("inbox")
+        if refreshDelayNanoseconds > 0 { try await Task.sleep(nanoseconds: refreshDelayNanoseconds) }
         return []
     }
 
@@ -406,6 +517,7 @@ private class RecordingBackend: OpenPawBackend, @unchecked Sendable {
 
     func repos() async throws -> [RepoSummary] {
         record("repos")
+        if refreshDelayNanoseconds > 0 { try await Task.sleep(nanoseconds: refreshDelayNanoseconds) }
         return []
     }
 
@@ -458,21 +570,86 @@ private class RecordingBackend: OpenPawBackend, @unchecked Sendable {
 }
 
 
+private actor SuspendedLifecycleGate {
+    private var started = false
+    private var released = false
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func suspend() async {
+        started = true
+        let waiters = startedWaiters
+        startedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            if released {
+                continuation.resume()
+            } else {
+                releaseWaiters.append(continuation)
+            }
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { startedWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
 private final class LifecycleRecordingBackend: RecordingBackend, StructuredBackendLifecycle, @unchecked Sendable {
     private let lock2 = NSLock()
-    var ready = false
-    var connectIDs: [HostRecord.ID] = []
-    var disconnectCount = 0
+    private var ready = false
+    private var recordedConnectIDs: [HostRecord.ID] = []
+    private var recordedDisconnectCount = 0
+    private var recordedActiveHostID: HostRecord.ID?
     var failConnect = false
-    var isReady: Bool { get async { ready } }
+    var suspendedHostID: HostRecord.ID?
+    var connectGate: SuspendedLifecycleGate?
+    var suspendedDisconnectNumber: Int?
+    var disconnectGate: SuspendedLifecycleGate?
+
+    var connectIDs: [HostRecord.ID] { locked { recordedConnectIDs } }
+    var disconnectCount: Int { locked { recordedDisconnectCount } }
+    var activeHostID: HostRecord.ID? { locked { recordedActiveHostID } }
+    var isReady: Bool { get async { locked { ready } } }
+
     func connect(hostID: HostRecord.ID) async throws {
-        connectIDs.append(hostID)
+        let gate = locked {
+            recordedConnectIDs.append(hostID)
+            return suspendedHostID == hostID ? connectGate : nil
+        }
+        if let gate { await gate.suspend() }
         if failConnect { throw RecordingBackendError.unexpectedCall }
-        ready = true
+        locked {
+            ready = true
+            recordedActiveHostID = hostID
+        }
     }
+
     func disconnect() async {
-        disconnectCount += 1
-        ready = false
+        let gate = locked {
+            recordedDisconnectCount += 1
+            return recordedDisconnectCount == suspendedDisconnectNumber ? disconnectGate : nil
+        }
+        if let gate { await gate.suspend() }
+        locked {
+            ready = false
+            recordedActiveHostID = nil
+        }
+    }
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock2.lock()
+        defer { lock2.unlock() }
+        return body()
     }
 }
 
@@ -556,7 +733,7 @@ struct StructuredBackendLifecycleTests {
 
         terminal.failConnect = true
         let healthCalls = backend.callCount("health")
-        model.selectedHostID = second.id
+        await model.selectHost(second.id)
 
         #expect(model.structuredBackendReady == false)
         #expect(model.canRefreshRemoteState == false)
@@ -583,12 +760,102 @@ struct StructuredBackendLifecycleTests {
         let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend, terminal: terminal)
         await model.connectSelectedHost()
         model.refreshTailscaleDevices()
-        model.selectedHostID = second.id
+        await model.selectHost(second.id)
         await model.connectSelectedHost()
         try await Task.sleep(nanoseconds: 90_000_000)
         #expect(backend.disconnectCount >= 2)
         #expect(backend.connectIDs.suffix(2) == [first.id, second.id])
         #expect(model.tailscaleDiscovery.candidates.isEmpty)
+    }
+
+    @MainActor
+    @Test("A delayed structured connect is cleaned up after selecting another host")
+    func delayedConnectCannotReattachTheOldHost() async {
+        let first = HostRecord(nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Two", hostname: "two", username: "dev", auth: .agentForwarding)
+        let gate = SuspendedLifecycleGate()
+        let backend = LifecycleRecordingBackend()
+        backend.suspendedHostID = first.id
+        backend.connectGate = gate
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend, terminal: terminal)
+
+        let staleConnect = Task { await model.connectSelectedHost() }
+        await gate.waitUntilStarted()
+        await model.selectHost(second.id)
+        await gate.release()
+        await staleConnect.value
+
+        #expect(model.selectedHostID == second.id)
+        #expect(model.structuredBackendReady == false)
+        #expect(backend.activeHostID == nil)
+    }
+
+    @MainActor
+    @Test("A newer host connect owns the lifecycle after a delayed stale connect finishes")
+    func newerConnectWinsAfterDelayedStaleConnect() async {
+        let first = HostRecord(nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Two", hostname: "two", username: "dev", auth: .agentForwarding)
+        let gate = SuspendedLifecycleGate()
+        let backend = LifecycleRecordingBackend()
+        backend.suspendedHostID = first.id
+        backend.connectGate = gate
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend, terminal: terminal)
+
+        let staleConnect = Task { await model.connectSelectedHost() }
+        await gate.waitUntilStarted()
+        await model.selectHost(second.id)
+        let currentConnect = Task { await model.connectSelectedHost() }
+
+        // Give the unsafe implementation a deterministic opportunity to finish the newer lifecycle connect first.
+        for _ in 0..<100 where backend.activeHostID != second.id {
+            await Task.yield()
+        }
+        await gate.release()
+        await staleConnect.value
+        await currentConnect.value
+
+        #expect(backend.connectIDs == [first.id, second.id])
+        #expect(backend.activeHostID == second.id)
+        #expect(model.selectedHostID == second.id)
+        #expect(model.structuredBackendReady)
+    }
+
+    @MainActor
+    @Test("Stale cleanup cannot overtake and disconnect a newer host")
+    func staleCleanupCannotDisconnectNewerHost() async {
+        let first = HostRecord(nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Two", hostname: "two", username: "dev", auth: .agentForwarding)
+        let connectGate = SuspendedLifecycleGate()
+        let cleanupGate = SuspendedLifecycleGate()
+        let backend = LifecycleRecordingBackend()
+        backend.suspendedHostID = first.id
+        backend.connectGate = connectGate
+        // A connect performs two initial teardowns and host selection performs the third. The fourth is stale cleanup.
+        backend.suspendedDisconnectNumber = 4
+        backend.disconnectGate = cleanupGate
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend, terminal: terminal)
+
+        let staleConnect = Task { await model.connectSelectedHost() }
+        await connectGate.waitUntilStarted()
+        await model.selectHost(second.id)
+        await connectGate.release()
+        await cleanupGate.waitUntilStarted()
+
+        let currentConnect = Task { await model.connectSelectedHost() }
+        // The unsafe implementation can finish B while A's cleanup is suspended. The safe implementation queues B.
+        for _ in 0..<100 where backend.activeHostID != second.id {
+            await Task.yield()
+        }
+        await cleanupGate.release()
+        await staleConnect.value
+        await currentConnect.value
+
+        #expect(backend.activeHostID == second.id)
+        #expect(model.selectedHostID == second.id)
+        #expect(model.structuredBackendReady)
     }
 }
 
