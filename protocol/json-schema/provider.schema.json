@@ -4,8 +4,9 @@
   "title": "OpenPaw provider API contracts",
   "$defs": {
     "providerId": { "type": "string", "enum": ["github", "huggingface"] },
-    "connectionState": { "type": "string", "enum": ["disconnected", "authorizing", "connected", "error"] },
-    "authorizationState": { "type": "string", "enum": ["pending", "slow_down", "authorized", "denied", "expired", "cancelled"] },
+    "safeIdentifier": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!-)(?!.*\\.\\.)(?!.*(?:%2[fF]|%5[cC]))[A-Za-z0-9_.-]+$" },
+    "connectionState": { "type": "string", "enum": ["disconnected", "authorizing", "connected", "reauthorization_required", "outage", "error"] },
+    "authorizationState": { "type": "string", "enum": ["pending", "slow_down", "authorized", "denied", "expired", "cancelled", "reauthorization_required", "outage"] },
     "providerStatus": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "display_name", "state", "scopes", "repo_listing_supported"],
@@ -22,7 +23,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["authorization_id", "verification_url", "user_code", "expires_at", "interval_seconds"],
       "properties": {
-        "authorization_id": { "type": "string", "minLength": 1 },
+        "authorization_id": { "$ref": "#/$defs/safeIdentifier" },
         "verification_url": { "type": "string", "format": "uri" },
         "user_code": { "type": "string", "minLength": 1 },
         "expires_at": { "type": "string", "format": "date-time" },
@@ -33,7 +34,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["authorization_id", "state", "provider"],
       "properties": {
-        "authorization_id": { "type": "string", "minLength": 1 },
+        "authorization_id": { "$ref": "#/$defs/safeIdentifier" },
         "state": { "$ref": "#/$defs/authorizationState" },
         "provider": { "$ref": "#/$defs/providerId" },
         "account_label": { "type": "string" }
@@ -43,13 +44,13 @@
       "type": "object", "additionalProperties": false,
       "required": ["id", "provider", "owner", "name", "display_name", "is_private"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "id": { "$ref": "#/$defs/safeIdentifier" },
         "provider": { "$ref": "#/$defs/providerId" },
         "owner": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1 },
         "display_name": { "type": "string", "minLength": 1 },
         "is_private": { "type": "boolean" },
-        "clone_url_redacted": { "type": "string" }
+        "source_url_redacted": { "type": "string" }
       }
     },
     "providerRepoPage": {

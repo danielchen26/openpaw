@@ -19,6 +19,14 @@ fn load(name: &str) -> Value {
         .unwrap_or_else(|error| panic!("{} is not valid JSON: {error}", path.display()))
 }
 
+fn load_fixture(name: &str) -> Value {
+    let path = repo_root().join("protocol/fixtures").join(name);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("{} is not valid JSON: {error}", path.display()))
+}
+
 /// The inbox schema `$ref`s the event schema by relative URI, so the event
 /// schema is registered under its `$id` before compiling.
 fn validators() -> (Validator, Validator) {
@@ -81,6 +89,24 @@ fn provider_and_repo_import_contracts_are_sanitized_and_schema_valid() {
     assert_valid(&provider_validator, "provider status", &status);
     assert_contract_has_no_secret_or_path_keys(&status);
 
+    let page = serde_json::to_value(openpaw_protocol::ProviderRepoPage {
+        repos: vec![openpaw_protocol::ProviderRepo {
+            id: "repo_123".to_owned(),
+            provider: openpaw_protocol::ProviderId::Github,
+            owner: "openpaw".to_owned(),
+            name: "openpaw".to_owned(),
+            display_name: "openpaw/openpaw".to_owned(),
+            is_private: true,
+            source_url_redacted: Some(openpaw_protocol::redact_url_credentials(
+                "https://user:token@example.com/org/repo.git",
+            )),
+        }],
+        next_cursor: Some("cursor_2".to_owned()),
+    })
+    .unwrap();
+    assert_valid(&provider_validator, "provider repo page", &page);
+    assert_contract_has_no_secret_or_path_keys(&page);
+
     let import = serde_json::to_value(openpaw_protocol::RepoImportRequest {
         provider: openpaw_protocol::ProviderId::Github,
         repo_id: "repo_123".to_owned(),
@@ -123,28 +149,161 @@ fn repo_import_contract_rejects_caller_destination_paths_and_secret_maps() {
     assert!(!repo_validator.is_valid(&bad_progress));
 }
 
-fn assert_contract_has_no_secret_or_path_keys(value: &Value) {
-    const FORBIDDEN: &[&str] = &[
-        "token",
-        "authorization",
-        "authorization_header",
-        "credential_path",
-        "env",
-        "destination_path",
+#[test]
+fn provider_repo_identifiers_reject_traversal_paths_controls_and_encoded_separators() {
+    for bad in [
+        "",
+        "-repo",
+        "../repo",
+        "repo/name",
+        "repo\\name",
+        "repo%2fname",
+        "repo%5Cname",
+        "repo\nname",
+    ] {
+        let import = serde_json::json!({"provider":"github","repo_id":bad});
+        assert!(
+            serde_json::from_value::<openpaw_protocol::RepoImportRequest>(import).is_err(),
+            "repo_id accepted {bad:?}"
+        );
+
+        let register = serde_json::json!({"root_id":bad});
+        assert!(
+            serde_json::from_value::<openpaw_protocol::RepoRegisterRequest>(register).is_err(),
+            "root_id accepted {bad:?}"
+        );
+
+        let progress = serde_json::json!({"id":bad,"state":"queued","repo_name":"openpaw","destination_name":"openpaw"});
+        assert!(
+            serde_json::from_value::<openpaw_protocol::RepoImportProgress>(progress).is_err(),
+            "import id accepted {bad:?}"
+        );
+    }
+}
+
+#[test]
+fn repo_import_progress_rejects_out_of_range_percent_and_long_messages() {
+    let too_high = serde_json::json!({"id":"imp_123","state":"cloning","repo_name":"openpaw","destination_name":"openpaw","percent":101});
+    assert!(serde_json::from_value::<openpaw_protocol::RepoImportProgress>(too_high).is_err());
+
+    let too_long = serde_json::json!({"id":"imp_123","state":"cloning","repo_name":"openpaw","destination_name":"openpaw","message":"x".repeat(501)});
+    assert!(serde_json::from_value::<openpaw_protocol::RepoImportProgress>(too_long).is_err());
+}
+
+#[test]
+fn repo_import_state_wire_phases_match_integration_contract() {
+    let accepted = [
+        "queued",
+        "authorizing",
+        "cloning",
+        "validating",
+        "registering",
+        "completed",
+        "failed",
+        "cancelled",
+        "recovery_required",
     ];
+    let schema = load("repo-import.schema.json");
+    let declared = schema["$defs"]["importState"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(declared, accepted);
+    for state in accepted {
+        let progress = serde_json::json!({"id":"imp_123","state":state,"repo_name":"openpaw","destination_name":"openpaw"});
+        serde_json::from_value::<openpaw_protocol::RepoImportProgress>(progress).unwrap();
+    }
+    for rejected in ["indexing", "outage"] {
+        let progress = serde_json::json!({"id":"imp_123","state":rejected,"repo_name":"openpaw","destination_name":"openpaw"});
+        assert!(serde_json::from_value::<openpaw_protocol::RepoImportProgress>(progress).is_err());
+    }
+}
+
+#[test]
+fn shared_clean_provider_repo_fixtures_decode_in_rust() {
+    for fixture in [
+        "provider-status.clean.json",
+        "provider-auth-start.clean.json",
+        "provider-auth-status.clean.json",
+        "provider-repo-list.clean.json",
+        "repo-import-progress.clean.json",
+    ] {
+        assert_contract_has_no_secret_or_path_keys(&load_fixture(fixture));
+    }
+
+    serde_json::from_value::<Vec<openpaw_protocol::ProviderStatus>>(load_fixture(
+        "provider-status.clean.json",
+    ))
+    .unwrap();
+    serde_json::from_value::<openpaw_protocol::ProviderAuthorizationStart>(load_fixture(
+        "provider-auth-start.clean.json",
+    ))
+    .unwrap();
+    serde_json::from_value::<openpaw_protocol::ProviderAuthorizationStatus>(load_fixture(
+        "provider-auth-status.clean.json",
+    ))
+    .unwrap();
+    serde_json::from_value::<openpaw_protocol::ProviderRepoPage>(load_fixture(
+        "provider-repo-list.clean.json",
+    ))
+    .unwrap();
+    serde_json::from_value::<openpaw_protocol::RepoImportProgress>(load_fixture(
+        "repo-import-progress.clean.json",
+    ))
+    .unwrap();
+}
+
+fn assert_contract_has_no_secret_or_path_keys(value: &Value) {
+    const FORBIDDEN_SUBSTRINGS: &[&str] = &[
+        "token",
+        "secret",
+        "credential",
+        "password",
+        "env",
+        "access_token",
+        "refresh_token",
+        "device_code",
+        "client_secret",
+        "clone_url",
+        "header",
+        "local_path",
+        "filesystem_path",
+        "destination_path",
+        "credential_path",
+        "authorization_header",
+        "authorization_url",
+        "authorization_map",
+    ];
+    const ALLOWED_KEYS: &[&str] = &["authorization_id", "state"];
     match value {
         Value::Object(map) => {
             for (key, value) in map {
-                assert!(
-                    !FORBIDDEN.contains(&key.as_str()),
-                    "forbidden key {key} in {map:?}"
-                );
+                if !ALLOWED_KEYS.contains(&key.as_str()) {
+                    assert!(
+                        !FORBIDDEN_SUBSTRINGS
+                            .iter()
+                            .any(|forbidden| key.contains(forbidden)),
+                        "forbidden key {key} in {map:?}"
+                    );
+                }
                 assert_contract_has_no_secret_or_path_keys(value);
             }
         }
         Value::Array(values) => values
             .iter()
             .for_each(assert_contract_has_no_secret_or_path_keys),
+        Value::String(text) => {
+            let lower = text.to_ascii_lowercase();
+            assert!(
+                !lower.contains("authorization:")
+                    && !lower.contains("/users/")
+                    && !lower.contains("/tmp/")
+                    && !lower.contains("c:\\"),
+                "forbidden local path or header value {text:?}"
+            );
+        }
         _ => {}
     }
 }

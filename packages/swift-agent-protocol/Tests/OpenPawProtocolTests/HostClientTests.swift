@@ -96,26 +96,94 @@ final class HostClientTests: XCTestCase {
         let providerData = try OpenPawCoding.encoder.encode(providers)
         assertNoProviderRepoSecrets(providerData)
 
-        respond(status: 200, body: #"{"repos":[{"id":"repo_1","provider":"github","owner":"openpaw","name":"openpaw","display_name":"openpaw/openpaw","is_private":true,"clone_url_redacted":"https://<redacted>@github.com/openpaw/openpaw.git"}],"next_cursor":"next"}"#)
+        respond(status: 200, body: #"{"repos":[{"id":"repo_1","provider":"github","owner":"openpaw","name":"openpaw","display_name":"openpaw/openpaw","is_private":true,"source_url_redacted":"https://<redacted>@github.com/openpaw/openpaw.git"}],"next_cursor":"next"}"#)
         let page = try await makeClient().providerRepos(.github, cursor: "first")
-        XCTAssertEqual(page.repos.first?.cloneURLRedacted, "https://<redacted>@github.com/openpaw/openpaw.git")
+        XCTAssertEqual(page.repos.first?.sourceURLRedacted, "https://<redacted>@github.com/openpaw/openpaw.git")
         assertNoProviderRepoSecrets(try OpenPawCoding.encoder.encode(page))
 
         respond(status: 200, body: #"{"id":"imp_1","state":"cloning","repo_name":"openpaw","destination_name":"openpaw-2","percent":50,"source_url_redacted":"https://<redacted>@github.com/openpaw/openpaw.git"}"#)
-        let progress = try await makeClient().importRepo(.init(provider: .github, repoID: "repo_1", requestedName: "openpaw"))
+        let progress = try await makeClient().importRepo(try .init(provider: .github, repoID: "repo_1", requestedName: "openpaw"))
         XCTAssertEqual(progress.destinationName, "openpaw-2")
         assertNoProviderRepoSecrets(try OpenPawCoding.encoder.encode(progress))
-        let body = try OpenPawCoding.encoder.encode(RepoImportRequest(provider: .github, repoID: "repo_1", requestedName: "openpaw"))
+        let body = try OpenPawCoding.encoder.encode(try RepoImportRequest(provider: .github, repoID: "repo_1", requestedName: "openpaw"))
         assertNoProviderRepoSecrets(body)
         let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
         XCTAssertNil(json?["destination_path"])
     }
 
-    private func assertNoProviderRepoSecrets(_ data: Data, file: StaticString = #filePath, line: UInt = #line) {
-        let text = String(decoding: data, as: UTF8.self).lowercased()
-        for forbidden in ["token", "authorization_header", "credential_path", "destination_path", "\"env\""] {
-            XCTAssertFalse(text.contains(forbidden), "contract leaked forbidden field \(forbidden): \(text)", file: file, line: line)
+    func testProviderRepoIdentifiersRejectTraversalPathsControlsAndEncodedSeparators() throws {
+        for bad in ["", "-repo", "../repo", "repo/name", "repo\\name", "repo%2fname", "repo%5Cname", "repo\nname"] {
+            XCTAssertThrowsError(try OpenPawCoding.decoder.decode(RepoImportRequest.self, from: Data(#"{"provider":"github","repo_id":"\#(bad)"}"#.utf8)), "repoID accepted \(bad)")
+            XCTAssertThrowsError(try RepoImportRequest(provider: .github, repoID: bad))
+            XCTAssertThrowsError(try RepoRegisterRequest(rootID: bad))
+            XCTAssertThrowsError(try OpenPawCoding.decoder.decode(RepoImportProgress.self, from: Data(#"{"id":"\#(bad)","state":"queued","repo_name":"openpaw","destination_name":"openpaw"}"#.utf8)), "import id accepted \(bad)")
         }
+    }
+
+    func testRepoImportProgressRejectsOutOfRangePercentAndLongMessages() throws {
+        XCTAssertThrowsError(try OpenPawCoding.decoder.decode(RepoImportProgress.self, from: Data(#"{"id":"imp_123","state":"cloning","repo_name":"openpaw","destination_name":"openpaw","percent":101}"#.utf8)))
+        XCTAssertThrowsError(try RepoImportProgress(id: "imp_123", state: .cloning, repoName: "openpaw", destinationName: "openpaw", percent: 101))
+        XCTAssertThrowsError(try RepoImportProgress(id: "imp_123", state: .cloning, repoName: "openpaw", destinationName: "openpaw", message: String(repeating: "x", count: 501)))
+    }
+
+    func testSharedCleanProviderRepoFixturesDecodeInSwift() throws {
+        for fixture in ["provider-status.clean", "provider-auth-start.clean", "provider-auth-status.clean", "provider-repo-list.clean", "repo-import-progress.clean"] {
+            assertNoProviderRepoSecrets(try fixtureData(fixture))
+        }
+        _ = try OpenPawCoding.decoder.decode([ProviderStatus].self, from: fixtureData("provider-status.clean"))
+        _ = try OpenPawCoding.decoder.decode(ProviderAuthorizationStart.self, from: fixtureData("provider-auth-start.clean"))
+        _ = try OpenPawCoding.decoder.decode(ProviderAuthorizationStatus.self, from: fixtureData("provider-auth-status.clean"))
+        _ = try OpenPawCoding.decoder.decode(ProviderRepoPage.self, from: fixtureData("provider-repo-list.clean"))
+        let progress = try OpenPawCoding.decoder.decode(RepoImportProgress.self, from: fixtureData("repo-import-progress.clean"))
+        XCTAssertEqual(progress.state, .cloning)
+
+        let unknown = try OpenPawCoding.decoder.decode(RepoImportProgress.self, from: Data(#"{"id":"imp_123","state":"host_future_state","repo_name":"openpaw","destination_name":"openpaw"}"#.utf8))
+        XCTAssertEqual(unknown.state, .unknown("host_future_state"))
+    }
+
+    func testRepoImportStateWirePhasesMatchIntegrationContractWithUnknownFallback() throws {
+        let accepted: [(String, RepoImportState)] = [
+            ("queued", .queued),
+            ("authorizing", .authorizing),
+            ("cloning", .cloning),
+            ("validating", .validating),
+            ("registering", .registering),
+            ("completed", .completed),
+            ("failed", .failed),
+            ("cancelled", .cancelled),
+            ("recovery_required", .recoveryRequired),
+        ]
+        for (wire, expected) in accepted {
+            let progress = try OpenPawCoding.decoder.decode(RepoImportProgress.self, from: Data(#"{"id":"imp_123","state":"\#(wire)","repo_name":"openpaw","destination_name":"openpaw"}"#.utf8))
+            XCTAssertEqual(progress.state, expected)
+        }
+        for legacyOrFuture in ["indexing", "outage", "host_future_state"] {
+            let progress = try OpenPawCoding.decoder.decode(RepoImportProgress.self, from: Data(#"{"id":"imp_123","state":"\#(legacyOrFuture)","repo_name":"openpaw","destination_name":"openpaw"}"#.utf8))
+            XCTAssertEqual(progress.state, .unknown(legacyOrFuture))
+        }
+    }
+
+    private func assertNoProviderRepoSecrets(_ data: Data, file: StaticString = #filePath, line: UInt = #line) {
+        func scan(_ value: Any) {
+            if let object = value as? [String: Any] {
+                for key in object.keys {
+                    let lower = key.lowercased()
+                    if lower != "authorization_id", lower != "state" {
+                        for forbidden in ["token", "secret", "credential", "password", "env", "access_token", "refresh_token", "device_code", "client_secret", "clone_url", "header", "local_path", "filesystem_path", "destination_path", "credential_path", "authorization_header", "authorization_url", "authorization_map"] {
+                            XCTAssertFalse(lower.contains(forbidden), "contract leaked forbidden field \(forbidden) in key \(key)", file: file, line: line)
+                        }
+                    }
+                    scan(object[key] as Any)
+                }
+            } else if let array = value as? [Any] {
+                array.forEach(scan)
+            } else if let string = value as? String {
+                let lower = string.lowercased()
+                XCTAssertFalse(lower.contains("authorization:") || lower.contains("/users/") || lower.contains("/tmp/") || lower.contains("c:\\"), "contract leaked local path or header value \(string)", file: file, line: line)
+            }
+        }
+        do { scan(try JSONSerialization.jsonObject(with: data)) }
+        catch { XCTFail("invalid JSON for secret scan: \(error)", file: file, line: line) }
     }
 
     // MARK: Error mapping

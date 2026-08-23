@@ -1,0 +1,4 @@
+[
+  {"id":"github","display_name":"GitHub","state":"connected","account_label":"octocat","scopes":["repo:read"],"repo_listing_supported":true},
+  {"id":"huggingface","display_name":"Hugging Face","state":"disconnected","scopes":[],"repo_listing_supported":true}
+]

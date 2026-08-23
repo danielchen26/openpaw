@@ -4,29 +4,30 @@
   "title": "OpenPaw repository import API contracts",
   "$defs": {
     "providerId": { "type": "string", "enum": ["github", "huggingface"] },
-    "importState": { "type": "string", "enum": ["queued", "cloning", "indexing", "completed", "failed", "cancelled"] },
+    "safeIdentifier": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!-)(?!.*\\.\\.)(?!.*(?:%2[fF]|%5[cC]))[A-Za-z0-9_.-]+$" },
+    "importState": { "type": "string", "enum": ["queued", "authorizing", "cloning", "validating", "registering", "completed", "failed", "cancelled", "recovery_required"] },
     "importRequest": {
       "type": "object", "additionalProperties": false,
       "required": ["provider", "repo_id"],
       "properties": {
         "provider": { "$ref": "#/$defs/providerId" },
-        "repo_id": { "type": "string", "minLength": 1 },
-        "requested_name": { "type": "string", "minLength": 1 }
+        "repo_id": { "$ref": "#/$defs/safeIdentifier" },
+        "requested_name": { "$ref": "#/$defs/safeIdentifier" }
       }
     },
     "registerRequest": {
       "type": "object", "additionalProperties": false,
       "required": ["root_id"],
       "properties": {
-        "root_id": { "type": "string", "minLength": 1 },
-        "requested_name": { "type": "string", "minLength": 1 }
+        "root_id": { "$ref": "#/$defs/safeIdentifier" },
+        "requested_name": { "$ref": "#/$defs/safeIdentifier" }
       }
     },
     "progress": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "state", "repo_name", "destination_name"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "id": { "$ref": "#/$defs/safeIdentifier" },
         "state": { "$ref": "#/$defs/importState" },
         "repo_name": { "type": "string", "minLength": 1 },
         "destination_name": { "type": "string", "minLength": 1 },

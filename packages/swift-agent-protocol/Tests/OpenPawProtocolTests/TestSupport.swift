@@ -23,6 +23,10 @@ enum Repo {
         root.appendingPathComponent("protocol/fixtures/normalized")
     }
 
+    static func fixtureData(_ name: String) throws -> Data {
+        try Data(contentsOf: root.appendingPathComponent("protocol/fixtures/\(name).json"))
+    }
+
     /// Golden event files, empty until the `openpaw-agents` slice generates them.
     static func goldenEventFiles() -> [URL] {
         let files =
@@ -34,6 +38,8 @@ enum Repo {
         }
     }
 }
+
+func fixtureData(_ name: String) throws -> Data { try Repo.fixtureData(name) }
 
 // MARK: - Semantic JSON comparison
 
