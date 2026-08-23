@@ -198,6 +198,24 @@ impl Harness {
     }
 }
 
+#[test]
+fn app_state_preserves_supplied_visible_root_names() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state_dir = temp.path().join("state");
+    let configured = temp.path().join("configured-repository");
+    std::fs::create_dir_all(&configured).expect("configured root");
+    let roots = openpaw_files::Roots::with_names([(Some("preferred-name".to_owned()), configured)])
+        .expect("named roots");
+    let app = AppState::new(
+        Config::default(),
+        Store::open(&state_dir).expect("state dir"),
+        roots,
+        temp.path().to_path_buf(),
+    );
+
+    assert_eq!(app.roots().names(), vec!["preferred-name"]);
+}
+
 /// Register a device the way pairing would, and keep the secrets the phone keeps.
 fn enroll(app: &AppState, device_id: &str, profile: Profile) -> Creds {
     let token = auth::mint_secret();

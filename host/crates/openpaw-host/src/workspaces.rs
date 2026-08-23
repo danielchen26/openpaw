@@ -1,13 +1,14 @@
 //! Concurrency-safe workspace root registry.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result};
 use openpaw_files::Roots;
+use serde::de::{self, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 const REGISTRY_FILE: &str = "workspace-registry.json";
@@ -30,14 +31,52 @@ pub struct WorkspaceRecord {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct RegistryFile {
+    #[serde(deserialize_with = "deserialize_workspace_records")]
     workspaces: Vec<WorkspaceRecord>,
+}
+
+fn deserialize_workspace_records<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<WorkspaceRecord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct RecordsVisitor;
+
+    impl<'de> Visitor<'de> for RecordsVisitor {
+        type Value = Vec<WorkspaceRecord>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a bounded workspace record array")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut records =
+                Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(MAX_RECORDS));
+            while records.len() < MAX_RECORDS {
+                match sequence.next_element()? {
+                    Some(record) => records.push(record),
+                    None => return Ok(records),
+                }
+            }
+            if sequence.next_element::<IgnoredAny>()?.is_some() {
+                return Err(de::Error::custom("too many workspace records"));
+            }
+            Ok(records)
+        }
+    }
+
+    deserializer.deserialize_seq(RecordsVisitor)
 }
 
 /// Immutable-snapshot repository registry.
 #[derive(Debug)]
 pub struct WorkspaceRegistry {
     state_dir: PathBuf,
-    config_roots: Vec<PathBuf>,
+    config_roots: Vec<(Option<String>, PathBuf)>,
     records: Mutex<Vec<WorkspaceRecord>>,
     snapshot: RwLock<Arc<Roots>>,
 }
@@ -45,7 +84,30 @@ pub struct WorkspaceRegistry {
 impl WorkspaceRegistry {
     /// Load dynamic records and build the first roots snapshot.
     pub fn open(state_dir: &Path, config_roots: Vec<PathBuf>) -> Result<Self> {
-        let records = load_records(state_dir)?;
+        Self::open_named(
+            state_dir,
+            config_roots.into_iter().map(|path| (None, path)).collect(),
+        )
+    }
+
+    /// Load dynamic records while preserving an existing roots snapshot's names.
+    pub fn open_with_roots(state_dir: &Path, config_roots: &Roots) -> Result<Self> {
+        Self::open_named(
+            state_dir,
+            config_roots
+                .all()
+                .iter()
+                .map(|root| (Some(root.name.clone()), root.path.clone()))
+                .collect(),
+        )
+    }
+
+    fn open_named(state_dir: &Path, config_roots: Vec<(Option<String>, PathBuf)>) -> Result<Self> {
+        let loaded = load_records(state_dir)?;
+        let (records, _) = reconcile_records(state_dir, &loaded)?;
+        if !same_registry_entries(&loaded, &records) {
+            persist_records(state_dir, &records)?;
+        }
         let snapshot = Arc::new(build_roots(state_dir, &config_roots, &records)?);
         Ok(Self {
             state_dir: state_dir.to_path_buf(),
@@ -110,26 +172,38 @@ impl WorkspaceRegistry {
 
     /// Deterministic reconciliation seam for B3 clone integration.
     pub fn reconcile(&self) -> Result<WorkspaceReconciliation> {
-        let records = self.records.lock().expect("workspace records poisoned");
-        reconcile_state(&self.state_dir, &records)
+        let mut records = self.records.lock().expect("workspace records poisoned");
+        let (next_records, report) = reconcile_records(&self.state_dir, &records)?;
+        if !same_registry_entries(&records, &next_records) {
+            let next_snapshot = Arc::new(build_roots(
+                &self.state_dir,
+                &self.config_roots,
+                &next_records,
+            )?);
+            persist_records(&self.state_dir, &next_records)?;
+            *records = next_records;
+            *self.snapshot.write().expect("workspace snapshot poisoned") = next_snapshot;
+        }
+        Ok(report)
     }
 }
 
 /// Startup comparison between durable registry records and host-owned repo dirs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceReconciliation {
-    /// Git worktrees present under `<state_dir>/repos` but absent from registry.
+    /// Git worktrees recovered from `<state_dir>/repos` into the registry.
     pub orphan_git_repositories: Vec<String>,
+    /// Stale registry records removed because their worktree was unavailable or invalid.
+    pub removed_registry_records: Vec<String>,
 }
 
 fn build_roots(
     state_dir: &Path,
-    config_roots: &[PathBuf],
+    config_roots: &[(Option<String>, PathBuf)],
     records: &[WorkspaceRecord],
 ) -> Result<Roots> {
-    let config = config_roots.iter().cloned().map(|path| (None, path));
     let mut roots = Vec::with_capacity(config_roots.len() + records.len());
-    roots.extend(config);
+    roots.extend(config_roots.iter().cloned());
     for record in records {
         roots.push((
             Some(record.name.clone()),
@@ -151,10 +225,11 @@ fn load_records(state_dir: &Path) -> Result<Vec<WorkspaceRecord>> {
     };
     anyhow::ensure!(records.len() <= MAX_RECORDS, "too many workspace records");
     let mut validated = Vec::with_capacity(records.len());
-    for record in records {
+    for mut record in records {
         validate_identifier(&record.root_id)?;
         validate_identifier(&record.name)?;
-        validated.push(validated_record(state_dir, &record.root_id, &record.name)?);
+        record.path = PathBuf::new();
+        validated.push(record);
     }
     Ok(validated)
 }
@@ -231,47 +306,81 @@ fn ensure_working_git_repo(state_dir: &Path, root_id: &str, canonical: &Path) ->
     Ok(())
 }
 
-fn reconcile_state(
+fn reconcile_records(
     state_dir: &Path,
     records: &[WorkspaceRecord],
-) -> Result<WorkspaceReconciliation> {
+) -> Result<(Vec<WorkspaceRecord>, WorkspaceReconciliation)> {
     let repos_dir = state_dir.join("repos");
     let mut report = WorkspaceReconciliation::default();
-    if !repos_dir.exists() {
-        return Ok(report);
-    }
-    let registered: std::collections::BTreeSet<_> = records
-        .iter()
-        .map(|record| record.root_id.as_str())
-        .collect();
-    for entry in fs::read_dir(&repos_dir)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !registered.contains(name.as_str()) && validate_identifier(&name).is_ok() {
-            let path = entry.path();
-            if path.join(".git").is_dir()
-                && ensure_working_git_repo(state_dir, &name, &fs::canonicalize(&path)?).is_ok()
-            {
-                report.orphan_git_repositories.push(name);
+    let mut corrected = Vec::with_capacity(records.len());
+    for record in records {
+        let candidate = repos_dir.join(&record.root_id);
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => corrected.push(validated_record(state_dir, &record.root_id, &record.name)?),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                report.removed_registry_records.push(record.root_id.clone());
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("reading {}", candidate.display()));
             }
         }
     }
+
+    let mut registered: std::collections::BTreeSet<_> = corrected
+        .iter()
+        .map(|record| record.root_id.clone())
+        .collect();
+
+    if repos_dir.exists() {
+        let mut names = fs::read_dir(&repos_dir)?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        names.sort();
+        for name in names {
+            if !registered.contains(&name)
+                && validate_identifier(&name).is_ok()
+                && let Ok(record) = validated_record(state_dir, &name, &name)
+            {
+                anyhow::ensure!(corrected.len() < MAX_RECORDS, "too many workspace records");
+                registered.insert(name.clone());
+                report.orphan_git_repositories.push(name);
+                corrected.push(record);
+            }
+        }
+    }
+    report.removed_registry_records.sort();
     report.orphan_git_repositories.sort();
-    Ok(report)
+    Ok((corrected, report))
+}
+
+fn same_registry_entries(left: &[WorkspaceRecord], right: &[WorkspaceRecord]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.root_id == right.root_id && left.name == right.name)
 }
 
 fn bounded_read(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
-            return Err(err).with_context(|| format!("reading metadata for {}", path.display()));
+            return Err(err).with_context(|| format!("opening {}", path.display()));
         }
     };
-    anyhow::ensure!(metadata.len() <= max_bytes, "state file is too large");
-    fs::read(path)
+    read_bounded(file, max_bytes)
         .map(Some)
         .with_context(|| format!("reading {}", path.display()))
+}
+
+fn read_bounded(reader: impl Read, max_bytes: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() as u64 <= max_bytes, "state file is too large");
+    Ok(bytes)
 }
 
 fn persist_records(state_dir: &Path, records: &[WorkspaceRecord]) -> Result<()> {
@@ -372,7 +481,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state");
         git_init(&state.join("repos/one"));
-        git_init(&state.join("repos/two"));
         let registry = Arc::new(WorkspaceRegistry::open(&state, Vec::new()).unwrap());
         registry.register_known("one", None).unwrap();
         let old = registry.snapshot();
@@ -386,6 +494,7 @@ mod tests {
                 })
             })
             .collect();
+        git_init(&state.join("repos/two"));
         registry.register_known("two", None).unwrap();
         for reader in readers {
             reader.join().unwrap();
@@ -423,13 +532,33 @@ mod tests {
     }
 
     #[test]
+    fn startup_reconciliation_recovers_orphans_and_removes_missing_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        git_init(&state.join("repos/recovered"));
+        fs::create_dir_all(&state).unwrap();
+        fs::write(
+            state.join(REGISTRY_FILE),
+            r#"{"workspaces":[{"root_id":"missing","name":"missing","path":"/ignored"}]}"#,
+        )
+        .unwrap();
+
+        let registry = WorkspaceRegistry::open(&state, Vec::new()).unwrap();
+        assert_eq!(registry.snapshot().names(), vec!["recovered"]);
+
+        let persisted = fs::read_to_string(state.join(REGISTRY_FILE)).unwrap();
+        assert!(persisted.contains("recovered"));
+        assert!(!persisted.contains("missing"));
+    }
+
+    #[test]
     fn concurrent_registers_do_not_lose_updates() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state");
+        let registry = Arc::new(WorkspaceRegistry::open(&state, Vec::new()).unwrap());
         for id in ["one", "two", "three", "four"] {
             git_init(&state.join("repos").join(id));
         }
-        let registry = Arc::new(WorkspaceRegistry::open(&state, Vec::new()).unwrap());
         let handles: Vec<_> = ["one", "two", "three", "four"]
             .into_iter()
             .map(|id| {
@@ -450,7 +579,6 @@ mod tests {
     fn rejects_gitfile_and_oversized_registry_and_reports_orphans() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state");
-        git_init(&state.join("repos/real"));
         fs::create_dir_all(state.join("repos/gitfile-worktree")).unwrap();
         fs::write(
             state.join("repos/gitfile-worktree/.git"),
@@ -459,10 +587,12 @@ mod tests {
         .unwrap();
         let registry = WorkspaceRegistry::open(&state, Vec::new()).unwrap();
         assert!(registry.register_known("gitfile-worktree", None).is_err());
+        git_init(&state.join("repos/real"));
         assert_eq!(
             registry.reconcile().unwrap().orphan_git_repositories,
             vec!["real"]
         );
+        assert_eq!(registry.snapshot().names(), vec!["real"]);
 
         fs::create_dir_all(&state).unwrap();
         fs::write(
@@ -471,5 +601,23 @@ mod tests {
         )
         .unwrap();
         assert!(WorkspaceRegistry::open(&state, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn workspace_record_limit_is_enforced_during_deserialization() {
+        let mut records = (0..MAX_RECORDS)
+            .map(|index| format!(r#"{{"root_id":"repo-{index}","name":"repo-{index}","path":""}}"#))
+            .collect::<Vec<_>>();
+        records.push(r#"{"root_id":42,"name":"invalid","path":""}"#.to_owned());
+        let json = format!(r#"{{"workspaces":[{}]}}"#, records.join(","));
+
+        let error = serde_json::from_str::<RegistryFile>(&json).unwrap_err();
+        assert!(error.to_string().contains("too many workspace records"));
+    }
+
+    #[test]
+    fn workspace_state_reader_rejects_streams_beyond_the_limit() {
+        let error = read_bounded(std::io::Cursor::new(b"12345"), 4).unwrap_err();
+        assert!(error.to_string().contains("state file is too large"));
     }
 }

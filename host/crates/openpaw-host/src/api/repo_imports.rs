@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -12,6 +12,7 @@ use axum::extract::{Path as UrlPath, State};
 use openpaw_protocol::{
     ProviderId, RepoImportProgress, RepoImportRequest, RepoImportState, RepoRegisterRequest,
 };
+use serde::de::{self, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -24,6 +25,17 @@ const MAX_MESSAGE_LEN: usize = 160;
 const MAX_RECOVERY_BYTES: u64 = 1024 * 1024;
 const RECOVERY_FILE: &str = "repo-imports-recovery.json";
 const SECRET_MODE: u32 = 0o600;
+
+/// Typed repository import manager failure.
+#[derive(Debug, thiserror::Error)]
+pub enum RepoImportError {
+    /// A route id is not a server-issued repository import id.
+    #[error("invalid repository import id")]
+    InvalidId,
+    /// Durable state could not be read or persisted.
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
 
 /// Durable restart recovery record for an import operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +62,45 @@ pub struct RepoImportRecoveryRecord {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct RecoveryFile {
+    #[serde(deserialize_with = "deserialize_recovery_records")]
     imports: Vec<RepoImportRecoveryRecord>,
+}
+
+fn deserialize_recovery_records<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<RepoImportRecoveryRecord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct RecordsVisitor;
+
+    impl<'de> Visitor<'de> for RecordsVisitor {
+        type Value = Vec<RepoImportRecoveryRecord>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a bounded repository import recovery array")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut records =
+                Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(MAX_PROGRESS));
+            while records.len() < MAX_PROGRESS {
+                match sequence.next_element()? {
+                    Some(record) => records.push(record),
+                    None => return Ok(records),
+                }
+            }
+            if sequence.next_element::<IgnoredAny>()?.is_some() {
+                return Err(de::Error::custom("too many recovery records"));
+            }
+            Ok(records)
+        }
+    }
+
+    deserializer.deserialize_seq(RecordsVisitor)
 }
 
 #[derive(Debug, Clone)]
@@ -123,7 +173,7 @@ impl RepoImportManager {
     }
 
     /// Return current progress for an import id.
-    pub fn get(&self, id: &str) -> anyhow::Result<Option<RepoImportProgress>> {
+    pub fn get(&self, id: &str) -> Result<Option<RepoImportProgress>, RepoImportError> {
         validate_import_id(id)?;
         Ok(self
             .imports
@@ -135,7 +185,7 @@ impl RepoImportManager {
     }
 
     /// Cancel idempotently. Unknown ids return a stable cancelled tombstone.
-    pub fn cancel(&self, id: &str) -> anyhow::Result<RepoImportProgress> {
+    pub fn cancel(&self, id: &str) -> Result<RepoImportProgress, RepoImportError> {
         validate_import_id(id)?;
         let mut imports = self.imports.lock().expect("repo imports poisoned");
         let Some(position) = imports.iter().position(|entry| entry.record.id == id) else {
@@ -187,11 +237,14 @@ pub async fn get_import(
     State(app): State<AppState>,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<RepoImportProgress>, ApiError> {
-    app.repo_imports
-        .get(&id)
-        .map_err(|_| ApiError::bad_request("invalid repository import id"))?
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found("repository import not found"))
+    match app.repo_imports.get(&id) {
+        Ok(Some(progress)) => Ok(Json(progress)),
+        Ok(None) => Err(ApiError::not_found("repository import not found")),
+        Err(RepoImportError::InvalidId) => {
+            Err(ApiError::bad_request("invalid repository import id"))
+        }
+        Err(RepoImportError::Internal(err)) => Err(ApiError::internal(err)),
+    }
 }
 
 /// `DELETE /v1/repo-imports/{id}`.
@@ -201,10 +254,10 @@ pub async fn cancel_import(
 ) -> Result<Json<RepoImportProgress>, ApiError> {
     match app.repo_imports.cancel(&id) {
         Ok(progress) => Ok(Json(progress)),
-        Err(err) if err.to_string().contains("invalid") => {
+        Err(RepoImportError::InvalidId) => {
             Err(ApiError::bad_request("invalid repository import id"))
         }
-        Err(err) => Err(ApiError::internal(err)),
+        Err(RepoImportError::Internal(err)) => Err(ApiError::internal(err)),
     }
 }
 
@@ -288,7 +341,7 @@ fn sanitize_repo_name(repo_id: &str) -> String {
 
 fn validate_record(record: &RepoImportRecoveryRecord) -> anyhow::Result<()> {
     validate_identifier(&record.id)?;
-    validate_import_id(&record.id)?;
+    validate_import_id(&record.id).map_err(anyhow::Error::new)?;
     validate_identifier(&record.repo_id)?;
     validate_identifier(&record.repo_name)?;
     validate_identifier(&record.destination_name)?;
@@ -296,16 +349,19 @@ fn validate_record(record: &RepoImportRecoveryRecord) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_import_id(value: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(value.len() == "import-".len() + 32, "invalid import id");
+fn validate_import_id(value: &str) -> Result<(), RepoImportError> {
+    if value.len() != "import-".len() + 32 {
+        return Err(RepoImportError::InvalidId);
+    }
     let Some(hex) = value.strip_prefix("import-") else {
-        anyhow::bail!("invalid import id");
+        return Err(RepoImportError::InvalidId);
     };
-    anyhow::ensure!(
-        hex.bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
-        "invalid import id"
-    );
+    if !hex
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(RepoImportError::InvalidId);
+    }
     Ok(())
 }
 
@@ -350,13 +406,21 @@ fn load_recovery(state_dir: &Path) -> anyhow::Result<Vec<RepoImportRecoveryRecor
 }
 
 fn bounded_read(path: &Path, max_bytes: u64) -> anyhow::Result<Option<Vec<u8>>> {
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err.into()),
     };
-    anyhow::ensure!(metadata.len() <= max_bytes, "state file is too large");
-    Ok(Some(std::fs::read(path)?))
+    Ok(Some(read_bounded(file, max_bytes)?))
+}
+
+fn read_bounded(reader: impl Read, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() as u64 <= max_bytes, "state file is too large");
+    Ok(bytes)
 }
 
 fn persist_recovery(
@@ -474,6 +538,33 @@ mod tests {
     }
 
     #[test]
+    fn invalid_ids_and_persistence_failures_have_distinct_error_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let manager = RepoImportManager::open(&state).unwrap();
+        assert!(matches!(
+            manager.get("not-an-import-id"),
+            Err(RepoImportError::InvalidId)
+        ));
+
+        let progress = manager
+            .start(RepoImportRequest {
+                provider: ProviderId::Github,
+                repo_id: "owner-name".to_owned(),
+                requested_name: None,
+            })
+            .unwrap();
+        let backup = dir.path().join("state-backup");
+        std::fs::rename(&state, &backup).unwrap();
+        std::fs::write(&state, b"not a directory").unwrap();
+
+        assert!(matches!(
+            manager.cancel(&progress.id),
+            Err(RepoImportError::Internal(_))
+        ));
+    }
+
+    #[test]
     fn oversized_recovery_file_is_rejected_on_restart() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -482,5 +573,26 @@ mod tests {
         )
         .unwrap();
         assert!(RepoImportManager::open(dir.path()).is_err());
+    }
+
+    #[test]
+    fn recovery_record_limit_is_enforced_during_deserialization() {
+        let record = |index| {
+            format!(
+                r#"{{"id":"import-{index:032x}","state":"queued","provider":"github","repo_id":"repo-{index}","repo_name":"repo-{index}","destination_name":"repo-{index}","generation":0,"updated_at":"2026-08-23T18:00:00Z"}}"#
+            )
+        };
+        let mut records = (0..MAX_PROGRESS).map(record).collect::<Vec<_>>();
+        records.push(r#"{"id":42}"#.to_owned());
+        let json = format!(r#"{{"imports":[{}]}}"#, records.join(","));
+
+        let error = serde_json::from_str::<RecoveryFile>(&json).unwrap_err();
+        assert!(error.to_string().contains("too many recovery records"));
+    }
+
+    #[test]
+    fn recovery_state_reader_rejects_streams_beyond_the_limit() {
+        let error = read_bounded(std::io::Cursor::new(b"12345"), 4).unwrap_err();
+        assert!(error.to_string().contains("state file is too large"));
     }
 }
