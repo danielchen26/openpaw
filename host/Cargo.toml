@@ -7,6 +7,7 @@ members = [
     "crates/openpaw-files",
     "crates/openpaw-preview",
     "crates/openpaw-host",
+    "crates/openpaw-providers",
 ]
 
 [workspace.package]
@@ -23,6 +24,7 @@ openpaw-agents = { path = "crates/openpaw-agents" }
 openpaw-git = { path = "crates/openpaw-git" }
 openpaw-files = { path = "crates/openpaw-files" }
 openpaw-preview = { path = "crates/openpaw-preview" }
+openpaw-providers = { path = "crates/openpaw-providers" }
 
 anyhow = "1"
 axum = { version = "0.8", features = ["ws", "macros"] }
