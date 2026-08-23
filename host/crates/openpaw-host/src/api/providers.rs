@@ -10,6 +10,7 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
@@ -33,6 +34,7 @@ use crate::auth::AuthedDevice;
 
 const TOKEN_MODE: u32 = 0o600;
 const PAGE_LIMIT: usize = 50;
+const MAX_AUTHORIZATION_SESSIONS: usize = 128;
 
 /// Public OAuth client configuration for built-in providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,7 +175,7 @@ impl ProviderManager {
             );
         }
         Self {
-            token_store: TokenStore::new(state_dir.join("providers")),
+            token_store: TokenStore::new(state_dir),
             clients,
             sessions: RwLock::new(HashMap::new()),
         }
@@ -184,6 +186,7 @@ impl ProviderManager {
         &self,
         provider: ProviderId,
     ) -> Result<ProviderAuthorizationStart, ProviderError> {
+        self.purge_sessions().await;
         let client = self.client(provider)?;
         let device = client.begin().await?;
         let id = uuid::Uuid::new_v4().to_string();
@@ -198,16 +201,24 @@ impl ProviderManager {
         let session = AuthorizationSession {
             provider,
             device_code: device.device_code,
+            generation: AtomicU64::new(0),
+            created_at: now,
             expires_at,
             next_poll_at: Mutex::new(now),
             interval: Mutex::new(device.interval.max(1)),
             status: Mutex::new(status),
             poll_lock: Mutex::new(()),
         };
-        self.sessions
-            .write()
-            .await
-            .insert(id.clone(), Arc::new(session));
+        let mut sessions = self.sessions.write().await;
+        if sessions.len() >= MAX_AUTHORIZATION_SESSIONS
+            && let Some(oldest) = sessions
+                .iter()
+                .min_by_key(|(_, session)| session.created_at)
+                .map(|(id, _)| id.clone())
+        {
+            sessions.remove(&oldest);
+        }
+        sessions.insert(id.clone(), Arc::new(session));
         Ok(ProviderAuthorizationStart {
             authorization_id: id,
             verification_url: device.verification_uri,
@@ -215,6 +226,21 @@ impl ProviderManager {
             expires_at,
             interval_seconds: device.interval.min(u32::MAX as u64) as u32,
         })
+    }
+
+    /// Poll only when the route provider owns the authorization id.
+    pub async fn authorization_status_for(
+        &self,
+        provider: ProviderId,
+        id: &str,
+    ) -> Result<ProviderAuthorizationStatus, ProviderError> {
+        let session = self.session(id).await?;
+        if session.provider != provider {
+            return Err(ProviderError::Protocol(
+                "authorization not found".to_owned(),
+            ));
+        }
+        self.authorization_status(id).await
     }
 
     /// Poll an existing flow. Concurrent callers observe cached state while one owner polls.
@@ -242,9 +268,19 @@ impl ProviderManager {
             if OffsetDateTime::now_utc() < *session.next_poll_at.lock().await {
                 return Ok(session.status.lock().await.clone());
             }
+            let generation = session.generation.load(Ordering::SeqCst);
             let interval = *session.interval.lock().await;
             let client = self.client(session.provider)?;
-            let next = match client.poll(&session.device_code, interval).await {
+            let poll_result = client.poll(&session.device_code, interval).await;
+            if session.generation.load(Ordering::SeqCst) != generation {
+                return Ok(session.status.lock().await.clone());
+            }
+            if OffsetDateTime::now_utc() >= session.expires_at {
+                let mut status = session.status.lock().await;
+                status.state = ProviderAuthorizationState::Expired;
+                return Ok(status.clone());
+            }
+            let next = match poll_result {
                 Ok(DevicePollState::Pending { interval_seconds }) => {
                     *session.interval.lock().await = interval_seconds.max(1);
                     *session.next_poll_at.lock().await = OffsetDateTime::now_utc()
@@ -281,12 +317,28 @@ impl ProviderManager {
         }
     }
 
+    /// Cancel only when the route provider owns the authorization id.
+    pub async fn cancel_authorization_for(
+        &self,
+        provider: ProviderId,
+        id: &str,
+    ) -> Result<ProviderAuthorizationStatus, ProviderError> {
+        let session = self.session(id).await?;
+        if session.provider != provider {
+            return Err(ProviderError::Protocol(
+                "authorization not found".to_owned(),
+            ));
+        }
+        self.cancel_authorization(id).await
+    }
+
     /// Cancel is idempotent and session-id owned.
     pub async fn cancel_authorization(
         &self,
         id: &str,
     ) -> Result<ProviderAuthorizationStatus, ProviderError> {
         let session = self.session(id).await?;
+        session.generation.fetch_add(1, Ordering::SeqCst);
         let mut status = session.status.lock().await;
         if !matches!(status.state, ProviderAuthorizationState::Authorized) {
             status.state = ProviderAuthorizationState::Cancelled;
@@ -320,28 +372,25 @@ impl ProviderManager {
     pub async fn disconnect(&self, provider: ProviderId) -> Result<ProviderStatus, ProviderError> {
         let client = self.client(provider)?;
         let token = self.token_store.load(provider)?;
-        let mut remote_revoke_supported = false;
-        if let Some(token) = token.as_ref() {
+        self.token_store.delete(provider)?;
+        let remote_result = if let Some(token) = token.as_ref() {
             match client.revoke(&token.access_token).await {
-                Ok(()) => remote_revoke_supported = true,
+                Ok(()) => Some("remote_revoke_succeeded"),
                 Err(
                     ProviderError::RemoteRevokeUnsupported
                     | ProviderError::MissingConfidentialClient,
-                ) => {}
-                Err(err) => return Err(err),
+                ) => Some("remote_revoke_unsupported"),
+                Err(_) => Some("remote_revoke_failed"),
             }
-        }
-        self.token_store.delete(provider)?;
+        } else {
+            None
+        };
         Ok(ProviderStatus {
             id: provider,
             display_name: client.display_name().to_owned(),
             state: ProviderConnectionState::Disconnected,
-            account_label: None,
-            scopes: if remote_revoke_supported {
-                vec!["remote_revoke_supported".to_owned()]
-            } else {
-                Vec::new()
-            },
+            account_label: remote_result.map(str::to_owned),
+            scopes: Vec::new(),
             repo_listing_supported: true,
         })
     }
@@ -362,26 +411,20 @@ impl ProviderManager {
             token = client.refresh(refresh).await?;
             self.token_store.save(provider, &token)?;
         }
+        if cursor.is_some() {
+            return Err(ProviderError::Protocol(
+                "provider cursor not supported by provider core".to_owned(),
+            ));
+        }
         let repos = client.list(&token.access_token).await?;
-        let start = cursor
-            .as_deref()
-            .and_then(|c| c.strip_prefix("page:"))
-            .and_then(|c| c.parse::<usize>().ok())
-            .unwrap_or(0);
-        let next_start = start.saturating_add(PAGE_LIMIT);
         let page = repos
             .iter()
-            .skip(start)
             .take(PAGE_LIMIT)
             .map(|repo| wire_repo(provider, repo))
             .collect();
         Ok(ProviderRepoPage {
             repos: page,
-            next_cursor: if repos.len() > next_start {
-                Some(format!("page:{next_start}"))
-            } else {
-                None
-            },
+            next_cursor: None,
         })
     }
 
@@ -399,6 +442,25 @@ impl ProviderManager {
             .find(|repo| repo.provider_repo_id == repo_id)
             .ok_or_else(|| ProviderError::Protocol("repository not found".to_owned()))?;
         client.clone_spec(&repo, token.access_token)
+    }
+
+    async fn purge_sessions(&self) {
+        let now = OffsetDateTime::now_utc();
+        self.sessions.write().await.retain(|_, session| {
+            if now >= session.expires_at + Duration::minutes(5) {
+                return false;
+            }
+            match session.status.try_lock() {
+                Ok(status) => !matches!(
+                    status.state,
+                    ProviderAuthorizationState::Authorized
+                        | ProviderAuthorizationState::Denied
+                        | ProviderAuthorizationState::Expired
+                        | ProviderAuthorizationState::Cancelled
+                ),
+                Err(_) => true,
+            }
+        });
     }
 
     async fn usable_token(&self, provider: ProviderId) -> Result<TokenSet, ProviderError> {
@@ -429,6 +491,8 @@ impl ProviderManager {
 struct AuthorizationSession {
     provider: ProviderId,
     device_code: String,
+    generation: AtomicU64,
+    created_at: OffsetDateTime,
     expires_at: OffsetDateTime,
     next_poll_at: Mutex<OffsetDateTime>,
     interval: Mutex<u64>,
@@ -438,12 +502,16 @@ struct AuthorizationSession {
 
 #[derive(Clone)]
 struct TokenStore {
+    state_dir: PathBuf,
     dir: PathBuf,
 }
 
 impl TokenStore {
-    fn new(dir: PathBuf) -> Self {
-        Self { dir }
+    fn new(state_dir: &Path) -> Self {
+        Self {
+            state_dir: state_dir.to_path_buf(),
+            dir: state_dir.join("providers"),
+        }
     }
 
     fn path(&self, provider: ProviderId) -> PathBuf {
@@ -451,9 +519,7 @@ impl TokenStore {
     }
 
     fn save(&self, provider: ProviderId, token: &TokenSet) -> Result<(), ProviderError> {
-        std::fs::create_dir_all(&self.dir)?;
-        #[cfg(unix)]
-        std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))?;
+        self.ensure_dir()?;
         let path = self.path(provider);
         let temp = self.dir.join(format!(
             ".{}.{}.tmp",
@@ -479,21 +545,36 @@ impl TokenStore {
     fn load(&self, provider: ProviderId) -> Result<Option<TokenSet>, ProviderError> {
         let path = self.path(provider);
         match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|err| ProviderError::Protocol(err.to_string())),
+            Ok(bytes) => {
+                #[cfg(unix)]
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(TOKEN_MODE))?;
+                serde_json::from_slice(&bytes)
+                    .map(Some)
+                    .map_err(|err| ProviderError::Protocol(err.to_string()))
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err.into()),
         }
     }
 
     fn delete(&self, provider: ProviderId) -> Result<(), ProviderError> {
+        self.ensure_dir()?;
         let path = self.path(provider);
         match std::fs::remove_file(&path) {
             Ok(()) => fsync_dir(&self.dir).map_err(Into::into),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err.into()),
         }
+    }
+    fn ensure_dir(&self) -> Result<(), ProviderError> {
+        let existed = self.dir.exists();
+        std::fs::create_dir_all(&self.dir)?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))?;
+        if !existed {
+            fsync_dir(&self.state_dir)?;
+        }
+        Ok(())
     }
 }
 
@@ -551,7 +632,7 @@ pub async fn authorization_status(
 ) -> Result<Json<ProviderAuthorizationStatus>, ApiError> {
     let status = app
         .provider_manager
-        .authorization_status(&id)
+        .authorization_status_for(provider, &id)
         .await
         .map_err(api_error)?;
     if status.provider != provider {
@@ -566,7 +647,10 @@ pub async fn cancel_authorization(
     Extension(caller): Extension<AuthedDevice>,
     AxumPath((provider, id)): AxumPath<(ProviderId, String)>,
 ) -> Result<Json<ProviderAuthorizationStatus>, ApiError> {
-    let result = app.provider_manager.cancel_authorization(&id).await;
+    let result = app
+        .provider_manager
+        .cancel_authorization_for(provider, &id)
+        .await;
     audit_provider(
         &app,
         "provider.cancel_authorization",
@@ -637,6 +721,11 @@ fn api_error(err: ProviderError) -> ApiError {
         ProviderError::Outage(_) | ProviderError::Transport { .. } => {
             ApiError::json(StatusCode::BAD_GATEWAY, json!({ "error": "outage" }))
         }
+        ProviderError::Protocol(message)
+            if message == "provider cursor not supported by provider core" =>
+        {
+            ApiError::bad_request("invalid_cursor")
+        }
         ProviderError::Protocol(message) if message == "provider not configured" => ApiError::json(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({ "error": "not_configured" }),
@@ -675,4 +764,62 @@ async fn audit_provider<T>(
             outcome,
         ))
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    fn token() -> TokenSet {
+        TokenSet {
+            access_token: SecretToken::new("access-secret".to_owned()),
+            refresh_token: Some(SecretToken::new("refresh-secret".to_owned())),
+            expires_at: None,
+            scopes: vec!["repo".to_owned()],
+        }
+    }
+
+    #[test]
+    fn token_store_is_owner_only_and_repairs_file_mode_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TokenStore::new(dir.path());
+        store.save(ProviderId::Github, &token()).unwrap();
+        let provider_dir = dir.path().join("providers");
+        let token_path = provider_dir.join("github.json");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::metadata(&provider_dir)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let loaded = store.load(ProviderId::Github).unwrap().unwrap();
+        assert_eq!(loaded.scopes, vec!["repo".to_owned()]);
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn token_store_delete_is_idempotent_and_removes_local_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TokenStore::new(dir.path());
+        store.save(ProviderId::Github, &token()).unwrap();
+        store.delete(ProviderId::Github).unwrap();
+        store.delete(ProviderId::Github).unwrap();
+        assert!(store.load(ProviderId::Github).unwrap().is_none());
+    }
 }
