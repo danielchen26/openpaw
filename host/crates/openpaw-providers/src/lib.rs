@@ -2,6 +2,7 @@
 
 use reqwest::header::{HeaderMap, LINK};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{fmt, path::PathBuf, sync::Arc, time::Duration as StdDuration};
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Mutex;
@@ -870,7 +871,7 @@ fn parse_hf_repo(item: serde_json::Value, kind: &str) -> Result<Repository, Prov
             ProviderError::Protocol("malformed Hugging Face repository visibility".into())
         })?;
     let repo = Repository {
-        provider_repo_id: format!("hf.{stable_kind}.{}", safe_hex(id)),
+        provider_repo_id: format!("hf.{stable_kind}.{}", sha256_hex(id)),
         owner: owner.into(),
         name: name.into(),
         https_url: format!("https://huggingface.co/{prefix}{id}"),
@@ -955,10 +956,11 @@ fn is_safe_identifier(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
-fn safe_hex(value: &str) -> String {
+fn sha256_hex(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(value.len() * 2);
-    for byte in value.bytes() {
+    let digest = Sha256::digest(value.as_bytes());
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
         out.push(HEX[(byte >> 4) as usize] as char);
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }

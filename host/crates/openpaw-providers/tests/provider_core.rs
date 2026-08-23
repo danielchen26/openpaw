@@ -4,6 +4,7 @@ use axum::{
     http::HeaderMap,
     routing::{delete, get, post},
 };
+use openpaw_protocol::{ProviderId, ProviderRepo};
 use openpaw_providers::*;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -401,14 +402,68 @@ async fn hf_missing_or_non_bool_private_is_provider_data_error_not_public_or_gat
     }
 }
 
+#[tokio::test]
+async fn hf_long_native_ids_emit_bounded_protocol_valid_provider_repo_ids() {
+    let long_name = format!("{}-{}", "segment".repeat(40), "tail".repeat(20));
+    let long_native_id = format!("me/{long_name}");
+    let app = Router::new()
+        .route(
+            "/hf/api/whoami-v2",
+            get(|| async { Json(json!({"name":"me"})) }),
+        )
+        .route(
+            "/hf/api/models",
+            get({
+                let long_native_id = long_native_id.clone();
+                move || async move { Json(json!([{ "id": long_native_id, "private": false }])) }
+            }),
+        )
+        .route("/hf/api/datasets", get(|| async { Json(json!([])) }))
+        .route("/hf/api/spaces", get(|| async { Json(json!([])) }));
+    let base = serve(app).await;
+    let hf = HuggingFaceProvider::new(PublicClientConfig::hugging_face(
+        "client",
+        &base,
+        format!("{base}/hf"),
+    ));
+    let repos = hf
+        .list_repositories(&SecretToken::new("hf_long_secret".into()))
+        .await
+        .unwrap();
+    let repo = repos.first().unwrap();
+
+    assert_eq!(repo.provider_repo_id.len(), "hf.model.".len() + 64);
+    assert_protocol_safe_identifier(&repo.provider_repo_id);
+    let wire = serde_json::to_value(ProviderRepo {
+        id: repo.provider_repo_id.clone(),
+        provider: ProviderId::HuggingFace,
+        owner: repo.owner.clone(),
+        name: repo.name.clone(),
+        display_name: format!("{}/{}", repo.owner, repo.name),
+        is_private: repo.is_private,
+        source_url_redacted: Some(repo.https_url.clone()),
+    })
+    .unwrap();
+    let decoded: ProviderRepo = serde_json::from_value(wire).unwrap();
+    assert_eq!(decoded.id, repo.provider_repo_id);
+}
+
 fn assert_safe_identifier(id: &str) {
+    assert_protocol_safe_identifier(id);
+}
+
+fn assert_protocol_safe_identifier(id: &str) {
     assert!(!id.is_empty());
+    assert!(id.len() <= 128);
+    assert_ne!(id, ".");
+    assert_ne!(id, "..");
     assert!(
         id.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
     );
     assert!(!id.contains('/'));
     assert!(!id.contains(':'));
+    assert!(!id.contains(".."));
 }
 
 #[test]
