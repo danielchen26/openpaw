@@ -39,9 +39,9 @@ pub use payload::{
 };
 pub use provider_repo::{
     ProviderAuthorizationStart, ProviderAuthorizationState, ProviderAuthorizationStatus,
-    ProviderConnectionState, ProviderId, ProviderRepo, ProviderRepoPage, ProviderStatus,
-    RepoImportProgress, RepoImportRequest, RepoImportState, RepoRegisterRequest,
-    redact_url_credentials,
+    ProviderConnectionState, ProviderId, ProviderRemoteRevokeResult, ProviderRepo,
+    ProviderRepoPage, ProviderStatus, RepoImportProgress, RepoImportRequest, RepoImportState,
+    RepoRegisterRequest, redact_url_credentials,
 };
 pub use risk::{Risk, RiskClass, extract_tool_command, extract_tool_paths};
 

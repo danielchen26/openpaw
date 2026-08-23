@@ -7,6 +7,7 @@ use crate::wire_enum::wire_enum;
 wire_enum! { pub enum ProviderId { Github = "github", HuggingFace = "huggingface", } }
 wire_enum! { pub enum ProviderConnectionState { Disconnected = "disconnected", Authorizing = "authorizing", Connected = "connected", ReauthorizationRequired = "reauthorization_required", Outage = "outage", Error = "error", } }
 wire_enum! { pub enum ProviderAuthorizationState { Pending = "pending", SlowDown = "slow_down", Authorized = "authorized", Denied = "denied", Expired = "expired", Cancelled = "cancelled", ReauthorizationRequired = "reauthorization_required", Outage = "outage", } }
+wire_enum! { pub enum ProviderRemoteRevokeResult { Revoked = "revoked", Unsupported = "unsupported", Failed = "failed", } }
 wire_enum! { pub enum RepoImportState { Queued = "queued", Authorizing = "authorizing", Cloning = "cloning", Validating = "validating", Registering = "registering", Completed = "completed", Failed = "failed", Cancelled = "cancelled", RecoveryRequired = "recovery_required", } }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20,6 +21,8 @@ pub struct ProviderStatus {
     #[serde(default)]
     pub scopes: Vec<String>,
     pub repo_listing_supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_revoke_result: Option<ProviderRemoteRevokeResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -84,6 +84,7 @@ fn provider_and_repo_import_contracts_are_sanitized_and_schema_valid() {
         account_label: Some("octocat".to_owned()),
         scopes: vec!["repo:read".to_owned()],
         repo_listing_supported: true,
+        remote_revoke_result: None,
     })
     .unwrap();
     assert_valid(&provider_validator, "provider status", &status);
@@ -134,6 +135,43 @@ fn provider_and_repo_import_contracts_are_sanitized_and_schema_valid() {
         progress["source_url_redacted"],
         "https://<redacted>@example.com/org/repo.git"
     );
+}
+
+#[test]
+fn provider_status_carries_narrow_remote_revoke_result_for_delete_semantics() {
+    let provider_schema = load("provider.schema.json");
+    let provider_validator = jsonschema::options()
+        .build(&provider_schema)
+        .expect("provider schema compiles");
+
+    let status = serde_json::to_value(openpaw_protocol::ProviderStatus {
+        id: openpaw_protocol::ProviderId::Github,
+        display_name: "GitHub".to_owned(),
+        state: openpaw_protocol::ProviderConnectionState::Disconnected,
+        account_label: None,
+        scopes: Vec::new(),
+        repo_listing_supported: true,
+        remote_revoke_result: Some(openpaw_protocol::ProviderRemoteRevokeResult::Revoked),
+    })
+    .unwrap();
+    assert_eq!(status["remote_revoke_result"], "revoked");
+    assert_valid(
+        &provider_validator,
+        "remote revoke provider status",
+        &status,
+    );
+    assert_contract_has_no_secret_or_path_keys(&status);
+
+    for state in ["revoked", "unsupported", "failed"] {
+        let status = serde_json::json!({"id":"github","display_name":"GitHub","state":"disconnected","scopes":[],"repo_listing_supported":true,"remote_revoke_result":state});
+        assert!(provider_validator.is_valid(&status));
+        serde_json::from_value::<openpaw_protocol::ProviderStatus>(status).unwrap();
+    }
+    for rejected in ["token_revoked", "authorization_failed", "failed:/tmp/raw"] {
+        let status = serde_json::json!({"id":"github","display_name":"GitHub","state":"disconnected","scopes":[],"repo_listing_supported":true,"remote_revoke_result":rejected});
+        assert!(!provider_validator.is_valid(&status));
+        assert!(serde_json::from_value::<openpaw_protocol::ProviderStatus>(status).is_err());
+    }
 }
 
 #[test]
@@ -227,6 +265,7 @@ fn shared_clean_provider_repo_fixtures_decode_in_rust() {
         "provider-status.clean.json",
         "provider-auth-start.clean.json",
         "provider-auth-status.clean.json",
+        "provider-remote-revoke.clean.json",
         "provider-repo-list.clean.json",
         "repo-import-progress.clean.json",
     ] {
@@ -245,6 +284,14 @@ fn shared_clean_provider_repo_fixtures_decode_in_rust() {
         "provider-auth-status.clean.json",
     ))
     .unwrap();
+    let revoke_status = serde_json::from_value::<openpaw_protocol::ProviderStatus>(load_fixture(
+        "provider-remote-revoke.clean.json",
+    ))
+    .unwrap();
+    assert_eq!(
+        revoke_status.remote_revoke_result,
+        Some(openpaw_protocol::ProviderRemoteRevokeResult::Revoked)
+    );
     serde_json::from_value::<openpaw_protocol::ProviderRepoPage>(load_fixture(
         "provider-repo-list.clean.json",
     ))

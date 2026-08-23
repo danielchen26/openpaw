@@ -61,6 +61,31 @@ public enum ProviderConnectionState: Codable, Sendable, Hashable {
     }
 }
 
+public enum ProviderRemoteRevokeResult: Codable, Sendable, Hashable {
+    case revoked, unsupported, failed
+    case unknown(String)
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "revoked": self = .revoked
+        case "unsupported": self = .unsupported
+        case "failed": self = .failed
+        default: self = .unknown(value)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .revoked: try container.encode("revoked")
+        case .unsupported: try container.encode("unsupported")
+        case .failed: try container.encode("failed")
+        case .unknown(let value): try container.encode(value)
+        }
+    }
+}
+
 public struct ProviderStatus: Codable, Sendable, Hashable, Identifiable {
     public var id: ProviderID
     public var displayName: String
@@ -68,12 +93,13 @@ public struct ProviderStatus: Codable, Sendable, Hashable, Identifiable {
     public var accountLabel: String?
     public var scopes: [String]
     public var repoListingSupported: Bool
+    public var remoteRevokeResult: ProviderRemoteRevokeResult?
 
-    public init(id: ProviderID, displayName: String, state: ProviderConnectionState, accountLabel: String? = nil, scopes: [String] = [], repoListingSupported: Bool) {
-        self.id = id; self.displayName = displayName; self.state = state; self.accountLabel = accountLabel; self.scopes = scopes; self.repoListingSupported = repoListingSupported
+    public init(id: ProviderID, displayName: String, state: ProviderConnectionState, accountLabel: String? = nil, scopes: [String] = [], repoListingSupported: Bool, remoteRevokeResult: ProviderRemoteRevokeResult? = nil) {
+        self.id = id; self.displayName = displayName; self.state = state; self.accountLabel = accountLabel; self.scopes = scopes; self.repoListingSupported = repoListingSupported; self.remoteRevokeResult = remoteRevokeResult
     }
 
-    enum CodingKeys: String, CodingKey { case id, displayName = "display_name", state, accountLabel = "account_label", scopes, repoListingSupported = "repo_listing_supported" }
+    enum CodingKeys: String, CodingKey { case id, displayName = "display_name", state, accountLabel = "account_label", scopes, repoListingSupported = "repo_listing_supported", remoteRevokeResult = "remote_revoke_result" }
 }
 
 public struct ProviderAuthorizationStart: Codable, Sendable, Hashable {

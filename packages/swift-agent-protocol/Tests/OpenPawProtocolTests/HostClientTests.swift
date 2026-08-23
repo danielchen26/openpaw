@@ -93,6 +93,7 @@ final class HostClientTests: XCTestCase {
         let providers = try await makeClient().providers()
         XCTAssertEqual(providers.first?.id, .github)
         XCTAssertEqual(providers.first?.accountLabel, "octocat")
+        XCTAssertNil(providers.first?.remoteRevokeResult)
         let providerData = try OpenPawCoding.encoder.encode(providers)
         assertNoProviderRepoSecrets(providerData)
 
@@ -111,6 +112,19 @@ final class HostClientTests: XCTestCase {
         XCTAssertNil(json?["destination_path"])
     }
 
+    func testProviderStatusRemoteRevokeResultDecodesForDeleteSemantics() throws {
+        for (wire, expected) in [("revoked", ProviderRemoteRevokeResult.revoked), ("unsupported", .unsupported), ("failed", .failed)] {
+            let status = try OpenPawCoding.decoder.decode(ProviderStatus.self, from: Data(#"{"id":"github","display_name":"GitHub","state":"disconnected","scopes":[],"repo_listing_supported":true,"remote_revoke_result":"\#(wire)"}"#.utf8))
+            XCTAssertEqual(status.remoteRevokeResult, expected)
+            assertNoProviderRepoSecrets(try OpenPawCoding.encoder.encode(status))
+        }
+        let future = try OpenPawCoding.decoder.decode(ProviderStatus.self, from: Data(#"{"id":"github","display_name":"GitHub","state":"disconnected","scopes":[],"repo_listing_supported":true,"remote_revoke_result":"host_future_result"}"#.utf8))
+        XCTAssertEqual(future.remoteRevokeResult, .unknown("host_future_result"))
+
+        let normal = try OpenPawCoding.decoder.decode(ProviderStatus.self, from: Data(#"{"id":"github","display_name":"GitHub","state":"connected","scopes":[],"repo_listing_supported":true}"#.utf8))
+        XCTAssertNil(normal.remoteRevokeResult)
+    }
+
     func testProviderRepoIdentifiersRejectTraversalPathsControlsAndEncodedSeparators() throws {
         for bad in ["", "-repo", "../repo", "repo/name", "repo\\name", "repo%2fname", "repo%5Cname", "repo\nname"] {
             XCTAssertThrowsError(try OpenPawCoding.decoder.decode(RepoImportRequest.self, from: Data(#"{"provider":"github","repo_id":"\#(bad)"}"#.utf8)), "repoID accepted \(bad)")
@@ -127,12 +141,14 @@ final class HostClientTests: XCTestCase {
     }
 
     func testSharedCleanProviderRepoFixturesDecodeInSwift() throws {
-        for fixture in ["provider-status.clean", "provider-auth-start.clean", "provider-auth-status.clean", "provider-repo-list.clean", "repo-import-progress.clean"] {
+        for fixture in ["provider-status.clean", "provider-auth-start.clean", "provider-auth-status.clean", "provider-remote-revoke.clean", "provider-repo-list.clean", "repo-import-progress.clean"] {
             assertNoProviderRepoSecrets(try fixtureData(fixture))
         }
         _ = try OpenPawCoding.decoder.decode([ProviderStatus].self, from: fixtureData("provider-status.clean"))
         _ = try OpenPawCoding.decoder.decode(ProviderAuthorizationStart.self, from: fixtureData("provider-auth-start.clean"))
         _ = try OpenPawCoding.decoder.decode(ProviderAuthorizationStatus.self, from: fixtureData("provider-auth-status.clean"))
+        let revoke = try OpenPawCoding.decoder.decode(ProviderStatus.self, from: fixtureData("provider-remote-revoke.clean"))
+        XCTAssertEqual(revoke.remoteRevokeResult, .revoked)
         _ = try OpenPawCoding.decoder.decode(ProviderRepoPage.self, from: fixtureData("provider-repo-list.clean"))
         let progress = try OpenPawCoding.decoder.decode(RepoImportProgress.self, from: fixtureData("repo-import-progress.clean"))
         XCTAssertEqual(progress.state, .cloning)

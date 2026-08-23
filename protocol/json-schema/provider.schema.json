@@ -7,6 +7,7 @@
     "safeIdentifier": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?!-)(?!.*\\.\\.)(?!.*(?:%2[fF]|%5[cC]))[A-Za-z0-9_.-]+$" },
     "connectionState": { "type": "string", "enum": ["disconnected", "authorizing", "connected", "reauthorization_required", "outage", "error"] },
     "authorizationState": { "type": "string", "enum": ["pending", "slow_down", "authorized", "denied", "expired", "cancelled", "reauthorization_required", "outage"] },
+    "remoteRevokeResult": { "type": "string", "enum": ["revoked", "unsupported", "failed"] },
     "providerStatus": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "display_name", "state", "scopes", "repo_listing_supported"],
@@ -16,7 +17,8 @@
         "state": { "$ref": "#/$defs/connectionState" },
         "account_label": { "type": "string" },
         "scopes": { "type": "array", "items": { "type": "string" } },
-        "repo_listing_supported": { "type": "boolean" }
+        "repo_listing_supported": { "type": "boolean" },
+        "remote_revoke_result": { "$ref": "#/$defs/remoteRevokeResult" }
       }
     },
     "authorizationStart": {
