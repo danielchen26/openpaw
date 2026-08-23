@@ -17,7 +17,8 @@ use axum::http::StatusCode;
 use axum::{Extension, Json};
 use openpaw_protocol::{
     ProviderAuthorizationStart, ProviderAuthorizationState, ProviderAuthorizationStatus,
-    ProviderConnectionState, ProviderId, ProviderRepo, ProviderRepoPage, ProviderStatus,
+    ProviderConnectionState, ProviderId, ProviderRemoteRevokeResult, ProviderRepo,
+    ProviderRepoPage, ProviderStatus,
 };
 use openpaw_providers::{
     CloneSpec, DeviceAuthorization, DevicePollState, GitHubProvider, HuggingFaceProvider,
@@ -362,6 +363,7 @@ impl ProviderManager {
                 account_label: None,
                 scopes: token.map_or_else(Vec::new, |t| t.scopes),
                 repo_listing_supported: true,
+                remote_revoke_result: None,
             });
         }
         out.sort_by_key(|status| status.id.as_str().to_owned());
@@ -373,14 +375,14 @@ impl ProviderManager {
         let client = self.client(provider)?;
         let token = self.token_store.load(provider)?;
         self.token_store.delete(provider)?;
-        let remote_result = if let Some(token) = token.as_ref() {
+        let remote_revoke_result = if let Some(token) = token.as_ref() {
             match client.revoke(&token.access_token).await {
-                Ok(()) => Some("remote_revoke_succeeded"),
+                Ok(()) => Some(ProviderRemoteRevokeResult::Revoked),
                 Err(
                     ProviderError::RemoteRevokeUnsupported
                     | ProviderError::MissingConfidentialClient,
-                ) => Some("remote_revoke_unsupported"),
-                Err(_) => Some("remote_revoke_failed"),
+                ) => Some(ProviderRemoteRevokeResult::Unsupported),
+                Err(_) => Some(ProviderRemoteRevokeResult::Failed),
             }
         } else {
             None
@@ -389,9 +391,10 @@ impl ProviderManager {
             id: provider,
             display_name: client.display_name().to_owned(),
             state: ProviderConnectionState::Disconnected,
-            account_label: remote_result.map(str::to_owned),
+            account_label: None,
             scopes: Vec::new(),
             repo_listing_supported: true,
+            remote_revoke_result,
         })
     }
 
