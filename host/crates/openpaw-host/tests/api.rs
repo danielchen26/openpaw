@@ -2762,8 +2762,10 @@ async fn provider_and_repo_contract_routes_have_exact_capability_guards() {
         let response = harness
             .signed(method.clone(), path, body, &harness.operator)
             .await;
-        let expected = if path == "/v1/repo-imports" || path == "/v1/repos/register" {
+        let expected = if path == "/v1/repos/register" {
             200
+        } else if path == "/v1/repo-imports" {
+            503
         } else if path == "/v1/repo-imports/import-00000000000000000000000000000000"
             && method == reqwest::Method::GET
         {

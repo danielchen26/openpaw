@@ -9,9 +9,14 @@ use std::sync::Mutex;
 
 use axum::Json;
 use axum::extract::{Path as UrlPath, State};
+use openpaw_git::{
+    CancellationToken, CloneBytePolicy, CloneCredentialBridge, CloneCredentials, CloneRequest,
+    HttpsRemoteUrl, LfsSmudgePolicy, TrustedCloneDestination, clone_repo,
+};
 use openpaw_protocol::{
     ProviderId, RepoImportProgress, RepoImportRequest, RepoImportState, RepoRegisterRequest,
 };
+use openpaw_providers::CloneSpec;
 use serde::de::{self, IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -149,7 +154,7 @@ impl RepoImportManager {
         })
     }
 
-    /// Start a new skeleton import. Clone execution is intentionally not wired in this slice.
+    /// Start a new import and persist queued state before clone execution.
     pub fn start(&self, request: RepoImportRequest) -> anyhow::Result<RepoImportProgress> {
         let id = format!("import-{}", uuid::Uuid::new_v4().simple());
         let repo_name = sanitize_repo_name(&request.repo_id);
@@ -168,8 +173,34 @@ impl RepoImportManager {
             updated_at: OffsetDateTime::now_utc(),
         };
         validate_record(&record)?;
-        let progress = progress_from_record(&record, Some("clone execution is not yet supported"));
+        let progress = progress_from_record(&record, Some("queued"));
         self.push(ImportEntry { record, progress })
+    }
+
+    /// Persist an import progress state transition without exposing provider credentials.
+    pub fn update_state(
+        &self,
+        id: &str,
+        state: RepoImportState,
+        message: Option<&str>,
+        percent: Option<u8>,
+    ) -> Result<RepoImportProgress, RepoImportError> {
+        validate_import_id(id)?;
+        let mut imports = self.imports.lock().expect("repo imports poisoned");
+        let Some(position) = imports.iter().position(|entry| entry.record.id == id) else {
+            return Err(RepoImportError::InvalidId);
+        };
+        let mut next = imports.clone();
+        next[position].record.state = state;
+        next[position].record.updated_at = OffsetDateTime::now_utc();
+        next[position].progress = progress_from_record(&next[position].record, message);
+        next[position].progress.percent = percent;
+        persist_recovery(
+            &self.state_dir,
+            next.iter().map(|entry| entry.record.clone()).collect(),
+        )?;
+        *imports = next;
+        Ok(imports[position].progress.clone())
     }
 
     /// Return current progress for an import id.
@@ -229,7 +260,83 @@ pub async fn start_import(
     State(app): State<AppState>,
     Json(request): Json<RepoImportRequest>,
 ) -> Result<Json<RepoImportProgress>, ApiError> {
-    Ok(Json(app.repo_imports.start(request)?))
+    let progress = app.repo_imports.start(request.clone())?;
+    let clone_spec = app
+        .provider_manager
+        .clone_spec_for(request.provider, &request.repo_id)
+        .await
+        .map_err(|_| {
+            ApiError::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "provider clone unavailable",
+            )
+        })?;
+    execute_import_clone(&app, &request, &progress.id, clone_spec).await?;
+    let completed = app
+        .repo_imports
+        .update_state(&progress.id, RepoImportState::Completed, None, Some(100))
+        .map_err(|err| ApiError::internal(anyhow::Error::new(err)))?;
+    Ok(Json(completed))
+}
+
+async fn execute_import_clone(
+    app: &AppState,
+    request: &RepoImportRequest,
+    import_id: &str,
+    clone_spec: CloneSpec,
+) -> Result<(), ApiError> {
+    let destination_name = request
+        .requested_name
+        .clone()
+        .unwrap_or_else(|| sanitize_repo_name(&request.repo_id));
+    let destination = app.store.state_dir().join("repos").join(&destination_name);
+    let helper =
+        std::env::current_exe().map_err(|err| ApiError::internal(anyhow::Error::new(err)))?;
+    let remote = HttpsRemoteUrl::parse(&clone_spec.url)
+        .map_err(|err| ApiError::bad_request(format!("invalid provider clone URL: {err}")))?;
+    let credentials = CloneCredentials::new(
+        clone_spec.username,
+        clone_spec.password.expose_secret().to_owned(),
+        CloneCredentialBridge::fixed(helper, "fd3"),
+    )
+    .map_err(|err| ApiError::internal(anyhow::Error::new(err)))?;
+    let destination = TrustedCloneDestination::new(destination)
+        .map_err(|err| ApiError::bad_request(format!("invalid clone destination: {err}")))?;
+    app.repo_imports
+        .update_state(
+            import_id,
+            RepoImportState::Cloning,
+            Some("cloning"),
+            Some(25),
+        )
+        .map_err(|err| ApiError::internal(anyhow::Error::new(err)))?;
+    tokio::task::spawn_blocking(move || {
+        clone_repo(CloneRequest {
+            remote,
+            destination,
+            r#ref: None,
+            timeout: std::time::Duration::from_secs(300),
+            byte_policy: CloneBytePolicy::default(),
+            cancellation: CancellationToken::new(),
+            lfs_smudge: LfsSmudgePolicy::Disable,
+            credentials: Some(credentials),
+        })
+    })
+    .await
+    .map_err(|err| ApiError::internal(anyhow::Error::new(err)))?
+    .map_err(|err| ApiError::internal(anyhow::Error::new(err)))?;
+    app.repo_imports
+        .update_state(
+            import_id,
+            RepoImportState::Registering,
+            Some("registering"),
+            Some(90),
+        )
+        .map_err(|err| ApiError::internal(anyhow::Error::new(err)))?;
+    app.workspaces
+        .register_known(&destination_name, Some(&destination_name))
+        .map_err(ApiError::internal)?;
+    Ok(())
 }
 
 /// `GET /v1/repo-imports/{id}`.

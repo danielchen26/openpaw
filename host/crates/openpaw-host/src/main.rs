@@ -1,6 +1,7 @@
 //! `openpaw-host` binary: the daemon plus the two operator commands that pair a
 //! device.
 
+use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
@@ -113,6 +114,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dispatch_askpass_helper_if_requested()?;
     let cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -136,6 +138,54 @@ async fn main() -> Result<()> {
         }
         Command::Doctor => doctor(&state_dir, &cli.overrides),
     }
+}
+
+/// Early non-secret dispatch for the fixed git askpass helper mode.
+///
+/// `openpaw-git` passes credentials over fd 3. The executable path, mode marker,
+/// and git prompt are non-secret, but all credential values stay off argv, env,
+/// logs, errors, and URLs.
+fn dispatch_askpass_helper_if_requested() -> Result<()> {
+    if std::env::var_os("OPENPAW_GIT_ASKPASS_MODE").as_deref() != Some(std::ffi::OsStr::new("fd3"))
+    {
+        return Ok(());
+    }
+    let prompt = std::env::args().nth(1).unwrap_or_default();
+    run_askpass_fd3(&prompt)?;
+    std::process::exit(0);
+}
+
+#[cfg(unix)]
+fn run_askpass_fd3(prompt: &str) -> Result<()> {
+    use std::fs::OpenOptions;
+    const MAX_PROMPT: usize = 512;
+    let prompt = prompt.as_bytes();
+    anyhow::ensure!(prompt.len() <= MAX_PROMPT, "invalid askpass prompt");
+    let fd_path = if std::path::Path::new("/dev/fd/3").exists() {
+        "/dev/fd/3"
+    } else {
+        "/proc/self/fd/3"
+    };
+    let mut fd3 = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fd_path)
+        .context("opening askpass credential channel")?;
+    fd3.write_all(&(prompt.len() as u16).to_be_bytes())?;
+    fd3.write_all(prompt)?;
+    let mut header = [0_u8; 3];
+    fd3.read_exact(&mut header)?;
+    anyhow::ensure!(header[0] == 0, "credential bridge rejected request");
+    let len = u16::from_be_bytes([header[1], header[2]]) as usize;
+    let mut value = vec![0_u8; len];
+    fd3.read_exact(&mut value)?;
+    std::io::stdout().write_all(&value)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn run_askpass_fd3(_prompt: &str) -> Result<()> {
+    anyhow::bail!("askpass fd3 mode is not supported on this platform")
 }
 
 /// Boot the daemon.

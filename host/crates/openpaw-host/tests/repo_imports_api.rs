@@ -129,32 +129,22 @@ async fn repo_import_routes_are_guarded_and_sanitized() {
     let accepted = h
         .signed(reqwest::Method::POST, "/v1/repo-imports", body, &h.operator)
         .await;
-    assert_eq!(accepted.status(), reqwest::StatusCode::OK);
-    let progress: RepoImportProgress = accepted.json().await.unwrap();
-    assert!(progress.id.starts_with("import-"));
-    assert_eq!(progress.state, RepoImportState::Queued);
-    let encoded = serde_json::to_string(&progress).unwrap();
+    assert_eq!(accepted.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let payload: Value = accepted.json().await.unwrap();
+    let encoded = serde_json::to_string(&payload).unwrap();
     assert!(!encoded.contains(h.state_dir.to_str().unwrap()));
     assert!(!encoded.contains("token"));
+    assert!(!encoded.contains("secret"));
 
-    let cancelled = h
+    let progress = h
         .signed(
-            reqwest::Method::DELETE,
-            &format!("/v1/repo-imports/{}", progress.id),
+            reqwest::Method::GET,
+            "/v1/repo-imports/import-00000000000000000000000000000000",
             json!({}),
             &h.operator,
         )
         .await;
-    assert_eq!(cancelled.status(), reqwest::StatusCode::OK);
-    let cancelled_again = h
-        .signed(
-            reqwest::Method::DELETE,
-            &format!("/v1/repo-imports/{}", progress.id),
-            json!({}),
-            &h.operator,
-        )
-        .await;
-    assert_eq!(cancelled_again.status(), reqwest::StatusCode::OK);
+    assert_eq!(progress.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
