@@ -286,8 +286,8 @@ enum ScreenCatalog {
                         model: model,
                         settings: OpenPawSettings.preview(),
                         initialDestination: SettingsDestination(
-                            category: .voice,
-                            controlID: SettingsControl.dictationDestination.id
+                            category: .sessions,
+                            controlID: SettingsControl.scrollback.id
                         )
                     )
                     .environment(\.horizontalSizeClass, .regular)

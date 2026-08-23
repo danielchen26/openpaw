@@ -35,10 +35,10 @@ public enum SettingsCategory: String, CaseIterable, Identifiable, Hashable, Send
     public var summary: String {
         switch self {
         case .appearance: "Theme and app chrome preferences."
-        case .terminal: "Cell size, ground, cursor keys, shortcuts, and scrollback."
+        case .terminal: "Cell size, cursor keys, and touch shortcuts."
         case .voice: "Dictation language, recogniser, model downloads, and destination."
         case .connection: "Preview ports, transport notes, and host links."
-        case .sessions: "Session event budgets and host-specific profile links."
+        case .sessions: "Session event and scrollback budgets."
         case .agents: "Agent defaults and execution safety."
         case .repositories: "Repository browser, provider connections, and imports."
         case .security: "Face ID gate, paired devices, and revocation guidance."
@@ -120,7 +120,7 @@ public enum SettingsSearchIndex {
         .init(title: "Cell size", subtitle: "Terminal", category: .terminal, destination: .init(category: .terminal, controlID: SettingsControl.terminalCellSize.id), keywords: ["font", "cell", "terminal", "size"]),
         .init(title: "Application cursor keys", subtitle: "Terminal", category: .terminal, destination: .init(category: .terminal, controlID: SettingsControl.cursorKeys.id), keywords: ["cursor", "arrow", "esc", "application", "terminal"]),
         .init(title: "Shortcut bar", subtitle: "Terminal", category: .terminal, destination: .init(category: .terminal, controlID: SettingsControl.shortcutBar.id), keywords: ["shortcut", "bar", "escape", "touch", "keyboard", "terminal"]),
-        .init(title: "Scrollback", subtitle: "Terminal", category: .terminal, destination: .init(category: .terminal, controlID: SettingsControl.scrollback.id), keywords: ["scrollback", "lines", "history", "terminal"]),
+        .init(title: "Scrollback", subtitle: "Sessions & Budgets", category: .sessions, destination: .init(category: .sessions, controlID: SettingsControl.scrollback.id), keywords: ["scrollback", "lines", "history", "terminal", "session"]),
         .init(title: "Preview port", subtitle: "Connections", category: .connection, destination: .init(category: .connection, controlID: SettingsControl.previewPort.id), keywords: ["preview", "port", "connection", "forward"]),
         .init(title: "Manage hosts", subtitle: "Connections", category: .connection, destination: .init(category: .connection, controlID: SettingsControl.manageHosts.id), keywords: ["host", "hosts", "ssh", "manage", "connection"]),
         .init(title: "Diagnostics", subtitle: "Connections", category: .connection, destination: .init(category: .connection, controlID: SettingsControl.diagnostics.id), keywords: ["diagnostics", "health", "audit", "logs", "troubleshooting"]),

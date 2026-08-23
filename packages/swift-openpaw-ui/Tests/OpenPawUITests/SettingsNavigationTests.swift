@@ -39,7 +39,7 @@ struct SettingsNavigationTests {
             .terminalCellSize: .terminal,
             .cursorKeys: .terminal,
             .shortcutBar: .terminal,
-            .scrollback: .terminal,
+            .scrollback: .sessions,
             .previewPort: .connection,
             .manageHosts: .connection,
             .diagnostics: .connection,
@@ -50,6 +50,38 @@ struct SettingsNavigationTests {
         for (control, category) in owners {
             let entry = SettingsSearchIndex.entries.first { $0.destination.controlID == control.id }
             #expect(entry?.destination.category == category)
+        }
+    }
+
+    @Test func everySearchControlRouteTargetsACategoryThatRendersThatControl() {
+        let renderedControls: [SettingsCategory: Set<String>] = [
+            .appearance: [SettingsControl.terminalGround.id],
+            .security: [SettingsControl.biometricGate.id],
+            .voice: [
+                SettingsControl.dictationLanguage.id,
+                SettingsControl.dictationRecogniser.id,
+                SettingsControl.dictationDestination.id,
+            ],
+            .terminal: [
+                SettingsControl.terminalCellSize.id,
+                SettingsControl.cursorKeys.id,
+                SettingsControl.shortcutBar.id,
+            ],
+            .sessions: [SettingsControl.scrollback.id, SettingsControl.eventBudget.id],
+            .connection: [
+                SettingsControl.previewPort.id,
+                SettingsControl.manageHosts.id,
+                SettingsControl.diagnostics.id,
+            ],
+            .data: [SettingsControl.exportJSON.id, SettingsControl.importJSON.id],
+        ]
+
+        for entry in SettingsSearchIndex.entries {
+            guard let controlID = entry.destination.controlID else { continue }
+            #expect(
+                renderedControls[entry.destination.category, default: []].contains(controlID),
+                "\(entry.title) routes to \(entry.destination.category.id), which does not render \(controlID)"
+            )
         }
     }
 
