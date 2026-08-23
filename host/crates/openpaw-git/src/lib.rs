@@ -23,8 +23,8 @@ use openpaw_files::{FileError, Roots};
 use time::OffsetDateTime;
 
 pub use import::{
-    CancellationToken, CloneBytePolicy, CloneRef, CloneRequest, HttpsRemoteUrl, LfsSmudgePolicy,
-    TrustedCloneDestination, clone_repo,
+    CancellationToken, CloneBytePolicy, CloneCredentialBridge, CloneCredentials, CloneRef,
+    CloneRequest, HttpsRemoteUrl, LfsSmudgePolicy, TrustedCloneDestination, clone_repo,
 };
 pub use openpaw_files::{Blob, BlobContent, EntryKind, TreeEntry};
 pub use patch::{ChangeKind, Diff, DiffLine, FileDiff, Hunk, LineKind};
@@ -91,6 +91,15 @@ pub enum GitError {
     /// The clone destination exceeded its configured repository byte policy.
     #[error("git repository exceeded byte policy")]
     RepositorySizeLimit,
+    /// The fixed askpass credential bridge is unavailable or failed validation.
+    #[error("credential bridge unavailable")]
+    CredentialBridgeUnavailable,
+    /// The askpass credential bridge saw an invalid or unsupported protocol exchange.
+    #[error("credential bridge protocol error")]
+    CredentialBridgeProtocol,
+    /// Authenticated clone is unsupported on this platform.
+    #[error("credential bridge unsupported on this platform")]
+    UnsupportedCredentialBridge,
 }
 
 /// Compact repository state for a list view.

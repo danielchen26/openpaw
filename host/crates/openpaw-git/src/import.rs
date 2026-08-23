@@ -10,6 +10,17 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use command_fds::{CommandFdExt, FdMapping};
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+
 use crate::{GitError, validate_rev};
 
 const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
@@ -149,7 +160,70 @@ pub struct CloneRequest {
     pub byte_policy: CloneBytePolicy,
     pub cancellation: CancellationToken,
     pub lfs_smudge: LfsSmudgePolicy,
+    pub credentials: Option<CloneCredentials>,
 }
+
+pub struct CloneCredentials {
+    username: String,
+    password: String,
+    bridge: CloneCredentialBridge,
+}
+
+impl CloneCredentials {
+    pub fn new(
+        username: impl Into<String>,
+        password: impl Into<String>,
+        bridge: CloneCredentialBridge,
+    ) -> Result<Self, GitError> {
+        let username = username.into();
+        let password = password.into();
+        if username.is_empty()
+            || password.is_empty()
+            || username.len() > ASKPASS_MAX_VALUE
+            || password.len() > ASKPASS_MAX_VALUE
+        {
+            return Err(GitError::CredentialBridgeUnavailable);
+        }
+        Ok(Self {
+            username,
+            password,
+            bridge,
+        })
+    }
+}
+
+impl fmt::Debug for CloneCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CloneCredentials([redacted])")
+    }
+}
+
+pub struct CloneCredentialBridge {
+    askpass_executable: PathBuf,
+    mode_marker: String,
+}
+
+impl CloneCredentialBridge {
+    pub fn fixed(askpass_executable: impl Into<PathBuf>, mode_marker: impl Into<String>) -> Self {
+        Self {
+            askpass_executable: askpass_executable.into(),
+            mode_marker: mode_marker.into(),
+        }
+    }
+}
+
+impl fmt::Debug for CloneCredentialBridge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CloneCredentialBridge")
+            .field("askpass_executable", &"[redacted path]")
+            .field("mode_marker", &self.mode_marker)
+            .finish()
+    }
+}
+
+const ASKPASS_MAX_PROMPT: usize = 512;
+const ASKPASS_MAX_VALUE: usize = 8192;
+const ASKPASS_MAX_REQUESTS: usize = 4;
 
 pub fn clone_repo(req: CloneRequest) -> Result<(), GitError> {
     clone_with_git_program(req, git_program())
@@ -239,10 +313,9 @@ fn clone_inner(req: &CloneRequest, git_program: &Path) -> Result<(), GitError> {
     let mut cmd = Command::new(git_program);
     cmd.args(&args)
         .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("PATH", "/usr/bin:/bin")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "true")
         .env("GIT_PAGER", "cat")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -250,11 +323,15 @@ fn clone_inner(req: &CloneRequest, git_program: &Path) -> Result<(), GitError> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let mut bridge = CredentialBridgeRuntime::prepare(req)?;
+    bridge.configure_command(&mut cmd)?;
     if matches!(req.lfs_smudge, LfsSmudgePolicy::Disable) {
         cmd.env("GIT_LFS_SKIP_SMUDGE", "1");
     }
     set_process_group(&mut cmd);
     let mut child = cmd.spawn().map_err(GitError::GitMissing)?;
+    drop(cmd);
+    bridge.after_spawn();
     let pid = child.id();
     let stdout = drain(
         child.stdout.take().unwrap(),
@@ -306,6 +383,146 @@ fn clone_inner(req: &CloneRequest, git_program: &Path) -> Result<(), GitError> {
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[cfg(unix)]
+struct CredentialBridgeRuntime {
+    broker: Option<JoinHandle<()>>,
+    child_fd: Option<OwnedFd>,
+    helper: OsString,
+    mode_marker: Option<String>,
+}
+
+#[cfg(not(unix))]
+struct CredentialBridgeRuntime;
+
+impl CredentialBridgeRuntime {
+    #[cfg(not(unix))]
+    fn prepare(req: &CloneRequest) -> Result<Self, GitError> {
+        if req.credentials.is_some() {
+            Err(GitError::UnsupportedCredentialBridge)
+        } else {
+            Ok(Self)
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn configure_command(&mut self, cmd: &mut Command) -> Result<(), GitError> {
+        cmd.env("GIT_ASKPASS", "true");
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn after_spawn(&mut self) {}
+
+    #[cfg(unix)]
+    fn prepare(req: &CloneRequest) -> Result<Self, GitError> {
+        let Some(credentials) = &req.credentials else {
+            return Ok(Self {
+                broker: None,
+                child_fd: None,
+                helper: OsString::from("true"),
+                mode_marker: None,
+            });
+        };
+        verify_helper_path(&credentials.bridge.askpass_executable)?;
+        let (parent, child) =
+            UnixStream::pair().map_err(|_| GitError::CredentialBridgeUnavailable)?;
+        let username = credentials.username.clone();
+        let password = credentials.password.clone();
+        let broker = thread::spawn(move || {
+            let _ = broker_loop(parent, &username, &password);
+        });
+        Ok(Self {
+            broker: Some(broker),
+            child_fd: Some(OwnedFd::from(child)),
+            helper: credentials.bridge.askpass_executable.as_os_str().to_owned(),
+            mode_marker: Some(credentials.bridge.mode_marker.clone()),
+        })
+    }
+
+    #[cfg(unix)]
+    fn configure_command(&mut self, cmd: &mut Command) -> Result<(), GitError> {
+        cmd.env("GIT_ASKPASS", &self.helper);
+        if let Some(mode_marker) = &self.mode_marker {
+            cmd.env("OPENPAW_GIT_ASKPASS_MODE", mode_marker);
+        }
+        if let Some(child_fd) = self.child_fd.take() {
+            cmd.fd_mappings(vec![FdMapping {
+                parent_fd: child_fd,
+                child_fd: 3,
+            }])
+            .map_err(|_| GitError::CredentialBridgeUnavailable)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn after_spawn(&mut self) {}
+}
+
+#[cfg(unix)]
+impl Drop for CredentialBridgeRuntime {
+    fn drop(&mut self) {
+        drop(self.child_fd.take());
+        if let Some(broker) = self.broker.take() {
+            let _ = broker.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn verify_helper_path(path: &Path) -> Result<(), GitError> {
+    let path = std::fs::canonicalize(path).map_err(|_| GitError::CredentialBridgeUnavailable)?;
+    let meta = std::fs::metadata(&path).map_err(|_| GitError::CredentialBridgeUnavailable)?;
+    if !meta.is_file() || meta.mode() & 0o022 != 0 || meta.mode() & 0o111 == 0 {
+        return Err(GitError::CredentialBridgeUnavailable);
+    }
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        let meta = std::fs::metadata(dir).map_err(|_| GitError::CredentialBridgeUnavailable)?;
+        if meta.mode() & 0o022 != 0 {
+            return Err(GitError::CredentialBridgeUnavailable);
+        }
+        current = dir.parent();
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn broker_loop(mut stream: UnixStream, username: &str, password: &str) -> Result<(), GitError> {
+    for _ in 0..ASKPASS_MAX_REQUESTS {
+        let mut len = [0_u8; 2];
+        if stream.read_exact(&mut len).is_err() {
+            return Ok(());
+        }
+        let len = u16::from_be_bytes(len) as usize;
+        if len > ASKPASS_MAX_PROMPT {
+            return Err(GitError::CredentialBridgeProtocol);
+        }
+        let mut prompt = vec![0_u8; len];
+        stream
+            .read_exact(&mut prompt)
+            .map_err(|_| GitError::CredentialBridgeProtocol)?;
+        let prompt = String::from_utf8_lossy(&prompt).to_ascii_lowercase();
+        let value = if prompt.contains("username") {
+            username
+        } else if prompt.contains("password") {
+            password
+        } else {
+            return Err(GitError::CredentialBridgeProtocol);
+        };
+        stream
+            .write_all(&[0])
+            .map_err(|_| GitError::CredentialBridgeProtocol)?;
+        stream
+            .write_all(&(value.len() as u16).to_be_bytes())
+            .map_err(|_| GitError::CredentialBridgeProtocol)?;
+        stream
+            .write_all(value.as_bytes())
+            .map_err(|_| GitError::CredentialBridgeProtocol)?;
+    }
+    Err(GitError::CredentialBridgeProtocol)
 }
 
 fn fail_after_spawn(
@@ -513,6 +730,27 @@ mod tests {
             .status();
     }
 
+    #[cfg(unix)]
+    fn askpass_helper(path: &Path) {
+        fs::write(
+            path,
+            r#"#!/usr/bin/env python3
+import os, struct, sys
+prompt = (sys.argv[1] if len(sys.argv) > 1 else '').encode()
+fd_path = '/dev/fd/3' if os.path.exists('/dev/fd/3') else '/proc/self/fd/3'
+with open(fd_path, 'r+b', buffering=0) as f:
+    f.write(struct.pack('>H', len(prompt)) + prompt)
+    hdr = f.read(3)
+    if len(hdr) != 3 or hdr[0] != 0:
+        sys.exit(1)
+    n = struct.unpack('>H', hdr[1:])[0]
+    sys.stdout.buffer.write(f.read(n))
+"#,
+        )
+        .unwrap();
+        chmod_x(path);
+    }
+
     fn wait_for_path(path: &Path, timeout: Duration) {
         let start = Instant::now();
         while !path.exists() {
@@ -559,6 +797,7 @@ mod tests {
             byte_policy: policy,
             cancellation,
             lfs_smudge: LfsSmudgePolicy::Disable,
+            credentials: None,
         }
     }
 
@@ -626,6 +865,78 @@ mod tests {
         );
         assert!(!sanitized.contains("secret"));
         assert!(!sanitized.contains("example.com"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn authenticated_clone_uses_fd3_protocol_and_does_not_leak_argv_or_env() {
+        let td = tempfile::tempdir().unwrap();
+        let helper = td.path().join("askpass");
+        askpass_helper(&helper);
+        let log = td.path().join("git.log");
+        let git = td.path().join("git");
+        fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\nprintf '%s\n' \"$@\" > '{}'\nprintenv >> '{}'\nu=$($GIT_ASKPASS 'Username for https://fixture.invalid')\np=$($GIT_ASKPASS 'Password for https://fixture.invalid')\nprintf 'USER=%s\\nPASS=%s\\n' \"$u\" \"$p\" >> '{}'\nfor last do :; done\nmkdir -p \"$last\"\n",
+                log.display(),
+                log.display(),
+                log.display()
+            ),
+        )
+        .unwrap();
+        chmod_x(&git);
+        let mut request = req(&td, CloneBytePolicy::default(), CancellationToken::new());
+        request.credentials = Some(
+            CloneCredentials::new(
+                "bridge-user",
+                "bridge-secret-token",
+                CloneCredentialBridge::fixed(&helper, "fd3"),
+            )
+            .unwrap(),
+        );
+        clone_with_git_program(request, &git).unwrap();
+        let log = fs::read_to_string(log).unwrap();
+        assert!(log.contains("USER=bridge-user"));
+        assert!(log.contains("PASS=bridge-secret-token"));
+        assert!(!log.contains("bridge-secret-token\nGIT"));
+        assert!(!log.contains("bridge-secret-token="));
+        assert!(log.contains("OPENPAW_GIT_ASKPASS_MODE=fd3"));
+        assert!(
+            !format!(
+                "{:?}",
+                CloneCredentials::new(
+                    "wrong-user",
+                    "wrong-secret",
+                    CloneCredentialBridge::fixed(&helper, "fd3")
+                )
+                .unwrap()
+            )
+            .contains("wrong-secret")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn authenticated_clone_timeout_cleans_destination_and_broker() {
+        let td = tempfile::tempdir().unwrap();
+        let helper = td.path().join("askpass");
+        askpass_helper(&helper);
+        let git = td.path().join("git");
+        fs::write(
+            &git,
+            "#!/bin/sh\nfor last do :; done\nmkdir -p \"$last\"\n$GIT_ASKPASS 'Username for https://fixture.invalid' >/dev/null\ntrap '' TERM\nsleep 10\n",
+        )
+        .unwrap();
+        chmod_x(&git);
+        let mut request = req(&td, CloneBytePolicy::default(), CancellationToken::new());
+        request.timeout = Duration::from_millis(50);
+        request.credentials = Some(
+            CloneCredentials::new("u", "p", CloneCredentialBridge::fixed(&helper, "fd3")).unwrap(),
+        );
+        let err = clone_with_git_program(request, &git).unwrap_err();
+        assert!(matches!(err, GitError::Timeout));
+        assert!(!td.path().join("repo").exists());
     }
 
     #[test]
@@ -820,6 +1131,7 @@ mod tests {
                         byte_policy: CloneBytePolicy::default(),
                         cancellation: CancellationToken::new(),
                         lfs_smudge: LfsSmudgePolicy::Disable,
+                        credentials: None,
                     },
                     git,
                 )
@@ -873,6 +1185,7 @@ mod tests {
                     byte_policy: CloneBytePolicy::default(),
                     cancellation: CancellationToken::new(),
                     lfs_smudge: LfsSmudgePolicy::Disable,
+            credentials: None,
                 })
                 .unwrap();
                 fs::read_to_string(dest.join("source")).unwrap()
@@ -952,6 +1265,7 @@ mod tests {
             byte_policy: CloneBytePolicy::default(),
             cancellation: CancellationToken::new(),
             lfs_smudge: LfsSmudgePolicy::Disable,
+            credentials: None,
         });
         result.unwrap();
         assert_eq!(fs::read_to_string(dest.join("README.md")).unwrap(), "ok\n");
