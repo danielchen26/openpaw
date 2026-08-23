@@ -196,12 +196,17 @@ public actor HostClient {
     }
 
     public func beginProviderAuthorization(_ provider: ProviderID) async throws -> ProviderAuthorizationStart {
-        let request = try makeRequest(method: "POST", path: "/v1/providers/\(escape(provider.rawValue))/authorize")
+        let request = try makeRequest(method: "POST", path: "/v1/providers/\(escape(provider.rawValue))/authorizations")
         return try decode(ProviderAuthorizationStart.self, from: try await send(request))
     }
 
     public func providerAuthorizationStatus(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus {
-        let request = try makeRequest(method: "GET", path: "/v1/providers/\(escape(provider.rawValue))/authorize/\(escape(authorizationID))")
+        let request = try makeRequest(method: "GET", path: "/v1/providers/\(escape(provider.rawValue))/authorizations/\(escape(authorizationID))")
+        return try decode(ProviderAuthorizationStatus.self, from: try await send(request))
+    }
+
+    public func cancelProviderAuthorization(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus {
+        let request = try makeRequest(method: "DELETE", path: "/v1/providers/\(escape(provider.rawValue))/authorizations/\(escape(authorizationID))")
         return try decode(ProviderAuthorizationStatus.self, from: try await send(request))
     }
 
@@ -217,12 +222,17 @@ public actor HostClient {
     }
 
     public func importRepo(_ requestBody: RepoImportRequest) async throws -> RepoImportProgress {
-        let request = try makeRequest(method: "POST", path: "/v1/repos/import", body: try encode(requestBody))
+        let request = try makeRequest(method: "POST", path: "/v1/repo-imports", body: try encode(requestBody))
         return try decode(RepoImportProgress.self, from: try await send(request))
     }
 
     public func repoImportProgress(_ importID: String) async throws -> RepoImportProgress {
-        let request = try makeRequest(method: "GET", path: "/v1/repos/import/\(escape(importID))")
+        let request = try makeRequest(method: "GET", path: "/v1/repo-imports/\(escape(importID))")
+        return try decode(RepoImportProgress.self, from: try await send(request))
+    }
+
+    public func cancelRepoImport(_ importID: String) async throws -> RepoImportProgress {
+        let request = try makeRequest(method: "DELETE", path: "/v1/repo-imports/\(escape(importID))")
         return try decode(RepoImportProgress.self, from: try await send(request))
     }
 

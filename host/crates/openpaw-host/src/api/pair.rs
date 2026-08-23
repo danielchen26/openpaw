@@ -135,6 +135,7 @@ pub async fn pair(
         hmac_key_b64: auth::mint_hmac_key_b64(),
         token_sha256: auth::sha256_hex(token.as_bytes()),
         capabilities: pending.profile.capability_names(),
+        profile: Some(pending.profile),
         paired_at: OffsetDateTime::now_utc(),
         last_seen: None,
     };

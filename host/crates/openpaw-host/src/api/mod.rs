@@ -53,6 +53,14 @@ async fn provider_authorization_status_contract_pending()
     ))
 }
 
+async fn provider_authorization_cancel_contract_pending()
+-> Result<Json<openpaw_protocol::ProviderAuthorizationStatus>, ApiError> {
+    Err(ApiError::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "provider authorization cancellation implementation is not installed on this host",
+    ))
+}
+
 async fn provider_revoke_contract_pending()
 -> Result<Json<openpaw_protocol::ProviderStatus>, ApiError> {
     Err(ApiError::new(
@@ -74,6 +82,14 @@ async fn repo_import_contract_pending()
     Err(ApiError::new(
         StatusCode::NOT_IMPLEMENTED,
         "repository import implementation is not installed on this host",
+    ))
+}
+
+async fn repo_import_cancel_contract_pending()
+-> Result<Json<openpaw_protocol::RepoImportProgress>, ApiError> {
+    Err(ApiError::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "repository import cancellation implementation is not installed on this host",
     ))
 }
 
@@ -230,34 +246,43 @@ pub fn router(app: AppState) -> Router {
         Capability::FilesRead,
         Router::new().route("/v1/repos/{repo}/blob", get(repos::blob)),
     );
-    let provider_contracts = guard(
+    let provider_read_contracts = guard(
         &app,
-        Capability::ReposRead,
+        Capability::ProvidersRead,
         Router::new()
             .route("/v1/providers", get(provider_contract_pending))
-            .route(
-                "/v1/providers/{provider}/authorize",
-                post(provider_authorize_contract_pending),
-            )
-            .route(
-                "/v1/providers/{provider}/authorize/{id}",
-                get(provider_authorization_status_contract_pending),
-            )
-            .route(
-                "/v1/providers/{provider}",
-                delete(provider_revoke_contract_pending),
-            )
             .route(
                 "/v1/providers/{provider}/repos",
                 get(provider_repos_contract_pending),
             ),
     );
+    let provider_manage_contracts = guard(
+        &app,
+        Capability::ProvidersManage,
+        Router::new()
+            .route(
+                "/v1/providers/{provider}/authorizations",
+                post(provider_authorize_contract_pending),
+            )
+            .route(
+                "/v1/providers/{provider}/authorizations/{id}",
+                get(provider_authorization_status_contract_pending)
+                    .delete(provider_authorization_cancel_contract_pending),
+            )
+            .route(
+                "/v1/providers/{provider}",
+                delete(provider_revoke_contract_pending),
+            ),
+    );
     let repo_manage_contracts = guard(
         &app,
-        Capability::ReposRead,
+        Capability::ReposManage,
         Router::new()
-            .route("/v1/repos/import", post(repo_import_contract_pending))
-            .route("/v1/repos/import/{id}", get(repo_import_contract_pending))
+            .route("/v1/repo-imports", post(repo_import_contract_pending))
+            .route(
+                "/v1/repo-imports/{id}",
+                get(repo_import_contract_pending).delete(repo_import_cancel_contract_pending),
+            )
             .route("/v1/repos/register", post(repo_import_contract_pending)),
     );
     let uploads = guard(
@@ -292,7 +317,8 @@ pub fn router(app: AppState) -> Router {
         .merge(inbox_write)
         .merge(repos)
         .merge(files)
-        .merge(provider_contracts)
+        .merge(provider_read_contracts)
+        .merge(provider_manage_contracts)
         .merge(repo_manage_contracts)
         .merge(uploads)
         .merge(preview)

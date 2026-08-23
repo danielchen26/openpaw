@@ -152,6 +152,12 @@ pub enum Capability {
     ApprovalsWrite,
     /// Read git status, diffs and trees.
     ReposRead,
+    /// Manage registered repositories and imports.
+    ReposManage,
+    /// Read provider connections and repository listings.
+    ProvidersRead,
+    /// Manage provider connections and authorizations.
+    ProvidersManage,
     /// Read file contents.
     FilesRead,
     /// Proxy to allowlisted loopback ports.
@@ -164,13 +170,16 @@ pub enum Capability {
 
 impl Capability {
     /// Every capability, in spec order.
-    pub const ALL: [Capability; 10] = [
+    pub const ALL: [Capability; 13] = [
         Capability::SessionsRead,
         Capability::EventsRead,
         Capability::InboxRead,
         Capability::InboxWrite,
         Capability::ApprovalsWrite,
         Capability::ReposRead,
+        Capability::ProvidersRead,
+        Capability::ProvidersManage,
+        Capability::ReposManage,
         Capability::FilesRead,
         Capability::PreviewProxy,
         Capability::DevicesRead,
@@ -186,6 +195,9 @@ impl Capability {
             Capability::InboxWrite => "inbox.write",
             Capability::ApprovalsWrite => "approvals.write",
             Capability::ReposRead => "repos.read",
+            Capability::ReposManage => "repos.manage",
+            Capability::ProvidersRead => "providers.read",
+            Capability::ProvidersManage => "providers.manage",
             Capability::FilesRead => "files.read",
             Capability::PreviewProxy => "preview.proxy",
             Capability::DevicesRead => "devices.read",
@@ -214,6 +226,7 @@ impl Profile {
                 Capability::EventsRead,
                 Capability::InboxRead,
                 Capability::ReposRead,
+                Capability::ProvidersRead,
                 Capability::FilesRead,
                 Capability::DevicesRead,
             ],
@@ -645,7 +658,7 @@ pub async fn authorize(
         .touch_device(&device_id, OffsetDateTime::now_utc());
     parts.extensions.insert(AuthedDevice {
         device_id,
-        capabilities: device.capabilities.clone(),
+        capabilities: device.effective_capabilities(),
     });
     next.run(Request::from_parts(parts, Body::from(bytes)))
         .await
@@ -772,16 +785,37 @@ mod tests {
                 "events.read",
                 "inbox.read",
                 "repos.read",
+                "providers.read",
                 "files.read",
                 "devices.read"
             ]
         );
+        assert!(!observer.contains(&"repos.manage".to_owned()));
+        assert!(!observer.contains(&"providers.manage".to_owned()));
         assert!(!observer.contains(&"inbox.write".to_owned()));
         assert!(!observer.contains(&"approvals.write".to_owned()));
         assert!(!observer.contains(&"uploads.write".to_owned()));
 
         let operator = Profile::Operator.capability_names();
-        assert_eq!(operator.len(), 10);
+        assert_eq!(
+            operator,
+            vec![
+                "sessions.read",
+                "events.read",
+                "inbox.read",
+                "inbox.write",
+                "approvals.write",
+                "repos.read",
+                "providers.read",
+                "providers.manage",
+                "repos.manage",
+                "files.read",
+                "preview.proxy",
+                "devices.read",
+                "uploads.write"
+            ]
+        );
+        assert_eq!(operator.len(), 13);
         for capability in Capability::ALL {
             assert!(operator.contains(&capability.as_str().to_owned()));
         }

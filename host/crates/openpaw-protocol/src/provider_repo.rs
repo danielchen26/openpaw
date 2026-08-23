@@ -4,9 +4,9 @@ use time::OffsetDateTime;
 use crate::wire_enum::wire_enum;
 
 wire_enum! { pub enum ProviderId { Github = "github", HuggingFace = "huggingface", } }
-wire_enum! { pub enum ProviderConnectionState { Disconnected = "disconnected", Authorizing = "authorizing", Connected = "connected", Error = "error", } }
-wire_enum! { pub enum ProviderAuthorizationState { Pending = "pending", SlowDown = "slow_down", Authorized = "authorized", Denied = "denied", Expired = "expired", Cancelled = "cancelled", } }
-wire_enum! { pub enum RepoImportState { Queued = "queued", Cloning = "cloning", Indexing = "indexing", Completed = "completed", Failed = "failed", Cancelled = "cancelled", } }
+wire_enum! { pub enum ProviderConnectionState { Disconnected = "disconnected", Authorizing = "authorizing", Connected = "connected", ReauthorizationRequired = "reauthorization_required", Outage = "outage", Error = "error", } }
+wire_enum! { pub enum ProviderAuthorizationState { Pending = "pending", SlowDown = "slow_down", Authorized = "authorized", Denied = "denied", Expired = "expired", Cancelled = "cancelled", ReauthorizationRequired = "reauthorization_required", Outage = "outage", } }
+wire_enum! { pub enum RepoImportState { Queued = "queued", Cloning = "cloning", Indexing = "indexing", Completed = "completed", Failed = "failed", Cancelled = "cancelled", Outage = "outage", } }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

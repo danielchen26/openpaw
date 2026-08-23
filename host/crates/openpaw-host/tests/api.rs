@@ -199,6 +199,7 @@ fn enroll(app: &AppState, device_id: &str, profile: Profile) -> Creds {
             hmac_key_b64: hmac_key_b64.clone(),
             token_sha256: auth::sha256_hex(token.as_bytes()),
             capabilities: profile.capability_names(),
+            profile: Some(profile),
             paired_at: OffsetDateTime::now_utc(),
             last_seen: None,
         })
@@ -2028,6 +2029,7 @@ fn enroll_custom(app: &AppState, device_id: &str, capabilities: &[&str]) -> Cred
                 .iter()
                 .map(|capability| (*capability).to_owned())
                 .collect(),
+            profile: None,
             paired_at: OffsetDateTime::now_utc(),
             last_seen: None,
         })
@@ -2391,4 +2393,99 @@ async fn the_preview_proxy_refuses_a_port_outside_the_allowlist() {
         )
         .await;
     assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn provider_and_repo_contract_routes_have_exact_capability_guards() {
+    let harness = Harness::boot().await;
+    let observer_ok = [
+        (reqwest::Method::GET, "/v1/providers"),
+        (reqwest::Method::GET, "/v1/providers/github/repos"),
+    ];
+    for (method, path) in observer_ok {
+        let response = harness.signed(method, path, None, &harness.observer).await;
+        assert_eq!(
+            response.status(),
+            501,
+            "{path} should pass observer guard to contract stub"
+        );
+    }
+
+    let observer_blocked = [
+        (
+            reqwest::Method::POST,
+            "/v1/providers/github/authorizations",
+            Some(json!({})),
+        ),
+        (
+            reqwest::Method::GET,
+            "/v1/providers/github/authorizations/auth_123",
+            None,
+        ),
+        (
+            reqwest::Method::DELETE,
+            "/v1/providers/github/authorizations/auth_123",
+            None,
+        ),
+        (reqwest::Method::DELETE, "/v1/providers/github", None),
+        (reqwest::Method::POST, "/v1/repo-imports", Some(json!({}))),
+        (reqwest::Method::GET, "/v1/repo-imports/imp_123", None),
+        (reqwest::Method::DELETE, "/v1/repo-imports/imp_123", None),
+        (reqwest::Method::POST, "/v1/repos/register", Some(json!({}))),
+    ];
+    for (method, path, body) in observer_blocked {
+        let response = harness.signed(method, path, body, &harness.observer).await;
+        assert_eq!(
+            response.status(),
+            403,
+            "{path} should be blocked before handler"
+        );
+    }
+
+    let operator_stubs = [
+        (
+            reqwest::Method::POST,
+            "/v1/providers/github/authorizations",
+            Some(json!({})),
+        ),
+        (
+            reqwest::Method::GET,
+            "/v1/providers/github/authorizations/auth_123",
+            None,
+        ),
+        (
+            reqwest::Method::DELETE,
+            "/v1/providers/github/authorizations/auth_123",
+            None,
+        ),
+        (reqwest::Method::DELETE, "/v1/providers/github", None),
+        (reqwest::Method::POST, "/v1/repo-imports", Some(json!({}))),
+        (reqwest::Method::GET, "/v1/repo-imports/imp_123", None),
+        (reqwest::Method::DELETE, "/v1/repo-imports/imp_123", None),
+        (reqwest::Method::POST, "/v1/repos/register", Some(json!({}))),
+    ];
+    for (method, path, body) in operator_stubs {
+        let response = harness.signed(method, path, body, &harness.operator).await;
+        assert_eq!(
+            response.status(),
+            501,
+            "{path} should pass operator guard to contract stub"
+        );
+    }
+
+    let old_shadow_route = harness
+        .signed(
+            reqwest::Method::POST,
+            "/v1/repos/import",
+            Some(json!({})),
+            &harness.operator,
+        )
+        .await;
+    assert_eq!(old_shadow_route.status(), 404);
+    let named_repo_import_status = harness.get("/v1/repos/import/status").await;
+    assert_ne!(
+        named_repo_import_status.status(),
+        501,
+        "repo named import must not be shadowed by import contract"
+    );
 }

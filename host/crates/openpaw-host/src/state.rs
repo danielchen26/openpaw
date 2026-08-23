@@ -26,7 +26,7 @@ use openpaw_protocol::{InboxId, SessionId};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::auth::{constant_time_eq, sha256_hex};
+use crate::auth::{Capability, Profile, constant_time_eq, sha256_hex};
 
 /// Directory mode: owner-only. Nothing else needs to traverse it.
 const DIR_MODE: u32 = 0o700;
@@ -50,6 +50,9 @@ pub struct Device {
     pub token_sha256: String,
     /// Granted capability names.
     pub capabilities: Vec<String>,
+    /// Profile granted at pairing time. Missing for legacy state files.
+    #[serde(default)]
+    pub profile: Option<Profile>,
     /// When pairing completed.
     #[serde(with = "time::serde::rfc3339")]
     pub paired_at: OffsetDateTime,
@@ -61,7 +64,60 @@ pub struct Device {
 impl Device {
     /// True when this device holds `capability`.
     pub fn has_capability(&self, capability: &str) -> bool {
-        self.capabilities.iter().any(|c| c == capability)
+        self.effective_capabilities()
+            .iter()
+            .any(|c| c == capability)
+    }
+
+    /// Current grants after profile-based legacy migration.
+    pub fn effective_capabilities(&self) -> Vec<String> {
+        if self.profile.is_some() || self.legacy_has_operator_only_capability() {
+            return self.effective_profile().capability_names();
+        }
+        let mut capabilities = self.capabilities.clone();
+        let old_observer = [
+            "sessions.read",
+            "events.read",
+            "inbox.read",
+            "repos.read",
+            "files.read",
+            "devices.read",
+        ];
+        if old_observer
+            .iter()
+            .all(|capability| capabilities.iter().any(|c| c == capability))
+            && !capabilities.iter().any(|c| c == "providers.read")
+        {
+            capabilities.push("providers.read".to_owned());
+        }
+        capabilities
+    }
+
+    /// Infer legacy rows without widening read-only observers.
+    pub fn effective_profile(&self) -> Profile {
+        if let Some(profile) = self.profile {
+            return profile;
+        }
+        let observer = Profile::Observer.capability_names();
+        if self.capabilities.iter().all(|c| observer.contains(c)) {
+            return Profile::Observer;
+        }
+        if self.legacy_has_operator_only_capability() {
+            return Profile::Operator;
+        }
+        Profile::Observer
+    }
+
+    fn legacy_has_operator_only_capability(&self) -> bool {
+        let operator_only = [
+            Capability::InboxWrite,
+            Capability::ApprovalsWrite,
+            Capability::PreviewProxy,
+            Capability::UploadsWrite,
+        ];
+        operator_only
+            .iter()
+            .any(|capability| self.capabilities.iter().any(|c| c == capability.as_str()))
     }
 
     /// Decode the device's HMAC key.
@@ -529,6 +585,7 @@ mod tests {
             hmac_key_b64: "AAAA".into(),
             token_sha256: sha256_hex(token.as_bytes()),
             capabilities: vec!["sessions.read".into()],
+            profile: Some(Profile::Observer),
             paired_at: OffsetDateTime::UNIX_EPOCH,
             last_seen: None,
         }

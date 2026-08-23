@@ -5,11 +5,35 @@ public enum ProviderID: String, Codable, Sendable, Hashable, CaseIterable {
     case huggingFace = "huggingface"
 }
 
-public enum ProviderConnectionState: String, Codable, Sendable, Hashable {
-    case disconnected
-    case authorizing
-    case connected
-    case error
+public enum ProviderConnectionState: Codable, Sendable, Hashable {
+    case disconnected, authorizing, connected, reauthorizationRequired, outage, error
+    case unknown(String)
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "disconnected": self = .disconnected
+        case "authorizing": self = .authorizing
+        case "connected": self = .connected
+        case "reauthorization_required": self = .reauthorizationRequired
+        case "outage": self = .outage
+        case "error": self = .error
+        default: self = .unknown(value)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .disconnected: try container.encode("disconnected")
+        case .authorizing: try container.encode("authorizing")
+        case .connected: try container.encode("connected")
+        case .reauthorizationRequired: try container.encode("reauthorization_required")
+        case .outage: try container.encode("outage")
+        case .error: try container.encode("error")
+        case .unknown(let value): try container.encode(value)
+        }
+    }
 }
 
 public struct ProviderStatus: Codable, Sendable, Hashable, Identifiable {
@@ -41,7 +65,40 @@ public struct ProviderAuthorizationStart: Codable, Sendable, Hashable {
     enum CodingKeys: String, CodingKey { case authorizationID = "authorization_id", verificationURL = "verification_url", userCode = "user_code", expiresAt = "expires_at", intervalSeconds = "interval_seconds" }
 }
 
-public enum ProviderAuthorizationState: String, Codable, Sendable, Hashable { case pending, slowDown = "slow_down", authorized, denied, expired, cancelled }
+public enum ProviderAuthorizationState: Codable, Sendable, Hashable {
+    case pending, slowDown, authorized, denied, expired, cancelled, reauthorizationRequired, outage
+    case unknown(String)
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "pending": self = .pending
+        case "slow_down": self = .slowDown
+        case "authorized": self = .authorized
+        case "denied": self = .denied
+        case "expired": self = .expired
+        case "cancelled": self = .cancelled
+        case "reauthorization_required": self = .reauthorizationRequired
+        case "outage": self = .outage
+        default: self = .unknown(value)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .pending: try container.encode("pending")
+        case .slowDown: try container.encode("slow_down")
+        case .authorized: try container.encode("authorized")
+        case .denied: try container.encode("denied")
+        case .expired: try container.encode("expired")
+        case .cancelled: try container.encode("cancelled")
+        case .reauthorizationRequired: try container.encode("reauthorization_required")
+        case .outage: try container.encode("outage")
+        case .unknown(let value): try container.encode(value)
+        }
+    }
+}
 
 public struct ProviderAuthorizationStatus: Codable, Sendable, Hashable {
     public var authorizationID: String
@@ -92,7 +149,38 @@ public struct RepoRegisterRequest: Codable, Sendable, Hashable {
     enum CodingKeys: String, CodingKey { case rootID = "root_id", requestedName = "requested_name" }
 }
 
-public enum RepoImportState: String, Codable, Sendable, Hashable { case queued, cloning, indexing, completed, failed, cancelled }
+public enum RepoImportState: Codable, Sendable, Hashable {
+    case queued, cloning, indexing, completed, failed, cancelled, outage
+    case unknown(String)
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case "queued": self = .queued
+        case "cloning": self = .cloning
+        case "indexing": self = .indexing
+        case "completed": self = .completed
+        case "failed": self = .failed
+        case "cancelled": self = .cancelled
+        case "outage": self = .outage
+        default: self = .unknown(value)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .queued: try container.encode("queued")
+        case .cloning: try container.encode("cloning")
+        case .indexing: try container.encode("indexing")
+        case .completed: try container.encode("completed")
+        case .failed: try container.encode("failed")
+        case .cancelled: try container.encode("cancelled")
+        case .outage: try container.encode("outage")
+        case .unknown(let value): try container.encode(value)
+        }
+    }
+}
 
 public struct RepoImportProgress: Codable, Sendable, Hashable, Identifiable {
     public var id: String
