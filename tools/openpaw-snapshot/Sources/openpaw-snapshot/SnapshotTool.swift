@@ -147,6 +147,7 @@ extension PreviewBackend.Scenario {
         case .empty: "empty"
         case .disconnected: "disconnected"
         case .reviewingDestructiveCommand: "destructive"
+        case .repoProviders: "repo-providers"
         }
     }
 }
