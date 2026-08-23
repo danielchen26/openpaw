@@ -78,10 +78,18 @@ impl Roots {
     /// component, in which case the later one gains a `-2`, `-3`, ... suffix so
     /// that a client name always maps to exactly one directory.
     pub fn new(paths: impl IntoIterator<Item = PathBuf>) -> Result<Roots, FileError> {
+        Self::with_names(paths.into_iter().map(|path| (None, path)))
+    }
+
+    /// Canonicalize paths and assign unique names, using an optional preferred
+    /// client-visible base name before falling back to the final path component.
+    pub fn with_names(
+        paths: impl IntoIterator<Item = (Option<String>, PathBuf)>,
+    ) -> Result<Roots, FileError> {
         let mut roots: Vec<ResolvedRoot> = Vec::new();
         let mut taken: HashSet<String> = HashSet::new();
 
-        for raw in paths {
+        for (preferred, raw) in paths {
             let canonical = std::fs::canonicalize(&raw).map_err(|err| match err.kind() {
                 std::io::ErrorKind::NotFound => FileError::NotFound,
                 _ => FileError::Io(err),
@@ -92,10 +100,14 @@ impl Roots {
             if roots.iter().any(|root| root.path == canonical) {
                 continue;
             }
-            let base = canonical
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
+            let base = preferred
                 .filter(|name| !name.is_empty())
+                .or_else(|| {
+                    canonical
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .filter(|name| !name.is_empty())
+                })
                 .unwrap_or_else(|| "root".to_owned());
             let mut name = base.clone();
             let mut suffix = 2usize;

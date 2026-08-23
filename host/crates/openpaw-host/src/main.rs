@@ -161,7 +161,7 @@ async fn serve(state_dir: &std::path::Path, overrides: &Overrides) -> Result<()>
         version = openpaw_host::VERSION,
         protocol = openpaw_host::PROTOCOL_VERSION,
         address = %bound,
-        repos = app.roots.names().len(),
+        repos = app.roots().names().len(),
         state_dir = %app.store.state_dir().display(),
         "openpaw-host listening"
     );

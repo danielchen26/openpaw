@@ -12,15 +12,17 @@ use serde::{Deserialize, Serialize};
 
 const REGISTRY_FILE: &str = "workspace-registry.json";
 const SECRET_MODE: u32 = 0o600;
+const MAX_RECORDS: usize = 512;
 
 /// Durable dynamic workspace record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRecord {
-    /// Host-owned stable root id.
+    /// Host-owned stable root id under `<state_dir>/repos`.
     pub root_id: String,
-    /// Client-visible repository name.
+    /// Preferred client-visible repository name.
     pub name: String,
-    /// Canonical host path.
+    /// Legacy field. Ignored on load because stored absolute paths are not trusted.
+    #[serde(default)]
     pub path: PathBuf,
 }
 
@@ -43,7 +45,7 @@ impl WorkspaceRegistry {
     /// Load dynamic records and build the first roots snapshot.
     pub fn open(state_dir: &Path, config_roots: Vec<PathBuf>) -> Result<Self> {
         let records = load_records(state_dir)?;
-        let snapshot = Arc::new(build_roots(&config_roots, &records)?);
+        let snapshot = Arc::new(build_roots(state_dir, &config_roots, &records)?);
         Ok(Self {
             state_dir: state_dir.to_path_buf(),
             config_roots,
@@ -66,61 +68,143 @@ impl WorkspaceRegistry {
         root_id: &str,
         requested_name: Option<&str>,
     ) -> Result<Arc<Roots>> {
-        let repos_dir = self.state_dir.join("repos");
-        fs::create_dir_all(&repos_dir).context("creating repository state directory")?;
-        let candidate = repos_dir.join(root_id);
-        let canonical =
-            fs::canonicalize(&candidate).context("registered repository is not available")?;
-        let repos_canon =
-            fs::canonicalize(&repos_dir).context("canonicalizing repository state directory")?;
-        anyhow::ensure!(
-            canonical.starts_with(&repos_canon),
-            "registered repository is outside host storage"
-        );
-        anyhow::ensure!(
-            canonical.is_dir(),
-            "registered repository is not a directory"
-        );
-
+        validate_identifier(root_id)?;
         let name = requested_name.unwrap_or(root_id).to_owned();
         validate_identifier(&name)?;
-        let record = WorkspaceRecord {
-            root_id: root_id.to_owned(),
-            name,
-            path: canonical,
-        };
+        let record = validated_record(&self.state_dir, root_id, &name)?;
 
-        let mut records = self.records.write().expect("workspace records poisoned");
-        if !records
-            .iter()
-            .any(|existing| existing.root_id == record.root_id)
+        let records = self
+            .records
+            .read()
+            .expect("workspace records poisoned")
+            .clone();
+        let mut next_records = records.clone();
+        if let Some(existing) = next_records
+            .iter_mut()
+            .find(|existing| existing.root_id == root_id)
         {
-            records.push(record);
-            persist_records(&self.state_dir, &records)?;
+            existing.name = record.name.clone();
+        } else {
+            next_records.push(record);
         }
-        let next = Arc::new(build_roots(&self.config_roots, &records)?);
-        *self.snapshot.write().expect("workspace snapshot poisoned") = next.clone();
-        Ok(next)
+        let next_snapshot = Arc::new(build_roots(
+            &self.state_dir,
+            &self.config_roots,
+            &next_records,
+        )?);
+        persist_records(&self.state_dir, &next_records)?;
+
+        *self.records.write().expect("workspace records poisoned") = next_records;
+        *self.snapshot.write().expect("workspace snapshot poisoned") = next_snapshot.clone();
+        Ok(next_snapshot)
+    }
+
+    /// Find the published client-visible name for a root id.
+    pub fn visible_name(&self, root_id: &str) -> Option<String> {
+        let records = self.records.read().expect("workspace records poisoned");
+        let record = records.iter().find(|record| record.root_id == root_id)?;
+        let path = record_path(&self.state_dir, &record.root_id).ok()?;
+        self.snapshot()
+            .all()
+            .iter()
+            .find(|root| root.path == path)
+            .map(|root| root.name.clone())
     }
 }
 
-fn build_roots(config_roots: &[PathBuf], records: &[WorkspaceRecord]) -> Result<Roots> {
-    let paths = config_roots
-        .iter()
-        .cloned()
-        .chain(records.iter().map(|r| r.path.clone()));
-    Roots::new(paths).map_err(|err| anyhow::anyhow!(err))
+fn build_roots(
+    state_dir: &Path,
+    config_roots: &[PathBuf],
+    records: &[WorkspaceRecord],
+) -> Result<Roots> {
+    let config = config_roots.iter().cloned().map(|path| (None, path));
+    let mut roots = Vec::with_capacity(config_roots.len() + records.len());
+    roots.extend(config);
+    for record in records {
+        roots.push((
+            Some(record.name.clone()),
+            record_path(state_dir, &record.root_id)?,
+        ));
+    }
+    Roots::with_names(roots).map_err(|err| anyhow::anyhow!(err))
 }
 
 fn load_records(state_dir: &Path) -> Result<Vec<WorkspaceRecord>> {
     let path = state_dir.join(REGISTRY_FILE);
-    match fs::read(&path) {
-        Ok(bytes) => Ok(serde_json::from_slice::<RegistryFile>(&bytes)
-            .with_context(|| format!("parsing {}", path.display()))?
-            .workspaces),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+    let records = match fs::read(&path) {
+        Ok(bytes) => {
+            serde_json::from_slice::<RegistryFile>(&bytes)
+                .with_context(|| format!("parsing {}", path.display()))?
+                .workspaces
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+    };
+    anyhow::ensure!(records.len() <= MAX_RECORDS, "too many workspace records");
+    let mut validated = Vec::with_capacity(records.len());
+    for record in records {
+        validate_identifier(&record.root_id)?;
+        validate_identifier(&record.name)?;
+        validated.push(validated_record(state_dir, &record.root_id, &record.name)?);
     }
+    Ok(validated)
+}
+
+fn validated_record(state_dir: &Path, root_id: &str, name: &str) -> Result<WorkspaceRecord> {
+    let path = record_path(state_dir, root_id)?;
+    ensure_working_git_repo(state_dir, root_id, &path)?;
+    Ok(WorkspaceRecord {
+        root_id: root_id.to_owned(),
+        name: name.to_owned(),
+        path,
+    })
+}
+
+fn record_path(state_dir: &Path, root_id: &str) -> Result<PathBuf> {
+    validate_identifier(root_id)?;
+    let repos_dir = state_dir.join("repos");
+    fs::create_dir_all(&repos_dir).context("creating repository state directory")?;
+    let candidate = repos_dir.join(root_id);
+    let metadata =
+        fs::symlink_metadata(&candidate).context("registered repository is not available")?;
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink(),
+        "registered repository is a symlink"
+    );
+    let canonical = fs::canonicalize(&candidate).context("canonicalizing registered repository")?;
+    let repos_canon =
+        fs::canonicalize(&repos_dir).context("canonicalizing repository state directory")?;
+    anyhow::ensure!(
+        canonical.starts_with(&repos_canon),
+        "registered repository is outside host storage"
+    );
+    Ok(canonical)
+}
+
+fn ensure_working_git_repo(state_dir: &Path, root_id: &str, canonical: &Path) -> Result<()> {
+    anyhow::ensure!(
+        canonical.is_dir(),
+        "registered repository is not a directory"
+    );
+    let git = canonical.join(".git");
+    let git_meta =
+        fs::symlink_metadata(&git).context("registered repository is not a git repository")?;
+    anyhow::ensure!(
+        !git_meta.file_type().is_symlink(),
+        "git metadata is a symlink"
+    );
+    anyhow::ensure!(
+        git_meta.is_dir() || git_meta.is_file(),
+        "registered repository is not a git repository"
+    );
+    let repos = fs::canonicalize(state_dir.join("repos"))?;
+    let git_canon = fs::canonicalize(git)?;
+    anyhow::ensure!(
+        git_canon.starts_with(&repos),
+        "git metadata escapes host storage"
+    );
+    validate_identifier(root_id)?;
+    Ok(())
 }
 
 fn persist_records(state_dir: &Path, records: &[WorkspaceRecord]) -> Result<()> {
@@ -130,20 +214,26 @@ fn persist_records(state_dir: &Path, records: &[WorkspaceRecord]) -> Result<()> 
     let bytes = serde_json::to_vec_pretty(&RegistryFile {
         workspaces: records.to_vec(),
     })?;
-    {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(SECRET_MODE)
-            .open(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
+    let result = (|| -> Result<()> {
+        {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(SECRET_MODE)
+                .open(&tmp)
+                .with_context(|| format!("creating {}", tmp.display()))?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp, &path)?;
+        let dir = OpenOptions::new().read(true).open(state_dir)?;
+        dir.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    fs::rename(&tmp, &path)?;
-    let dir = OpenOptions::new().read(true).open(state_dir)?;
-    dir.sync_all()?;
-    Ok(())
+    result
 }
 
 fn validate_identifier(value: &str) -> Result<()> {
@@ -155,6 +245,7 @@ fn validate_identifier(value: &str) -> Result<()> {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')),
         "identifier is invalid"
     );
+    anyhow::ensure!(value != "." && value != "..", "identifier is invalid");
     Ok(())
 }
 
@@ -165,19 +256,29 @@ mod tests {
 
     use super::*;
 
+    fn git_init(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[test]
     fn register_known_rejects_arbitrary_path_and_persists_reload() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state");
-        fs::create_dir_all(state.join("repos/server-root/.git")).unwrap();
-        fs::create_dir_all(dir.path().join("outside/.git")).unwrap();
+        git_init(&state.join("repos/server-root"));
+        git_init(&dir.path().join("outside"));
         let registry = WorkspaceRegistry::open(&state, Vec::new()).unwrap();
 
         assert!(registry.register_known("../../outside", None).is_err());
         let snapshot = registry
             .register_known("server-root", Some("visible-root"))
             .unwrap();
-        assert!(snapshot.names().contains(&"server-root".to_owned()));
+        assert!(snapshot.names().contains(&"visible-root".to_owned()));
 
         #[cfg(unix)]
         {
@@ -195,7 +296,7 @@ mod tests {
             reloaded
                 .snapshot()
                 .names()
-                .contains(&"server-root".to_owned())
+                .contains(&"visible-root".to_owned())
         );
     }
 
@@ -203,8 +304,8 @@ mod tests {
     fn old_snapshots_are_immutable_while_new_snapshots_publish_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state");
-        fs::create_dir_all(state.join("repos/one/.git")).unwrap();
-        fs::create_dir_all(state.join("repos/two/.git")).unwrap();
+        git_init(&state.join("repos/one"));
+        git_init(&state.join("repos/two"));
         let registry = Arc::new(WorkspaceRegistry::open(&state, Vec::new()).unwrap());
         registry.register_known("one", None).unwrap();
         let old = registry.snapshot();
@@ -226,5 +327,31 @@ mod tests {
         assert!(names.contains(&"one".to_owned()));
         assert!(names.contains(&"two".to_owned()));
         assert_eq!(old.names(), vec!["one".to_owned()]);
+    }
+
+    #[test]
+    fn boot_rejects_malicious_persisted_records_and_non_git_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        fs::create_dir_all(state.join("repos/plain")).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        fs::write(
+            state.join(REGISTRY_FILE),
+            r#"{"workspaces":[{"root_id":"plain","name":"plain","path":"/tmp/evil"}]}"#,
+        )
+        .unwrap();
+        assert!(WorkspaceRegistry::open(&state, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn requested_names_are_visible_and_collide_deterministically() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        git_init(&state.join("repos/one"));
+        git_init(&state.join("repos/two"));
+        let registry = WorkspaceRegistry::open(&state, Vec::new()).unwrap();
+        registry.register_known("one", Some("repo")).unwrap();
+        registry.register_known("two", Some("repo")).unwrap();
+        assert_eq!(registry.snapshot().names(), vec!["repo", "repo-2"]);
     }
 }

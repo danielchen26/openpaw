@@ -65,8 +65,6 @@ pub struct AppState {
     pub pairing: Arc<auth::PairingCodes>,
     /// Loopback preview proxy.
     pub proxy: Arc<openpaw_preview::Proxy>,
-    /// Allowlisted repository roots. Nothing outside them is readable.
-    pub roots: Arc<openpaw_files::Roots>,
     /// Dynamic workspace registry.
     pub workspaces: Arc<workspaces::WorkspaceRegistry>,
     /// Provider authorization and token manager.
@@ -114,7 +112,6 @@ impl AppState {
             nonces: Arc::new(auth::NonceCache::new()),
             pairing: Arc::new(auth::PairingCodes::new()),
             proxy: Arc::new(proxy),
-            roots: workspace_registry.snapshot(),
             workspaces: workspace_registry,
             provider_manager,
             repo_imports,

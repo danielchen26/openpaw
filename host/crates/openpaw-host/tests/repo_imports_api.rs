@@ -161,11 +161,12 @@ async fn repo_import_routes_are_guarded_and_sanitized() {
 async fn register_route_accepts_only_host_owned_root_ids() {
     let h = Harness::boot().await;
     std::fs::create_dir_all(h.state_dir.join("repos/known")).unwrap();
-    std::process::Command::new("git")
+    let status = std::process::Command::new("git")
         .arg("init")
         .arg(h.state_dir.join("repos/known"))
         .status()
         .unwrap();
+    assert!(status.success());
     let outside = h
         .signed(
             reqwest::Method::POST,
@@ -185,6 +186,57 @@ async fn register_route_accepts_only_host_owned_root_ids() {
         )
         .await;
     assert_eq!(registered.status(), reqwest::StatusCode::OK);
-    let body = registered.text().await.unwrap();
-    assert!(body.contains("known"));
+    let progress: RepoImportProgress = registered.json().await.unwrap();
+    assert!(progress.id.starts_with("register-"));
+    assert_eq!(progress.state, RepoImportState::Completed);
+    assert_eq!(progress.destination_name, "known");
+    let encoded = serde_json::to_string(&progress).unwrap();
+    assert!(!encoded.contains(h.state_dir.to_str().unwrap()));
+}
+
+#[tokio::test]
+async fn register_rejects_non_git_dirs_and_import_id_guards_hold() {
+    let h = Harness::boot().await;
+    std::fs::create_dir_all(h.state_dir.join("repos/plain")).unwrap();
+    let plain = h
+        .signed(
+            reqwest::Method::POST,
+            "/v1/repos/register",
+            json!({"root_id":"plain","requested_name":"plain"}),
+            &h.operator,
+        )
+        .await;
+    assert_eq!(plain.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+
+    let unknown = h
+        .signed(
+            reqwest::Method::GET,
+            "/v1/repo-imports/import-missing",
+            json!({}),
+            &h.operator,
+        )
+        .await;
+    assert_eq!(unknown.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let invalid = h
+        .signed(
+            reqwest::Method::DELETE,
+            "/v1/repo-imports/..%2Fbad",
+            json!({}),
+            &h.operator,
+        )
+        .await;
+    assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let cancelled = h
+        .signed(
+            reqwest::Method::DELETE,
+            "/v1/repo-imports/import-missing",
+            json!({}),
+            &h.operator,
+        )
+        .await;
+    assert_eq!(cancelled.status(), reqwest::StatusCode::OK);
+    let progress: RepoImportProgress = cancelled.json().await.unwrap();
+    assert_eq!(progress.state, RepoImportState::Cancelled);
 }
