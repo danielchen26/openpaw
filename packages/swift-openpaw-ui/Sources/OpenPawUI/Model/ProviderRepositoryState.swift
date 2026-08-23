@@ -1,6 +1,12 @@
 import Foundation
 import OpenPawProtocol
 
+public enum ProviderCapabilityAvailability: Sendable, Equatable {
+    case unavailable
+    case available
+    case denied
+}
+
 public enum ProviderListLoadingState: Sendable, Equatable {
     case idle
     case loading
@@ -49,6 +55,24 @@ public enum RepoImportOperationState: Sendable, Equatable {
         case .cancelling(let importID): return importID
         case .failed(let importID, _): return importID
         case .idle, .starting: return nil
+        }
+    }
+}
+
+extension ProviderAuthorizationState {
+    var isTerminalForModel: Bool {
+        switch self {
+        case .authorized, .denied, .expired, .cancelled, .reauthorizationRequired: true
+        case .pending, .slowDown, .outage, .unknown: false
+        }
+    }
+}
+
+extension RepoImportState {
+    var isTerminalForModel: Bool {
+        switch self {
+        case .completed, .failed, .cancelled, .recoveryRequired: true
+        case .queued, .authorizing, .cloning, .validating, .registering, .unknown: false
         }
     }
 }
