@@ -491,7 +491,7 @@ final class PreviewBackendTests: XCTestCase {
         for scenario in PreviewBackend.Scenario.allCases {
             let backend = PreviewBackend(scenario)
             switch scenario {
-            case .populated, .reviewingDestructiveCommand:
+            case .populated, .reviewingDestructiveCommand, .repoProviders:
                 XCTAssertEqual(backend.sessionList.count, 4)
                 let repos = try await backend.repos()
                 XCTAssertFalse(repos.isEmpty)

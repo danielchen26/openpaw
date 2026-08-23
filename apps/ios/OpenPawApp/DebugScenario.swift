@@ -109,8 +109,10 @@
             switch self {
             case .empty, .noHosts, .hostSwitcher:
                 .empty
-            case .connectedWorkspace, .sessions, .repoProviders:
+            case .connectedWorkspace, .sessions:
                 .populated
+            case .repoProviders:
+                .repoProviders
             case .inboxRisks:
                 .reviewingDestructiveCommand
             case .connectionFailures:

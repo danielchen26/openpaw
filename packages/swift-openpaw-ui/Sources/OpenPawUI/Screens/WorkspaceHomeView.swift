@@ -20,6 +20,7 @@ public struct WorkspaceHomeView: View {
     private let onOpenApproval: (String) -> Void
     private let onOpenRepository: (String) -> Void
     @State private var isAdding = false
+    @State private var isShowingProviderImport = false
 
     public init(
         model: OpenPawModel,
@@ -52,6 +53,9 @@ public struct WorkspaceHomeView: View {
                 AddDeviceFlow(model: model, settings: settings, candidates: candidates) { isAdding = false }
             }
         }
+        .sheet(isPresented: $isShowingProviderImport) {
+            NavigationStack { ProviderImportView(model: model) }
+        }
     }
 
     private var populatedHome: some View {
@@ -60,6 +64,7 @@ public struct WorkspaceHomeView: View {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.xl) {
                 networkSummary
                 deviceGrid
+                remoteCatalogTransfer
                 if !presentation.agentSessions.isEmpty { agentSessions(presentation.agentSessions) }
                 if !presentation.pendingApprovals.isEmpty { approvals(presentation.pendingApprovals) }
                 if !presentation.recentWorkspaces.isEmpty { recentWorkspaces(presentation.recentWorkspaces) }
@@ -70,6 +75,56 @@ public struct WorkspaceHomeView: View {
         }
         .background(OpenPawTheme.void)
         .navigationTitle("Home")
+    }
+
+    private var remoteCatalogTransfer: some View {
+        section("Remote catalog transfer") {
+            Panel {
+                VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                    Text("remote catalog / host transfer / local workspace")
+                        .font(OpenPawTheme.Machine.label)
+                        .foregroundStyle(OpenPawTheme.signal)
+                    Text("Import a remote repository through your host")
+                        .font(OpenPawTheme.Human.title)
+                        .foregroundStyle(OpenPawTheme.textPrimary)
+                    Text(remoteCatalogDetail)
+                        .font(OpenPawTheme.Human.prose)
+                        .foregroundStyle(OpenPawTheme.textSecondary)
+                    Button(remoteCatalogActionTitle) {
+                        if model.connection.isConnected, model.canListProviders == .available {
+                            isShowingProviderImport = true
+                        } else if let host = model.selectedHost {
+                            onDeviceAction(host, .terminal)
+                        }
+                    }
+                    .disabled(remoteCatalogActionDisabled)
+                    .frame(minHeight: 44)
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Remote catalog transfer")
+            .accessibilityValue(remoteCatalogDetail)
+        }
+    }
+
+    private var remoteCatalogDetail: String {
+        let host = model.selectedHost?.nickname ?? "this host"
+        guard model.connection.isConnected else { return "Connect \(host) first. Repository browsing and imports run on the host, not from this device." }
+        if model.canListProviders == .denied || model.canAuthorizeProviders == .denied || model.canImportRepos == .denied {
+            return "This paired device cannot import repositories. Re-pair this device with providers.read, providers.manage, and repos.manage to authorize and import repositories."
+        }
+        if model.canListProviders == .unavailable { return "Provider import is unavailable on this host. Install or update openpaw-host with provider support, then reconnect." }
+        return "OpenPaw never clones a repository on this phone. The selected host authorizes, clones, validates, and registers the workspace it owns."
+    }
+
+    private var remoteCatalogActionTitle: String {
+        guard model.connection.isConnected else { return "Connect host" }
+        return model.canListProviders == .available ? "Browse remote catalogs" : "Provider import unavailable"
+    }
+
+    private var remoteCatalogActionDisabled: Bool {
+        model.connection.isConnected && model.canListProviders != .available
     }
 
     private var networkSummary: some View {

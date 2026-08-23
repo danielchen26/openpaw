@@ -12,7 +12,7 @@ import OpenPawTerminalCore
 /// exactly what makes UI collapse in production.
 ///
 /// Every timestamp derives from ``PreviewBackend/now``, a fixed instant, so snapshots are byte-stable.
-public struct PreviewBackend: OpenPawBackend {
+public struct PreviewBackend: OpenPawBackend, PairedHostCapabilityProviding {
 
     /// The scenarios worth designing against. Not a difficulty dial — four genuinely different screens.
     public enum Scenario: String, Sendable, Hashable, CaseIterable {
@@ -24,6 +24,8 @@ public struct PreviewBackend: OpenPawBackend {
         case disconnected
         /// `populated`, narrowed to the one decision that matters: the destructive command awaiting approval.
         case reviewingDestructiveCommand
+        /// Deterministic provider catalog, authorization, pagination, import, cancel, and recovery fixture.
+        case repoProviders
     }
 
     // MARK: - Fixed clock
@@ -77,7 +79,7 @@ public struct PreviewBackend: OpenPawBackend {
         healthInfo = PreviewFixtures.health
 
         switch kind {
-        case .populated:
+        case .populated, .repoProviders:
             sessionList = PreviewFixtures.sessions
             inboxItems = PreviewFixtures.inboxItems
             transcripts = PreviewFixtures.transcripts
@@ -188,7 +190,7 @@ public struct PreviewBackend: OpenPawBackend {
         model.selectedRepo = backend.repoList.first?.name
 
         switch kind {
-        case .populated, .reviewingDestructiveCommand:
+        case .populated, .reviewingDestructiveCommand, .repoProviders:
             // Matches the selected host's `lastSuccessfulTransport`, so the terminal header and the host row
             // agree about how this connection was made.
             model.connection = .connected(.mosh)
@@ -288,6 +290,72 @@ public struct PreviewBackend: OpenPawBackend {
     public func repos() async throws -> [RepoSummary] {
         try requireTunnel()
         return repoList
+    }
+
+    public func pairedCapabilityStatus(_ capability: String, hostID: HostRecord.ID) -> PairedHostCapabilityStatus {
+        switch scenario {
+        case .repoProviders:
+            ["providers.read", "providers.manage", "repos.manage", "devices.read"].contains(capability) ? .granted : .unknown
+        default:
+            .granted
+        }
+    }
+
+    public func providers() async throws -> [ProviderStatus] {
+        try requireTunnel()
+        return [
+            ProviderStatus(id: .github, displayName: "GitHub", state: .connected, accountLabel: "octo-host", scopes: ["repo:read"], repoListingSupported: true),
+            ProviderStatus(id: .huggingFace, displayName: "Hugging Face", state: .reauthorizationRequired, accountLabel: nil, scopes: [], repoListingSupported: true)
+        ]
+    }
+
+    public func beginProviderAuthorization(_ provider: ProviderID) async throws -> ProviderAuthorizationStart {
+        try requireTunnel()
+        let url = provider == .huggingFace ? "https://huggingface.co/device" : "https://github.com/login/device"
+        return ProviderAuthorizationStart(authorizationID: provider == .huggingFace ? "auth-hf-debug" : "auth-gh-debug", verificationURL: URL(string: url)!, userCode: provider == .huggingFace ? "HF-0426" : "GH-0426", expiresAt: Self.now.addingTimeInterval(600), intervalSeconds: 1)
+    }
+
+    public func providerAuthorizationStatus(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus {
+        try requireTunnel()
+        return ProviderAuthorizationStatus(authorizationID: authorizationID, state: .authorized, provider: provider, accountLabel: provider == .github ? "octo-host" : "hf-host")
+    }
+
+    public func cancelProviderAuthorization(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus {
+        try requireTunnel()
+        return ProviderAuthorizationStatus(authorizationID: authorizationID, state: .cancelled, provider: provider)
+    }
+
+    public func revokeProvider(_ provider: ProviderID) async throws -> ProviderStatus {
+        try requireTunnel()
+        return ProviderStatus(id: provider, displayName: provider.displayName, state: .disconnected, repoListingSupported: true, remoteRevokeResult: .unsupported)
+    }
+
+    public func providerRepos(_ provider: ProviderID, cursor: String?) async throws -> ProviderRepoPage {
+        try requireTunnel()
+        switch provider {
+        case .github:
+            let first = [try ProviderRepo(id: "gh-openpaw", provider: .github, owner: "openpaw", name: "openpaw", displayName: "openpaw/openpaw", isPrivate: false, sourceURLRedacted: "https://github.com/openpaw/openpaw"), try ProviderRepo(id: "gh-field-agent", provider: .github, owner: "acme", name: "field-agent", displayName: "acme/field-agent", isPrivate: true, sourceURLRedacted: "https://github.com/acme/field-agent")]
+            let second = [try ProviderRepo(id: "gh-scout", provider: .github, owner: "openpaw", name: "scout", displayName: "openpaw/scout", isPrivate: false, sourceURLRedacted: "https://github.com/openpaw/scout")]
+            return cursor == nil ? ProviderRepoPage(repos: first, nextCursor: "debug-next-gh") : ProviderRepoPage(repos: second)
+        case .huggingFace:
+            return ProviderRepoPage(repos: [try ProviderRepo(id: "hf-whisper-small", provider: .huggingFace, owner: "openpaw", name: "whisper-small", displayName: "openpaw/whisper-small", isPrivate: false, sourceURLRedacted: "https://huggingface.co/openpaw/whisper-small")])
+        }
+    }
+
+    public func importRepo(_ request: RepoImportRequest) async throws -> RepoImportProgress {
+        try requireTunnel()
+        await PreviewProviderImportFixture.shared.reset()
+        return try RepoImportProgress(id: "import-debug-\(request.repoID)", state: .queued, repoName: request.repoID, destinationName: request.requestedName ?? "openpaw", percent: 0, message: "Queued on selected host")
+    }
+
+    public func repoImportProgress(_ importID: String) async throws -> RepoImportProgress {
+        try requireTunnel()
+        return try await PreviewProviderImportFixture.shared.next(importID: importID)
+    }
+
+    public func cancelRepoImport(_ importID: String) async throws -> RepoImportProgress {
+        try requireTunnel()
+        return try RepoImportProgress(id: importID, state: .cancelled, repoName: "openpaw", destinationName: "openpaw", message: "Cancelled on selected host")
     }
 
     public func repoStatus(_ repo: String) async throws -> RepoStatus {
