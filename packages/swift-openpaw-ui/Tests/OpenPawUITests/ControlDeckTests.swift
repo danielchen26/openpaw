@@ -168,6 +168,8 @@ struct ControlDeckStowingTests {
     func handleIsNarrow() {
         #expect(ControlDeck.stowedHandleWidth < 44)
         #expect(ControlDeck.stowedHandleWidth > 0)
+        #expect(ControlDeck.stowedHandleHitWidth >= 44)
+        #expect(ControlDeck.stowedHandleHitWidth > ControlDeck.stowedHandleWidth)
     }
 
     /// Folding and stowing are different states and must not be confused for each other.

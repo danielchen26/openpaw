@@ -1,6 +1,6 @@
 import XCTest
 
-/// Drives session creation the way a person does: connect, open Chat, type a name and tap Create.
+/// Drives session creation the way a person does: connect, open Sessions, type a name and tap Create.
 ///
 /// Every layer below this passed while the feature was broken end to end. The adapter tests asserted commands that
 /// no CLI has, and the field the user types into was not reachable at all, so only driving the real screen catches it.
@@ -40,7 +40,7 @@ final class SessionCreationUITests: XCTestCase {
     /// or by any other assistive technology.
     func testTheNewSessionFieldCanBeTypedInto() throws {
         let (app, _) = try launchConnected()
-        app.buttons["Chat"].tap()
+        app.buttons["Sessions"].tap()
 
         let field = app.textFields["New session"]
         for _ in 0..<8 where !field.exists { app.swipeUp() }
@@ -59,7 +59,7 @@ final class SessionCreationUITests: XCTestCase {
     /// command that ran and changed nothing, so the assertion is on the resulting screen.
     func testCreatingASessionMakesOneAppear() throws {
         let (app, _) = try launchConnected()
-        app.buttons["Chat"].tap()
+        app.buttons["Sessions"].tap()
 
         let name = "openpaw-uitest"
         let field = app.textFields["New session"]
@@ -70,8 +70,8 @@ final class SessionCreationUITests: XCTestCase {
         app.buttons["Create"].tap()
 
         // Creation switches to Terminal, so come back to the list and let discovery re-run.
-        XCTAssertTrue(app.buttons["Chat"].waitForExistence(timeout: 10))
-        app.buttons["Chat"].tap()
+        XCTAssertTrue(app.buttons["Sessions"].waitForExistence(timeout: 10))
+        app.buttons["Sessions"].tap()
 
         let created = app.buttons["Attach to \(name)"]
         for _ in 0..<10 where !created.exists {

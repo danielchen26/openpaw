@@ -251,10 +251,10 @@ final class DictationEngineSettingsUITests: XCTestCase {
         for path in [readyPath, donePath, transcriptPath] { try? FileManager.default.removeItem(atPath: path) }
 
         let app = launchedApp(forceAppleTerminalDictation: true)
-        let chatTab = app.buttons["Chat"].firstMatch
-        XCTAssertTrue(chatTab.waitForExistence(timeout: 15), "the Chat tab never appeared")
+        let sessionsTab = app.buttons["Sessions"].firstMatch
+        XCTAssertTrue(sessionsTab.waitForExistence(timeout: 15), "the Sessions tab never appeared")
         clearAlertIfPresent(app)
-        chatTab.tap()
+        sessionsTab.tap()
 
         let sessionRow = app.buttons.matching(
             NSPredicate(format: "label CONTAINS 'Run the unit tests, then clean the build directory.'")
@@ -437,10 +437,10 @@ final class DictationEngineSettingsUITests: XCTestCase {
         // Now the screen the crash happened on. `firstMatch` because these names are both tabs and segments in the
         // dictation destination control that was just scrolled past, and an ambiguous query fails the test for a
         // reason that has nothing to do with the crash.
-        let chatTab = app.buttons["Chat"].firstMatch
-        XCTAssertTrue(chatTab.waitForExistence(timeout: 15), "the Chat tab never appeared")
+        let sessionsTab = app.buttons["Sessions"].firstMatch
+        XCTAssertTrue(sessionsTab.waitForExistence(timeout: 15), "the Sessions tab never appeared")
         clearAlertIfPresent(app)
-        chatTab.tap()
+        sessionsTab.tap()
 
         // The Chat tab lands on the sessions *list*; the composer, and with it the microphone, only exists inside
         // one session's transcript. This must be the agent row from `smoke.py`'s checked-in fixture. Its complete

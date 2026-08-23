@@ -6,9 +6,8 @@ import SwiftUI
 /// last of them crowded against the home indicator. Swiping the strip moves between groups of controls rather
 /// than stacking those groups, so the row costs one row however many groups there are.
 ///
-/// The swipe is on the strip itself rather than from the screen edge. An edge swipe on iOS is already spoken for
-/// — back navigation on the left, Control Centre and the app switcher along the bottom — so a gesture starting at
-/// the edge either loses to the system or works only sometimes, which is worse than not existing.
+/// Page and fold gestures stay on the strip itself. Only the small handle left by an explicitly stowed strip accepts
+/// a leading-edge restore swipe, so ordinary back navigation keeps ownership of the rest of the screen edge.
 public struct ControlDeckView<KeysPage: View, DestinationsPage: View, ViewPage: View>: View {
     @Binding private var deck: ControlDeck
     private let overTerminal: Bool
@@ -51,10 +50,16 @@ public struct ControlDeckView<KeysPage: View, DestinationsPage: View, ViewPage: 
                     .fill(OpenPawTheme.textTertiary)
                     .frame(width: 4, height: 36)
                     .frame(width: ControlDeck.stowedHandleWidth, height: 44)
+                    .frame(
+                        width: ControlDeck.stowedHandleHitWidth,
+                        height: 44,
+                        alignment: .leading
+                    )
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Show controls")
+            .simultaneousGesture(edgeRestoreSwipe)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity)
@@ -63,7 +68,6 @@ public struct ControlDeckView<KeysPage: View, DestinationsPage: View, ViewPage: 
         // the screen back, which is the whole of what was asked for.
         .background(Color.clear)
         .transition(.move(edge: .leading).combined(with: .opacity))
-        .simultaneousGesture(swipe)
         .accessibilityElement(children: .contain)
         .accessibilityAdjustableAction { direction in
             if direction == .increment { deck = deck.unstowed() }
@@ -153,6 +157,19 @@ public struct ControlDeckView<KeysPage: View, DestinationsPage: View, ViewPage: 
                     deck = deck.paged(horizontal < 0 ? .forward : .backward)
                 } else {
                     deck = deck.collapsed(vertical > 0)
+                }
+            }
+    }
+
+    /// A dedicated leading-edge swipe makes restoration reliable without turning the whole stowed screen into a
+    /// gesture target. The same 44-point region remains directly tappable and accessible.
+    private var edgeRestoreSwipe: some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onEnded { value in
+                let horizontal = value.translation.width
+                let vertical = value.translation.height
+                if horizontal >= 24, horizontal > abs(vertical) {
+                    deck = deck.unstowed()
                 }
             }
     }

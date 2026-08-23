@@ -24,6 +24,10 @@ final class ScenarioLaunchUITests: XCTestCase {
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Open pending approval '")).firstMatch.exists)
         XCTAssertTrue(app.buttons["Open repository openpaw"].exists)
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Inbox, '")).firstMatch.exists)
+        let sessions = app.buttons["root.destination.sessions"]
+        XCTAssertTrue(sessions.exists)
+        XCTAssertEqual(sessions.label, "Sessions")
+        XCTAssertFalse(app.buttons["Chat"].exists)
     }
 
     func testFixtureOnlyHostIsAbsentWithoutTheScenarioArgument() {

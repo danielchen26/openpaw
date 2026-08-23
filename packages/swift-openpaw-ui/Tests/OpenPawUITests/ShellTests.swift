@@ -234,7 +234,7 @@ struct RootNavigationTests {
     @Test("The six destinations are stable and complete, with Home first")
     func destinationsAreComplete() {
         #expect(ShellDestination.allCases.count == 6)
-        #expect(ShellDestination.allCases.map(\.rawValue) == ["home", "terminal", "chat", "inbox", "repo", "settings"])
+        #expect(ShellDestination.allCases.map(\.rawValue) == ["home", "terminal", "sessions", "inbox", "repo", "settings"])
         let home = ShellDestination.allCases[0]
         #expect(home.title == "Home")
         #expect(home.glyph == "house")

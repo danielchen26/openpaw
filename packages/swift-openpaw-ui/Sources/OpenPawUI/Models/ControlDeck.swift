@@ -103,9 +103,12 @@ public struct ControlDeck: Sendable, Equatable {
 
     /// The width of the tab left against the screen edge when the strip is stowed.
     ///
-    /// Narrow, because it is permanently on screen over content. It earns a reliable tap by being tall rather
-    /// than wide, and by not being the only way back: swiping right from the edge unstows the strip too.
+    /// Narrow, because it is permanently on screen over content. The visual remains 14 points wide while a separate
+    /// 44-point hit region makes it reliable, and swiping right from that region unstows the strip too.
     public static let stowedHandleWidth: CGFloat = 14
+
+    /// The visual edge tab stays narrow, but its interactive surface meets the platform touch-target minimum.
+    public static let stowedHandleHitWidth: CGFloat = 44
 
     /// A rail of 52, a tab bar of 50 and a key bar of 48: what the three stacked rows cost, and the number the
     /// saving is measured against.

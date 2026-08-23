@@ -61,18 +61,31 @@ public enum RootNavigationLayout {
 public enum ShellDestination: String, Sendable, Hashable, CaseIterable, Identifiable {
     case home
     case terminal
-    case chat
+    case sessions
     case inbox
     case repo
     case settings
 
     public var id: String { rawValue }
 
+    /// Reads persisted and deep-link state from before Chat became the first-class Sessions destination.
+    public init?(rawValue: String) {
+        switch rawValue {
+        case "home": self = .home
+        case "terminal": self = .terminal
+        case "chat", "sessions": self = .sessions
+        case "inbox": self = .inbox
+        case "repo": self = .repo
+        case "settings": self = .settings
+        default: return nil
+        }
+    }
+
     public var title: String {
         switch self {
         case .home: "Home"
         case .terminal: "Terminal"
-        case .chat: "Chat"
+        case .sessions: "Sessions"
         case .inbox: "Inbox"
         case .repo: "Repo"
         case .settings: "Settings"
@@ -83,7 +96,7 @@ public enum ShellDestination: String, Sendable, Hashable, CaseIterable, Identifi
         switch self {
         case .home: "house"
         case .terminal: "terminal"
-        case .chat: "text.bubble"
+        case .sessions: "text.bubble"
         case .inbox: "tray.full"
         case .repo: "arrow.triangle.branch"
         case .settings: "gearshape"
@@ -96,7 +109,7 @@ public enum ShellDestination: String, Sendable, Hashable, CaseIterable, Identifi
     public var pushesDetail: Bool {
         switch self {
         case .terminal: false
-        case .home, .chat, .inbox, .repo, .settings: true
+        case .home, .sessions, .inbox, .repo, .settings: true
         }
     }
 }
@@ -139,7 +152,13 @@ public final class ShellRouter {
     /// `InboxItem.id.rawValue` of the item whose approval sheet should be open.
     public var approvalItemID: String?
     /// Session the compact layout has pushed a transcript for.
-    public var chatSessionID: String?
+    public var sessionID: String?
+
+    @available(*, deprecated, renamed: "sessionID")
+    public var chatSessionID: String? {
+        get { sessionID }
+        set { sessionID = newValue }
+    }
 
     public init() {}
 
@@ -458,6 +477,7 @@ public struct RootView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("root.destination.\(destination.rawValue)")
         .accessibilityLabel(sidebarVoiceLabel(destination))
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
@@ -636,6 +656,7 @@ public struct RootView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("root.destination.\(destination.rawValue)")
         .accessibilityLabel(sidebarVoiceLabel(destination))
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
@@ -692,8 +713,8 @@ public struct RootView: View {
                 surface: terminalSurface,
                 onFontSizeChange: { _ in }
             )
-        case .chat:
-            chat(width: width)
+        case .sessions:
+            sessions(width: width)
         case .inbox:
             InboxView(model: model)
         case .repo:
@@ -732,8 +753,8 @@ public struct RootView: View {
 
     private func openHomeAgent(_ sessionID: String) {
         model.selectedSessionID = sessionID
-        router.chatSessionID = sessionID
-        router.destination = .chat
+        router.sessionID = sessionID
+        router.destination = .sessions
     }
 
     private func openHomeRepository(_ repo: String) {
@@ -742,7 +763,7 @@ public struct RootView: View {
     }
 
     @ViewBuilder
-    private func chat(width: RootWidth) -> some View {
+    private func sessions(width: RootWidth) -> some View {
         switch RootNavigationStyle.style(for: width) {
         case .tabs:
             SessionListView(
@@ -758,7 +779,7 @@ public struct RootView: View {
                 onRestore: restoreSession,
                 onRefresh: refreshModelAndSessionSpace
             )
-                .navigationDestination(item: chatSessionBinding) { sessionID in
+                .navigationDestination(item: sessionBinding) { sessionID in
                     transcript(sessionID)
                         // SwiftUI does not inherit the list's safe-area padding across a NavigationStack push.
                         // Without this explicit edge the composer sits under the app-wide deck, so a tap meant
@@ -1117,8 +1138,8 @@ public struct RootView: View {
         )
     }
 
-    private var chatSessionBinding: Binding<String?> {
-        Binding(get: { router.chatSessionID }, set: { router.chatSessionID = $0 })
+    private var sessionBinding: Binding<String?> {
+        Binding(get: { router.sessionID }, set: { router.sessionID = $0 })
     }
 
     private var errorBinding: Binding<Bool> {
@@ -1128,7 +1149,7 @@ public struct RootView: View {
     private func selectSession(_ session: SessionSummary) {
         model.selectedSessionID = session.sessionID
         model.startFollowing(session: session.sessionID)
-        router.chatSessionID = session.sessionID
+        router.sessionID = session.sessionID
     }
 
     /// Feeds the scrollback store from the PTY so search and copy work whichever surface the app injected. The
