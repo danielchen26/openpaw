@@ -381,6 +381,9 @@ public struct SettingsView: View {
     @State private var isImporting = false
     @State private var exportDocument = ShellJSONDocument(data: Data())
     @State private var transferError: String?
+    @State private var selectedDestination: SettingsDestination? = SettingsDestination(category: .security)
+    @State private var searchText = ""
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     public init(model: OpenPawModel, settings: OpenPawSettings) {
         self.model = model
@@ -388,26 +391,27 @@ public struct SettingsView: View {
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: OpenPawTheme.Space.large) {
-                security
-                dictation
-                terminal
-                budgets
-                hostSection
-                pairing
-                configuration
-                about
+        Group {
+            switch SettingsPresentationPolicy.presentation(horizontalSizeClass: horizontalSizeClass) {
+            case .stack:
+                NavigationStack {
+                    SettingsHomeView(searchText: searchText)
+                        .navigationDestination(for: SettingsDestination.self) { destination in
+                            categoryView(destination.category)
+                        }
+                        .searchable(text: $searchText, prompt: "Search settings")
+                }
+            case .split:
+                NavigationSplitView {
+                    SettingsHomeView(searchText: searchText)
+                        .searchable(text: $searchText, prompt: "Search settings")
+                } detail: {
+                    categoryView(selectedDestination?.category ?? .security)
+                }
             }
-            .padding(OpenPawTheme.Space.large)
-            .frame(maxWidth: 720, alignment: .leading)
         }
         .background(OpenPawTheme.ink)
-        // System controls arrive tinted the platform accent, which is a saturated colour with no meaning here.
-        // The risk ramp is the only saturated thing in OpenPaw, so selected segments and switches read as the
-        // same near-white primary the buttons use.
         .tint(OpenPawTheme.textPrimary)
-        .navigationTitle("Settings")
         .task { await loadDevices() }
         .fileExporter(
             isPresented: $isExporting,
@@ -422,6 +426,54 @@ public struct SettingsView: View {
         }
     }
 
+    @ViewBuilder
+    private func categoryView(_ category: SettingsCategory) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: OpenPawTheme.Space.large) {
+                    switch category {
+                    case .appearance:
+                        terminal
+                    case .terminal:
+                        terminal
+                        budgets
+                    case .voice:
+                        dictation
+                    case .connection:
+                        hostSection
+                        connection
+                    case .sessions:
+                        budgets
+                        sessionOwnership
+                    case .agents:
+                        agents
+                    case .repositories:
+                        repositories
+                    case .security:
+                        security
+                        pairing
+                    case .data:
+                        configuration
+                    case .diagnostics:
+                        diagnostics
+                    case .about:
+                        about
+                    }
+                }
+                .padding(OpenPawTheme.Space.large)
+                .frame(maxWidth: 720, alignment: .leading)
+            }
+            .background(OpenPawTheme.ink)
+            .navigationTitle(category.title)
+            .accessibilityIdentifier("settings.detail.\(category.id)")
+            .onAppear {
+                if let controlID = selectedDestination?.controlID {
+                    proxy.scrollTo(controlID, anchor: .center)
+                }
+            }
+        }
+    }
+
     // MARK: Security
 
     private var security: some View {
@@ -433,6 +485,8 @@ public struct SettingsView: View {
                         .foregroundStyle(OpenPawTheme.textPrimary)
                 }
                 .frame(minHeight: 44)
+                .id(SettingsControl.biometricGate.id)
+                .accessibilityIdentifier(SettingsControl.biometricGate.accessibilityIdentifier)
                 Text(
                     """
                     The app asks for your face, fingerprint or passcode before it shows a transcript or lets you \
@@ -468,6 +522,8 @@ public struct SettingsView: View {
                     .frame(minHeight: 44)
                     .accessibilityLabel("Dictation language")
                     .accessibilityValue(localeName(settings.dictationLocaleID))
+                    .id(SettingsControl.dictationLanguage.id)
+                    .accessibilityIdentifier(SettingsControl.dictationLanguage.accessibilityIdentifier)
                     Text(privacyDisclosure)
                         .font(OpenPawTheme.Human.caption)
                         .foregroundStyle(OpenPawTheme.textTertiary)
@@ -524,6 +580,8 @@ public struct SettingsView: View {
             .frame(minHeight: 44)
             .accessibilityLabel("Dictation recogniser")
             .accessibilityValue(settings.effectiveDictationEngine.displayName)
+            .id(SettingsControl.dictationRecogniser.id)
+            .accessibilityIdentifier(SettingsControl.dictationRecogniser.accessibilityIdentifier)
 
             Text(settings.effectiveDictationEngine.summary)
                 .font(OpenPawTheme.Human.caption)
@@ -681,6 +739,8 @@ public struct SettingsView: View {
                             .foregroundStyle(OpenPawTheme.textPrimary)
                     }
                     .frame(minHeight: 44)
+                    .id(SettingsControl.terminalCellSize.id)
+                    .accessibilityIdentifier(SettingsControl.terminalCellSize.accessibilityIdentifier)
                 }
 
                 VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
@@ -692,6 +752,8 @@ public struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
+                    .id(SettingsControl.terminalGround.id)
+                    .accessibilityIdentifier(SettingsControl.terminalGround.accessibilityIdentifier)
                     Text(verbatim: "$ cargo build --workspace")
                         .font(.system(size: settings.terminalFontSize, design: .monospaced))
                         .foregroundStyle(settings.terminalTheme.foreground)
@@ -709,6 +771,8 @@ public struct SettingsView: View {
                         .foregroundStyle(OpenPawTheme.textPrimary)
                 }
                 .frame(minHeight: 44)
+                .id(SettingsControl.cursorKeys.id)
+                .accessibilityIdentifier(SettingsControl.cursorKeys.accessibilityIdentifier)
                 Text("Turn on when a full-screen program needs ESC O A arrows. Leave off for a plain shell.")
                     .font(OpenPawTheme.Human.caption)
                     .foregroundStyle(OpenPawTheme.textTertiary)
@@ -731,6 +795,8 @@ public struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
+                    .id(SettingsControl.scrollback.id)
+                    .accessibilityIdentifier(SettingsControl.scrollback.accessibilityIdentifier)
                     Text("Lines kept per session. Older lines are dropped once the budget is full.")
                         .font(OpenPawTheme.Human.caption)
                         .foregroundStyle(OpenPawTheme.textTertiary)
@@ -746,6 +812,8 @@ public struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
+                    .id(SettingsControl.eventBudget.id)
+                    .accessibilityIdentifier(SettingsControl.eventBudget.accessibilityIdentifier)
                     Text(
                         """
                         Transcript events held in memory. A long agent run keeps only the most recent, which is \
@@ -795,6 +863,8 @@ public struct SettingsView: View {
                     settingsLinkLabel("Manage hosts")
                 }
                 .buttonStyle(.plain)
+                .id(SettingsControl.manageHosts.id)
+                .accessibilityIdentifier(SettingsControl.manageHosts.accessibilityIdentifier)
 
                 NavigationLink {
                     DiagnosticsView(model: model)
@@ -802,6 +872,8 @@ public struct SettingsView: View {
                     settingsLinkLabel("Diagnostics")
                 }
                 .buttonStyle(.plain)
+                .id(SettingsControl.diagnostics.id)
+                .accessibilityIdentifier(SettingsControl.diagnostics.accessibilityIdentifier)
             }
         }
     }
@@ -915,11 +987,15 @@ public struct SettingsView: View {
                         .buttonStyle(.plain)
                         .frame(minHeight: 44)
                         .foregroundStyle(OpenPawTheme.textPrimary)
+                        .id(SettingsControl.exportJSON.id)
+                        .accessibilityIdentifier(SettingsControl.exportJSON.accessibilityIdentifier)
                     Spacer(minLength: OpenPawTheme.Space.large)
                     Button("Import JSON") { isImporting = true }
                         .buttonStyle(.plain)
                         .frame(minHeight: 44)
                         .foregroundStyle(OpenPawTheme.textPrimary)
+                        .id(SettingsControl.importJSON.id)
+                        .accessibilityIdentifier(SettingsControl.importJSON.accessibilityIdentifier)
                 }
 
                 if let transferError {
@@ -953,6 +1029,76 @@ public struct SettingsView: View {
             model.eventBudgetPerSession = settings.apply(snapshot)
         } catch {
             transferError = "That file is not an OpenPaw settings export: \(error)"
+        }
+    }
+
+    private var connection: some View {
+        Panel(label: "Transport") {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                Text("OpenPaw uses the hosts you configure here. SSH identity, Tailscale reachability, Mosh, and Eternal Terminal support are host capabilities, not phone-side secrets.")
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+                    Text("Preview port").microLabel()
+                    Stepper(value: bind(\.previewPort), in: 1...65_535, step: 1) {
+                        Text("\(settings.previewPort)")
+                            .font(OpenPawTheme.Machine.body)
+                            .foregroundStyle(OpenPawTheme.textPrimary)
+                    }
+                    .frame(minHeight: 44)
+                    .id(SettingsControl.previewPort.id)
+                    .accessibilityIdentifier(SettingsControl.previewPort.accessibilityIdentifier)
+                }
+            }
+        }
+    }
+
+    private var sessionOwnership: some View {
+        Panel(label: "Host-specific session profiles") {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                Text("Terminal geometry and per-host session behavior stay with each host record. Manage them from Hosts so Settings does not become a second owner of the same profile data.")
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                NavigationLink { HostListView(model: model, settings: settings) } label: { settingsLinkLabel("Open hosts") }
+                    .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var agents: some View {
+        Panel(label: "Agents") {
+            Text("Agent approvals remain explicit in each workspace. Settings records device defaults only, so execution ownership stays with the active session.")
+                .font(OpenPawTheme.Human.prose)
+                .foregroundStyle(OpenPawTheme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var repositories: some View {
+        Panel(label: "Repositories & providers") {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                Text("Repository roots and provider tokens belong to the host. OpenPaw shows status and starts host-mediated imports without storing GitHub or Hugging Face credentials on this device.")
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                NavigationLink { HostListView(model: model, settings: settings) } label: { settingsLinkLabel("Manage host repositories") }
+                    .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var diagnostics: some View {
+        Panel(label: "Diagnostics") {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                Text("Health, protocol, and audit details stay in the diagnostics screen so troubleshooting has one source of truth.")
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                NavigationLink { DiagnosticsView(model: model) } label: { settingsLinkLabel("Open diagnostics") }
+                    .buttonStyle(.plain)
+            }
         }
     }
 

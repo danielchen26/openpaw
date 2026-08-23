@@ -269,6 +269,16 @@ enum ScreenCatalog {
             unavailableReason: ""
         ),
         Screen(
+            name: "SettingsHomeView",
+            build: { _, _ in AnyView(NavigationStack { SettingsHomeView() }) },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "SettingsView-categorized",
+            build: { model, _ in AnyView(SettingsView(model: model, settings: OpenPawSettings.preview())) },
+            unavailableReason: ""
+        ),
+        Screen(
             name: "WorkspaceHomeView-empty",
             build: { _, _ in
                 return AnyView(
