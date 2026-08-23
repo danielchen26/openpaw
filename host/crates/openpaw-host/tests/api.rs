@@ -18,6 +18,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use futures::StreamExt;
 use openpaw_host::api::inbox::Decision;
+use openpaw_host::api::providers::{ProviderClientConfig, ProviderClientsConfig};
 use openpaw_host::api::tailscale::{
     ProcessTailscaleStatusRunner, TailscaleStatusRunner, TailscaleUnavailable,
 };
@@ -69,6 +70,15 @@ impl Harness {
         repos: Vec<PathBuf>,
         tailscale: Option<Arc<dyn TailscaleStatusRunner>>,
     ) -> Harness {
+        Harness::boot_with_runner_and_providers(repos, tailscale, ProviderClientsConfig::default())
+            .await
+    }
+
+    async fn boot_with_runner_and_providers(
+        repos: Vec<PathBuf>,
+        tailscale: Option<Arc<dyn TailscaleStatusRunner>>,
+        providers: ProviderClientsConfig,
+    ) -> Harness {
         let temp = tempfile::tempdir().expect("temp dir");
         let state_dir = temp.path().join("state");
 
@@ -76,6 +86,7 @@ impl Harness {
             repos: repos.clone(),
             max_upload_bytes: MAX_UPLOAD,
             preview_ports: vec![5173],
+            providers,
             ..Config::default()
         };
         let store = Store::open(&state_dir).expect("state dir");
@@ -216,6 +227,88 @@ fn enroll(app: &AppState, device_id: &str, profile: Profile) -> Creds {
 
 fn session() -> SessionId {
     SessionId::new(AgentKind::ClaudeCode, "alpha")
+}
+
+async fn provider_fixture_server(repo_count: usize) -> String {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind provider");
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0; 8192];
+                let Ok(n) = stream.read(&mut buf).await else {
+                    return;
+                };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let first = req.lines().next().unwrap_or_default();
+                let body = if first.starts_with("POST /login/device/code ") {
+                    json!({"device_code":"provider-device-code-secret","user_code":"USER-CODE","verification_uri":"https://example.test/verify","expires_in":600,"interval":1}).to_string()
+                } else if first.starts_with("POST /login/oauth/access_token ") {
+                    json!({"access_token":"provider-access-token-secret","refresh_token":"provider-refresh-token-secret","expires_in":3600,"scope":"repo","token_type":"bearer"}).to_string()
+                } else if first.starts_with("GET /user/repos") {
+                    let repos: Vec<_> = (0..repo_count).rev().map(|id| json!({"id": id, "name": format!("repo-{id:03}"), "private": id % 2 == 0, "clone_url": format!("https://github.com/owner/repo-{id:03}.git"), "owner": {"login":"owner"}})).collect();
+                    serde_json::to_string(&repos).unwrap()
+                } else {
+                    json!({"message":"raw provider payload token secret /Users/example/.ssh"})
+                        .to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    base
+}
+
+fn assert_no_provider_secret_leaks(value: &Value) {
+    fn walk(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (k, v) in map {
+                    out.push(k.clone());
+                    walk(v, out);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            Value::String(s) => out.push(s.clone()),
+            other => out.push(other.to_string()),
+        }
+    }
+    let mut strings = Vec::new();
+    walk(value, &mut strings);
+    let joined = strings.join(" ").to_lowercase();
+    for forbidden in [
+        "provider-access-token-secret",
+        "provider-refresh-token-secret",
+        "provider-device-code-secret",
+        "authorization:",
+        "bearer ",
+        "credentials",
+        "password",
+        "env",
+        "headers",
+        "/users/",
+        "raw provider payload",
+    ] {
+        assert!(
+            !joined.contains(forbidden),
+            "provider response leaked {forbidden}: {value}"
+        );
+    }
 }
 
 /// A permission request whose risk classification demands detail expansion.
@@ -2393,6 +2486,96 @@ async fn the_preview_proxy_refuses_a_port_outside_the_allowlist() {
         )
         .await;
     assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn signed_provider_routes_paginate_and_sanitize_responses() {
+    let upstream = provider_fixture_server(125).await;
+    let providers = ProviderClientsConfig {
+        github: Some(ProviderClientConfig {
+            client_id: "public-client".to_owned(),
+            auth_base: upstream.clone(),
+            api_base: upstream,
+        }),
+        huggingface: None,
+    };
+    let h = Harness::boot_with_runner_and_providers(Vec::new(), None, providers).await;
+
+    let list: Value = h.get("/v1/providers").await.json().await.unwrap();
+    assert_no_provider_secret_leaks(&list);
+    assert_eq!(list[0]["account_label"], Value::Null);
+
+    let started: Value = h
+        .signed(
+            reqwest::Method::POST,
+            "/v1/providers/github/authorizations",
+            None,
+            &h.operator,
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_no_provider_secret_leaks(&started);
+    let auth_id = started["authorization_id"].as_str().unwrap();
+
+    let status: Value = h
+        .get(&format!("/v1/providers/github/authorizations/{auth_id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "authorized");
+    assert_eq!(status["account_label"], Value::Null);
+    assert_no_provider_secret_leaks(&status);
+
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let path = cursor.as_ref().map_or_else(
+            || "/v1/providers/github/repos".to_owned(),
+            |cursor| format!("/v1/providers/github/repos?cursor={cursor}"),
+        );
+        let page: Value = h.get(&path).await.json().await.unwrap();
+        assert_no_provider_secret_leaks(&page);
+        let repos = page["repos"].as_array().unwrap();
+        assert!(repos.len() <= 50);
+        seen.extend(
+            repos
+                .iter()
+                .map(|repo| repo["id"].as_str().unwrap().to_owned()),
+        );
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 125);
+
+    let bad: Value = h
+        .get("/v1/providers/github/repos?cursor=not-a-valid-cursor")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(bad["error"], "invalid_cursor");
+    assert_no_provider_secret_leaks(&bad);
+
+    let disconnected: Value = h
+        .signed(
+            reqwest::Method::DELETE,
+            "/v1/providers/github",
+            None,
+            &h.operator,
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(disconnected["account_label"], Value::Null);
+    assert_no_provider_secret_leaks(&disconnected);
 }
 
 #[tokio::test]

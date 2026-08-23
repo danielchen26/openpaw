@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
+use base64::Engine as _;
 use openpaw_protocol::{
     ProviderAuthorizationStart, ProviderAuthorizationState, ProviderAuthorizationStatus,
     ProviderConnectionState, ProviderId, ProviderRemoteRevokeResult, ProviderRepo,
@@ -26,6 +27,7 @@ use openpaw_providers::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 use tokio::sync::{Mutex, RwLock};
 
@@ -36,6 +38,7 @@ use crate::auth::AuthedDevice;
 const TOKEN_MODE: u32 = 0o600;
 const PAGE_LIMIT: usize = 50;
 const MAX_AUTHORIZATION_SESSIONS: usize = 128;
+const REPO_CURSOR_VERSION: u8 = 1;
 
 /// Public OAuth client configuration for built-in providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -414,20 +417,25 @@ impl ProviderManager {
             token = client.refresh(refresh).await?;
             self.token_store.save(provider, &token)?;
         }
-        if cursor.is_some() {
-            return Err(ProviderError::Protocol(
-                "provider cursor not supported by provider core".to_owned(),
-            ));
+        let mut repos = client.list(&token.access_token).await?;
+        repos.sort_by(|left, right| repo_sort_key(left).cmp(&repo_sort_key(right)));
+        let fingerprint = repo_fingerprint(&repos);
+        let offset = match cursor {
+            Some(cursor) => decode_repo_cursor(&cursor, provider, &fingerprint)?,
+            None => 0,
+        };
+        if offset > repos.len() {
+            return Err(invalid_cursor());
         }
-        let repos = client.list(&token.access_token).await?;
-        let page = repos
+        let next_offset = offset.saturating_add(PAGE_LIMIT).min(repos.len());
+        let page = repos[offset..next_offset]
             .iter()
-            .take(PAGE_LIMIT)
             .map(|repo| wire_repo(provider, repo))
             .collect();
         Ok(ProviderRepoPage {
             repos: page,
-            next_cursor: None,
+            next_cursor: (next_offset < repos.len())
+                .then(|| encode_repo_cursor(provider, next_offset, &fingerprint)),
         })
     }
 
@@ -489,6 +497,74 @@ impl ProviderManager {
             .get(&provider)
             .ok_or_else(|| ProviderError::Protocol("provider not configured".to_owned()))
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct RepoCursor {
+    v: u8,
+    provider: ProviderId,
+    offset: usize,
+    fingerprint: String,
+}
+
+fn repo_sort_key(repo: &Repository) -> (&str, &str, &str, &str) {
+    (
+        &repo.provider_repo_id,
+        &repo.owner,
+        &repo.name,
+        &repo.https_url,
+    )
+}
+
+fn repo_fingerprint(repos: &[Repository]) -> String {
+    let mut hasher = Sha256::new();
+    for repo in repos {
+        hasher.update(repo.provider_repo_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(repo.owner.as_bytes());
+        hasher.update([0]);
+        hasher.update(repo.name.as_bytes());
+        hasher.update([0]);
+        hasher.update(repo.https_url.as_bytes());
+        hasher.update([0]);
+        hasher.update([u8::from(repo.is_private)]);
+        hasher.update([0xff]);
+    }
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+fn encode_repo_cursor(provider: ProviderId, offset: usize, fingerprint: &str) -> String {
+    let cursor = RepoCursor {
+        v: REPO_CURSOR_VERSION,
+        provider,
+        offset,
+        fingerprint: fingerprint.to_owned(),
+    };
+    let bytes = serde_json::to_vec(&cursor).expect("repo cursor serializes");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn decode_repo_cursor(
+    cursor: &str,
+    provider: ProviderId,
+    fingerprint: &str,
+) -> Result<usize, ProviderError> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| invalid_cursor())?;
+    let decoded: RepoCursor = serde_json::from_slice(&bytes).map_err(|_| invalid_cursor())?;
+    if decoded.v != REPO_CURSOR_VERSION
+        || decoded.provider != provider
+        || decoded.fingerprint != fingerprint
+        || decoded.offset == 0
+    {
+        return Err(invalid_cursor());
+    }
+    Ok(decoded.offset)
+}
+
+fn invalid_cursor() -> ProviderError {
+    ProviderError::Protocol("invalid provider cursor".to_owned())
 }
 
 struct AuthorizationSession {
@@ -724,9 +800,7 @@ fn api_error(err: ProviderError) -> ApiError {
         ProviderError::Outage(_) | ProviderError::Transport { .. } => {
             ApiError::json(StatusCode::BAD_GATEWAY, json!({ "error": "outage" }))
         }
-        ProviderError::Protocol(message)
-            if message == "provider cursor not supported by provider core" =>
-        {
+        ProviderError::Protocol(message) if message == "invalid provider cursor" => {
             ApiError::bad_request("invalid_cursor")
         }
         ProviderError::Protocol(message) if message == "provider not configured" => ApiError::json(
@@ -824,5 +898,37 @@ mod tests {
         store.delete(ProviderId::Github).unwrap();
         store.delete(ProviderId::Github).unwrap();
         assert!(store.load(ProviderId::Github).unwrap().is_none());
+    }
+
+    fn repo(id: usize) -> Repository {
+        Repository {
+            provider_repo_id: format!("github.{id:03}"),
+            owner: "owner".to_owned(),
+            name: format!("repo-{id:03}"),
+            https_url: format!("https://github.com/owner/repo-{id:03}.git"),
+            is_private: id % 2 == 0,
+        }
+    }
+
+    #[test]
+    fn repo_cursor_is_opaque_provider_bound_and_fingerprint_bound() {
+        let repos: Vec<_> = (0..75).rev().map(repo).collect();
+        let mut sorted = repos.clone();
+        sorted.sort_by(|left, right| repo_sort_key(left).cmp(&repo_sort_key(right)));
+        let fingerprint = repo_fingerprint(&sorted);
+        let cursor = encode_repo_cursor(ProviderId::Github, PAGE_LIMIT, &fingerprint);
+
+        assert!(!cursor.contains("50"));
+        assert!(!cursor.contains("repo-050"));
+        assert_eq!(
+            decode_repo_cursor(&cursor, ProviderId::Github, &fingerprint).unwrap(),
+            PAGE_LIMIT
+        );
+        assert!(decode_repo_cursor(&cursor, ProviderId::HuggingFace, &fingerprint).is_err());
+
+        sorted.push(repo(999));
+        let stale_fingerprint = repo_fingerprint(&sorted);
+        assert!(decode_repo_cursor(&cursor, ProviderId::Github, &stale_fingerprint).is_err());
+        assert!(decode_repo_cursor("not base64", ProviderId::Github, &fingerprint).is_err());
     }
 }
