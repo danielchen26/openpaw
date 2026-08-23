@@ -2404,10 +2404,11 @@ async fn provider_and_repo_contract_routes_have_exact_capability_guards() {
     ];
     for (method, path) in observer_ok {
         let response = harness.signed(method, path, None, &harness.observer).await;
+        let expected = if path == "/v1/providers" { 200 } else { 503 };
         assert_eq!(
             response.status(),
-            501,
-            "{path} should pass observer guard to contract stub"
+            expected,
+            "{path} should pass observer guard to provider handler"
         );
     }
 
@@ -2466,10 +2467,17 @@ async fn provider_and_repo_contract_routes_have_exact_capability_guards() {
     ];
     for (method, path, body) in operator_stubs {
         let response = harness.signed(method, path, body, &harness.operator).await;
+        let expected = if path.starts_with("/v1/providers/github/authorizations/auth_123") {
+            404
+        } else if path.starts_with("/v1/providers/") {
+            503
+        } else {
+            501
+        };
         assert_eq!(
             response.status(),
-            501,
-            "{path} should pass operator guard to contract stub"
+            expected,
+            "{path} should pass operator guard to owned handler or remaining contract stub"
         );
     }
 

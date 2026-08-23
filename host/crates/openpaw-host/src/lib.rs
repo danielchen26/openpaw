@@ -66,6 +66,8 @@ pub struct AppState {
     pub proxy: Arc<openpaw_preview::Proxy>,
     /// Allowlisted repository roots. Nothing outside them is readable.
     pub roots: Arc<openpaw_files::Roots>,
+    /// Provider authorization and token manager.
+    pub provider_manager: Arc<api::providers::ProviderManager>,
     /// Live session registry.
     pub sessions: Arc<supervisor::Registry>,
     /// Fixed read-only Tailscale status runner.
@@ -88,6 +90,10 @@ impl AppState {
         let proxy = openpaw_preview::Proxy::new(config.preview_policy());
         let bus = bus::Bus::new(config.ring_capacity);
         bus.hydrate_dismissed(store.dismissed_inbox_ids());
+        let provider_manager = Arc::new(api::providers::ProviderManager::new(
+            store.state_dir(),
+            config.providers.clone(),
+        ));
         AppState {
             config: Arc::new(config),
             store: Arc::new(store),
@@ -97,6 +103,7 @@ impl AppState {
             pairing: Arc::new(auth::PairingCodes::new()),
             proxy: Arc::new(proxy),
             roots: Arc::new(roots),
+            provider_manager,
             sessions: Arc::new(supervisor::Registry::new()),
             tailscale: api::tailscale::default_runner(),
             home,

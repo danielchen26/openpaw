@@ -16,6 +16,7 @@ pub mod hooks;
 pub mod inbox;
 pub mod pair;
 pub mod preview;
+pub mod providers;
 pub mod repos;
 pub mod sessions;
 pub mod tailscale;
@@ -28,54 +29,6 @@ use serde_json::json;
 
 use crate::AppState;
 use crate::auth::{self, Capability};
-
-async fn provider_contract_pending() -> Result<Json<Vec<openpaw_protocol::ProviderStatus>>, ApiError>
-{
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "provider implementation is not installed on this host",
-    ))
-}
-
-async fn provider_authorize_contract_pending()
--> Result<Json<openpaw_protocol::ProviderAuthorizationStart>, ApiError> {
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "provider authorization implementation is not installed on this host",
-    ))
-}
-
-async fn provider_authorization_status_contract_pending()
--> Result<Json<openpaw_protocol::ProviderAuthorizationStatus>, ApiError> {
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "provider authorization implementation is not installed on this host",
-    ))
-}
-
-async fn provider_authorization_cancel_contract_pending()
--> Result<Json<openpaw_protocol::ProviderAuthorizationStatus>, ApiError> {
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "provider authorization cancellation implementation is not installed on this host",
-    ))
-}
-
-async fn provider_revoke_contract_pending()
--> Result<Json<openpaw_protocol::ProviderStatus>, ApiError> {
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "provider revocation implementation is not installed on this host",
-    ))
-}
-
-async fn provider_repos_contract_pending()
--> Result<Json<openpaw_protocol::ProviderRepoPage>, ApiError> {
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "provider repository listing implementation is not installed on this host",
-    ))
-}
 
 async fn repo_import_contract_pending()
 -> Result<Json<openpaw_protocol::RepoImportProgress>, ApiError> {
@@ -250,11 +203,8 @@ pub fn router(app: AppState) -> Router {
         &app,
         Capability::ProvidersRead,
         Router::new()
-            .route("/v1/providers", get(provider_contract_pending))
-            .route(
-                "/v1/providers/{provider}/repos",
-                get(provider_repos_contract_pending),
-            ),
+            .route("/v1/providers", get(providers::list))
+            .route("/v1/providers/{provider}/repos", get(providers::repos)),
     );
     let provider_manage_contracts = guard(
         &app,
@@ -262,17 +212,13 @@ pub fn router(app: AppState) -> Router {
         Router::new()
             .route(
                 "/v1/providers/{provider}/authorizations",
-                post(provider_authorize_contract_pending),
+                post(providers::start_authorization),
             )
             .route(
                 "/v1/providers/{provider}/authorizations/{id}",
-                get(provider_authorization_status_contract_pending)
-                    .delete(provider_authorization_cancel_contract_pending),
+                get(providers::authorization_status).delete(providers::cancel_authorization),
             )
-            .route(
-                "/v1/providers/{provider}",
-                delete(provider_revoke_contract_pending),
-            ),
+            .route("/v1/providers/{provider}", delete(providers::disconnect)),
     );
     let repo_manage_contracts = guard(
         &app,

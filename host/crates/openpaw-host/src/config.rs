@@ -83,6 +83,8 @@ pub struct Config {
     pub max_upload_bytes: u64,
     /// Adapter switches.
     pub agents: AgentToggles,
+    /// Public provider OAuth client configuration.
+    pub providers: crate::api::providers::ProviderClientsConfig,
     /// Sessions older than this are not discovered.
     pub session_max_age_days: u64,
     /// Supervisor poll cadence in milliseconds.
@@ -104,6 +106,7 @@ impl Default for Config {
             max_blob_bytes: 2 * 1024 * 1024,
             max_upload_bytes: 16 * 1024 * 1024,
             agents: AgentToggles::default(),
+            providers: crate::api::providers::ProviderClientsConfig::default(),
             session_max_age_days: 7,
             poll_interval_ms: 750,
             hook_wait_ms: 0,

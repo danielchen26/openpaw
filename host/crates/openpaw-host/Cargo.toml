@@ -25,6 +25,7 @@ openpaw-agents = { workspace = true }
 openpaw-git = { workspace = true }
 openpaw-files = { workspace = true }
 openpaw-preview = { workspace = true }
+openpaw-providers = { workspace = true }
 
 anyhow = { workspace = true }
 axum = { workspace = true }
