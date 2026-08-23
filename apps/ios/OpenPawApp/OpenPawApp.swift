@@ -284,6 +284,7 @@ final class AppWiring {
     }
 
     func cancelActiveInboxRoute() {
+        pendingInboxRoute = nil
         cachedRoot?.cancelInboxRouteRequest()
     }
 

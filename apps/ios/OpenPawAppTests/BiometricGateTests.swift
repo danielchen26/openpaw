@@ -1,4 +1,5 @@
 import XCTest
+@testable import OpenPawProtocol
 @testable import OpenPawUI
 
 @testable import OpenPawApp
@@ -174,6 +175,41 @@ final class BiometricGateTests: XCTestCase {
         XCTAssertEqual(gate.decision, .unlocked)
         XCTAssertEqual(defaults.object(forKey: GateController.enabledKey) as? Bool, false)
         XCTAssertEqual(defaults.object(forKey: "lock.graceInterval") as? Double, 0)
+    }
+
+    @MainActor
+    func testDeniedLockedInboxURLCannotOpenAfterLaterUnlock() {
+        let wiring = AppWiring()
+        wiring.gate.policy = policy()
+        XCTAssertEqual(wiring.gate.decision, .authenticate)
+
+        let deniedRoute = InboxRoute(
+            hostID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+            itemID: InboxID(rawValue: "inb_0123456789abcdef01234567")
+        )
+        wiring.receiveInboxURL(deniedRoute.url)
+
+        XCTAssertNil(wiring.pendingInboxRoute)
+
+        wiring.gate.policy = policy(enabled: false)
+        wiring.openPendingInboxRouteIfUnlocked()
+
+        XCTAssertNil(wiring.pendingInboxRoute)
+    }
+
+    @MainActor
+    func testUnlockedInboxURLStillQueuesForDelivery() {
+        let wiring = AppWiring()
+        wiring.gate.policy = policy(enabled: false)
+        XCTAssertEqual(wiring.gate.decision, .unlocked)
+
+        let route = InboxRoute(
+            hostID: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+            itemID: InboxID(rawValue: "inb_abcdefabcdefabcdefabcdef")
+        )
+        wiring.receiveInboxURL(route.url)
+
+        XCTAssertNil(wiring.pendingInboxRoute)
     }
 
     func testPromptCopyNamesTheProtectedThing() {
