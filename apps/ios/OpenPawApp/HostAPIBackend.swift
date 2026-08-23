@@ -232,10 +232,12 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, PairedHo
     func providers() async throws -> [ProviderStatus] { try await state.requireClient().providers() }
     func beginProviderAuthorization(_ provider: ProviderID) async throws -> ProviderAuthorizationStart { try await state.requireClient().beginProviderAuthorization(provider) }
     func providerAuthorizationStatus(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus { try await state.requireClient().providerAuthorizationStatus(provider: provider, authorizationID: authorizationID) }
+    func cancelProviderAuthorization(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus { try await state.requireClient().cancelProviderAuthorization(provider: provider, authorizationID: authorizationID) }
     func revokeProvider(_ provider: ProviderID) async throws -> ProviderStatus { try await state.requireClient().revokeProvider(provider) }
     func providerRepos(_ provider: ProviderID, cursor: String?) async throws -> ProviderRepoPage { try await state.requireClient().providerRepos(provider, cursor: cursor) }
     func importRepo(_ request: RepoImportRequest) async throws -> RepoImportProgress { try await state.requireClient().importRepo(request) }
     func repoImportProgress(_ importID: String) async throws -> RepoImportProgress { try await state.requireClient().repoImportProgress(importID) }
+    func cancelRepoImport(_ importID: String) async throws -> RepoImportProgress { try await state.requireClient().cancelRepoImport(importID) }
     func registerRepo(_ request: RepoRegisterRequest) async throws -> RepoImportProgress { try await state.requireClient().registerRepo(request) }
 
     func upload(data: Data, filename: String) async throws -> UploadResult {

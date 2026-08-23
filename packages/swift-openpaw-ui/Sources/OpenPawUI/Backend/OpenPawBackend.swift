@@ -28,10 +28,12 @@ public protocol OpenPawBackend: Sendable {
     func providers() async throws -> [ProviderStatus]
     func beginProviderAuthorization(_ provider: ProviderID) async throws -> ProviderAuthorizationStart
     func providerAuthorizationStatus(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus
+    func cancelProviderAuthorization(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus
     func revokeProvider(_ provider: ProviderID) async throws -> ProviderStatus
     func providerRepos(_ provider: ProviderID, cursor: String?) async throws -> ProviderRepoPage
     func importRepo(_ request: RepoImportRequest) async throws -> RepoImportProgress
     func repoImportProgress(_ importID: String) async throws -> RepoImportProgress
+    func cancelRepoImport(_ importID: String) async throws -> RepoImportProgress
     func registerRepo(_ request: RepoRegisterRequest) async throws -> RepoImportProgress
     func upload(data: Data, filename: String) async throws -> UploadResult
     /// URL on the local forwarded port that proxies the remote dev server. Never a public address.
@@ -49,10 +51,12 @@ public extension OpenPawBackend {
     func providers() async throws -> [ProviderStatus] { throw HostClientError.badRequest("This backend does not support providers.") }
     func beginProviderAuthorization(_ provider: ProviderID) async throws -> ProviderAuthorizationStart { throw HostClientError.badRequest("This backend does not support provider authorization.") }
     func providerAuthorizationStatus(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus { throw HostClientError.badRequest("This backend does not support provider authorization.") }
+    func cancelProviderAuthorization(provider: ProviderID, authorizationID: String) async throws -> ProviderAuthorizationStatus { throw HostClientError.badRequest("This backend does not support provider authorization cancellation.") }
     func revokeProvider(_ provider: ProviderID) async throws -> ProviderStatus { throw HostClientError.badRequest("This backend does not support provider revocation.") }
     func providerRepos(_ provider: ProviderID, cursor: String?) async throws -> ProviderRepoPage { throw HostClientError.badRequest("This backend does not support provider repositories.") }
     func importRepo(_ request: RepoImportRequest) async throws -> RepoImportProgress { throw HostClientError.badRequest("This backend does not support repository import.") }
     func repoImportProgress(_ importID: String) async throws -> RepoImportProgress { throw HostClientError.badRequest("This backend does not support repository import.") }
+    func cancelRepoImport(_ importID: String) async throws -> RepoImportProgress { throw HostClientError.badRequest("This backend does not support repository import cancellation.") }
     func registerRepo(_ request: RepoRegisterRequest) async throws -> RepoImportProgress { throw HostClientError.badRequest("This backend does not support repository registration.") }
 }
 
