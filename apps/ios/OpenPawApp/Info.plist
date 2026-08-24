@@ -71,7 +71,7 @@
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>OpenPaw turns your dictated prompt into text. Recognition runs on this device whenever the language supports it, and the transcript goes only to the coding agent on your own machine.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>OpenPaw uses the camera so you can photograph a screen, a whiteboard or a device under test and attach it to a prompt. Photos are uploaded to your own machine over the SSH tunnel and nowhere else.</string>
+	<string>OpenPaw uses the camera to scan a pairing QR or photograph a screen, whiteboard or device under test for an attachment. Pairing proposals stay on this device, and photos are uploaded only to your own machine over the SSH tunnel.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>OpenPaw reads the photos you pick so you can attach a screenshot or a design to a prompt. It reads only the items you select, and it never scans your library.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

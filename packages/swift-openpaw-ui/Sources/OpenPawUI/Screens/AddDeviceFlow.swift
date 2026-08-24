@@ -155,6 +155,7 @@ public enum AddDeviceFlowCopy {
     public static let title = "Add a device"
     public static let tailscaleAction = "Tailscale devices"
     public static let sshAction = "Enter SSH details manually"
+    public static let scanPairingAction = "Scan pairing QR"
     public static let adminAction = "Authorize with Tailnet administrator credentials"
     public static let adminRequirement = "Tailnet administrator credentials required. This is not normal Tailscale login."
     public static let honestDiscovery = "Find other tailnet devices from a connected OpenPaw host. Candidates are not trusted, saved, SSH-ready, or connected."
@@ -162,8 +163,8 @@ public enum AddDeviceFlowCopy {
     public static let activeRouteNoHostTitle = "A Tailscale-compatible route may be active"
     public static let activeRouteNoHostExplanation = "OpenPaw found a VPN-style route that may be Tailscale. iOS does not share the signed-in Tailscale account or device list with OpenPaw. Automatic discovery needs a connected OpenPaw host to report tailnet devices, or you can authorize with Tailnet administrator credentials."
     public static let confirmation = "This is only a discovery candidate. OpenPaw will not trust it, save it, or connect until you review and save SSH details yourself."
-    public static let entryActions = [tailscaleAction, sshAction, adminAction]
-    public static let onboardingCopy = [title, tailscaleAction, sshAction, adminAction, adminRequirement, honestDiscovery, noCandidates, activeRouteNoHostTitle, activeRouteNoHostExplanation, confirmation]
+    public static let entryActions = [tailscaleAction, sshAction, scanPairingAction, adminAction]
+    public static let onboardingCopy = [title, tailscaleAction, sshAction, scanPairingAction, adminAction, adminRequirement, honestDiscovery, noCandidates, activeRouteNoHostTitle, activeRouteNoHostExplanation, confirmation]
 }
 
 @MainActor
@@ -171,6 +172,7 @@ public struct AddDeviceFlow: View {
     private let model: OpenPawModel
     private let settings: OpenPawSettings
     private let candidates: [AddDeviceCandidate]
+    private let onOpenPawURL: (URL) -> Void
     private let onDismiss: () -> Void
 
     @State private var state: AddDeviceFlowState
@@ -179,17 +181,22 @@ public struct AddDeviceFlow: View {
     @State private var adminClientID = ""
     @State private var adminClientSecret = ""
     @State private var adminTailnet = ""
+    #if os(iOS) && canImport(VisionKit)
+        @State private var isShowingPairingScanner = false
+    #endif
 
     public init(
         model: OpenPawModel,
         settings: OpenPawSettings,
         candidates: [AddDeviceCandidate] = [],
         initiallySelectedCandidateID: AddDeviceCandidate.ID? = nil,
+        onOpenPawURL: @escaping (URL) -> Void = { _ in },
         onDismiss: @escaping () -> Void
     ) {
         self.model = model
         self.settings = settings
         self.candidates = candidates
+        self.onOpenPawURL = onOpenPawURL
         self.onDismiss = onDismiss
         _state = State(initialValue: AddDeviceFlowState(
             hosts: model.hostStore.hosts,
@@ -203,11 +210,13 @@ public struct AddDeviceFlow: View {
         settings: OpenPawSettings,
         state: AddDeviceFlowState,
         draft: HostDraft? = nil,
+        onOpenPawURL: @escaping (URL) -> Void = { _ in },
         onDismiss: @escaping () -> Void
     ) {
         self.model = model
         self.settings = settings
         self.candidates = state.discovered
+        self.onOpenPawURL = onOpenPawURL
         self.onDismiss = onDismiss
         _state = State(initialValue: state)
         _draft = State(initialValue: draft)
@@ -260,6 +269,19 @@ public struct AddDeviceFlow: View {
         }
         .task { model.beginTailscaleDiscovery(owner: discoveryOwner) }
         .onDisappear { model.endTailscaleDiscovery(owner: discoveryOwner) }
+        #if os(iOS) && canImport(VisionKit)
+            .fullScreenCover(isPresented: $isShowingPairingScanner) {
+                OpenPawPairingScannerView(
+                    onOpenPawURL: { url in
+                        isShowingPairingScanner = false
+                        Task { @MainActor in
+                            await Task.yield()
+                            onOpenPawURL(url)
+                        }
+                    },
+                    onCancel: { isShowingPairingScanner = false })
+            }
+        #endif
     }
 
     private var welcome: some View {
@@ -281,6 +303,7 @@ public struct AddDeviceFlow: View {
                         actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
                             draft = state.startManualSSH()
                         }
+                        scanPairingAction
                         actionButton(AddDeviceFlowCopy.adminAction, glyph: "person.badge.key") {
                             state.startTailscaleAdministrator()
                         }
@@ -292,6 +315,7 @@ public struct AddDeviceFlow: View {
                         actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
                             draft = state.startManualSSH()
                         }
+                        scanPairingAction
                         actionButton(AddDeviceFlowCopy.adminAction, glyph: "person.badge.key") {
                             state.startTailscaleAdministrator()
                         }
@@ -301,6 +325,14 @@ public struct AddDeviceFlow: View {
             .padding(OpenPawTheme.Space.xl)
             .frame(maxWidth: 680, alignment: .leading)
         }
+    }
+
+    @ViewBuilder private var scanPairingAction: some View {
+        #if os(iOS) && canImport(VisionKit)
+            actionButton(AddDeviceFlowCopy.scanPairingAction, glyph: "qrcode.viewfinder") {
+                isShowingPairingScanner = true
+            }
+        #endif
     }
 
     private var tailscaleCandidates: some View {

@@ -1,7 +1,203 @@
 import Foundation
+import OpenPawProtocol
 import OpenPawTerminalCore
 import SwiftUI
 import UniformTypeIdentifiers
+
+#if os(iOS) && canImport(VisionKit)
+    import UIKit
+    import Vision
+    import VisionKit
+#endif
+
+public struct OpenPawScannerPolicy: Sendable {
+    public enum Outcome: Sendable, Equatable {
+        case accepted(URL)
+        case rejected
+        case ignored
+        case cancelled
+    }
+
+    public private(set) var isPaused = false
+    public private(set) var isCancelled = false
+    private let now: @Sendable () -> Date
+
+    public init(now: @escaping @Sendable () -> Date = Date.init) {
+        self.now = now
+    }
+
+    public mutating func receive(_ payload: String) -> Outcome {
+        guard !isPaused, !isCancelled else { return .ignored }
+        guard payload == payload.trimmingCharacters(in: .whitespacesAndNewlines),
+              let url = URL(string: payload)
+        else { return .rejected }
+
+        if InboxRoute(url: url) != nil {
+            isPaused = true
+            return .accepted(url)
+        }
+        guard (try? QuickConnectLinkCodec(now: now).decode(url)) != nil else { return .rejected }
+        isPaused = true
+        return .accepted(url)
+    }
+
+    public mutating func cancel() -> Outcome {
+        isPaused = true
+        isCancelled = true
+        return .cancelled
+    }
+}
+
+#if os(iOS) && canImport(VisionKit)
+    @MainActor
+    public struct OpenPawPairingScannerView: View {
+        private let onOpenPawURL: (URL) -> Void
+        private let onCancel: () -> Void
+        @State private var policy = OpenPawScannerPolicy()
+        @State private var manualLink = ""
+        @State private var message: String?
+        @State private var isScanning = true
+        @Environment(\.scenePhase) private var scenePhase
+
+        public init(onOpenPawURL: @escaping (URL) -> Void, onCancel: @escaping () -> Void) {
+            self.onOpenPawURL = onOpenPawURL
+            self.onCancel = onCancel
+        }
+
+        public var body: some View {
+            NavigationStack {
+                VStack(spacing: OpenPawTheme.Space.large) {
+                    if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
+                        OpenPawDataScanner(isScanning: isScanning, onPayload: receive)
+                            .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card).stroke(OpenPawTheme.lineStrong))
+                            .accessibilityLabel("Pairing QR camera")
+                    } else {
+                        ContentUnavailableView(
+                            "Camera scanning unavailable",
+                            systemImage: "qrcode.viewfinder",
+                            description: Text("Paste the pairing link below instead."))
+                    }
+
+                    VStack(alignment: .leading, spacing: OpenPawTheme.Space.small) {
+                        Text("Manual pairing link")
+                            .font(OpenPawTheme.Machine.headline)
+                            .foregroundStyle(OpenPawTheme.textPrimary)
+                        SecureField("Paste pairing link", text: $manualLink)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .privacySensitive()
+                            .accessibilityLabel("Pairing link")
+                        Button("Use pairing link") { _ = receive(manualLink) }
+                            .disabled(manualLink.isEmpty || policy.isPaused)
+                    }
+
+                    if let message {
+                        Text(message)
+                            .font(OpenPawTheme.Human.caption)
+                            .foregroundStyle(OpenPawTheme.caution)
+                            .accessibilityLabel(message)
+                    }
+                }
+                .padding(OpenPawTheme.Space.large)
+                .background(OpenPawTheme.ink)
+                .navigationTitle("Scan pairing QR")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { cancel() }
+                    }
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active { isScanning = false }
+            }
+            .onDisappear {
+                isScanning = false
+                manualLink = ""
+            }
+        }
+
+        @discardableResult
+        private func receive(_ payload: String) -> Bool {
+            switch policy.receive(payload) {
+            case .accepted(let url):
+                isScanning = false
+                manualLink = ""
+                message = nil
+                onOpenPawURL(url)
+                return true
+            case .rejected:
+                message = "That is not a valid OpenPaw pairing link."
+                return false
+            case .ignored, .cancelled:
+                return false
+            }
+        }
+
+        private func cancel() {
+            _ = policy.cancel()
+            isScanning = false
+            manualLink = ""
+            onCancel()
+        }
+    }
+
+    @available(iOS 16.0, *)
+    private struct OpenPawDataScanner: UIViewControllerRepresentable {
+        var isScanning: Bool
+        var onPayload: (String) -> Bool
+
+        func makeCoordinator() -> Coordinator { Coordinator(onPayload: onPayload) }
+
+        func makeUIViewController(context: Context) -> DataScannerViewController {
+            let scanner = DataScannerViewController(
+                recognizedDataTypes: [.barcode(symbologies: [.qr])],
+                qualityLevel: .balanced,
+                recognizesMultipleItems: false,
+                isHighFrameRateTrackingEnabled: false,
+                isPinchToZoomEnabled: true,
+                isGuidanceEnabled: true,
+                isHighlightingEnabled: true)
+            scanner.delegate = context.coordinator
+            return scanner
+        }
+
+        func updateUIViewController(_ scanner: DataScannerViewController, context: Context) {
+            context.coordinator.onPayload = onPayload
+            if isScanning, !scanner.isScanning {
+                try? scanner.startScanning()
+            } else if !isScanning, scanner.isScanning {
+                scanner.stopScanning()
+            }
+        }
+
+        static func dismantleUIViewController(_ scanner: DataScannerViewController, coordinator: Coordinator) {
+            scanner.stopScanning()
+        }
+
+        final class Coordinator: NSObject, DataScannerViewControllerDelegate {
+            var onPayload: (String) -> Bool
+
+            init(onPayload: @escaping (String) -> Bool) {
+                self.onPayload = onPayload
+            }
+
+            func dataScanner(
+                _ dataScanner: DataScannerViewController,
+                didAdd addedItems: [RecognizedItem],
+                allItems: [RecognizedItem]
+            ) {
+                for item in addedItems {
+                    guard case .barcode(let barcode) = item,
+                          let payload = barcode.payloadStringValue
+                    else { continue }
+                    if onPayload(payload) { dataScanner.stopScanning() }
+                    return
+                }
+            }
+        }
+    }
+#endif
 
 public enum QuickConnectCopy {
     public static let primaryAction = "Confirm SSH credential and connect"

@@ -19,6 +19,21 @@ final class BiometricGateTests: XCTestCase {
         GatePolicy(requiresBiometrics: enabled, graceInterval: grace, unavailableReason: unavailable)
     }
 
+    private func pairingURL(nickname: String, issuedAt: Date = Date()) -> URL {
+        let envelope = QuickConnectEnvelopeV1(
+            issuedAt: issuedAt,
+            expiresAt: issuedAt.addingTimeInterval(240),
+            sessionID: "ses_0123456789abcdef01234567",
+            hostAPIPort: 8765,
+            profile: .operator,
+            pairingCode: "ABCD-EFGH-IJKL-MNOP-QRST-UVWX",
+            nickname: nickname,
+            username: "operator",
+            targets: [.init(hostname: "macbook.tailnet.example", source: .magicDNS)]
+        )
+        return try! QuickConnectLinkCodec(now: { issuedAt }).encode(envelope)
+    }
+
     func testDisabledPolicyNeverGates() {
         let decision = BiometricGate.decide(
             policy: policy(enabled: false),
@@ -188,7 +203,7 @@ final class BiometricGateTests: XCTestCase {
             hostID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
             itemID: InboxID(rawValue: "inb_0123456789abcdef01234567")
         )
-        wiring.receiveInboxURL(deniedRoute.url)
+        wiring.receiveOpenPawURL(deniedRoute.url)
 
         XCTAssertNil(wiring.pendingInboxRoute)
 
@@ -208,9 +223,126 @@ final class BiometricGateTests: XCTestCase {
             hostID: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
             itemID: InboxID(rawValue: "inb_abcdefabcdefabcdefabcdef")
         )
-        wiring.receiveInboxURL(route.url)
+        wiring.receiveOpenPawURL(route.url)
 
         XCTAssertNil(wiring.pendingInboxRoute)
+    }
+
+    @MainActor
+    func testUnlockedPairingURLDecodesAndOpensOneQuickConnectProposal() {
+        let wiring = AppWiring()
+        wiring.gate.policy = policy(enabled: false)
+
+        wiring.receiveOpenPawURL(pairingURL(nickname: "MacBook Pro"))
+
+        XCTAssertEqual(wiring.quickConnectCoordinator.proposal?.nickname, "MacBook Pro")
+        XCTAssertEqual(wiring.quickConnectCoordinator.stage, .reviewing)
+        XCTAssertNil(wiring.pendingQuickConnectProposal)
+    }
+
+    @MainActor
+    func testLockedPairingReceiptDoesNotBypassGateOrReplayAfterUnlock() {
+        let wiring = AppWiring()
+        wiring.gate.policy = policy()
+        XCTAssertEqual(wiring.gate.decision, .authenticate)
+
+        wiring.receiveOpenPawURL(pairingURL(nickname: "Locked Mac"))
+
+        XCTAssertNil(wiring.pendingQuickConnectProposal)
+        XCTAssertNil(wiring.quickConnectCoordinator.proposal)
+
+        wiring.gate.policy = policy(enabled: false)
+        wiring.openPendingQuickConnectIfUnlocked()
+
+        XCTAssertNil(wiring.quickConnectCoordinator.proposal)
+    }
+
+    @MainActor
+    func testInvalidPairingURLClearsOnlyPendingQuickConnectAndNeverReplays() {
+        let wiring = AppWiring()
+        wiring.gate.policy = policy()
+        let inbox = InboxRoute(
+            hostID: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!,
+            itemID: InboxID(rawValue: "inb_111111111111111111111111")
+        )
+        wiring.pendingInboxRoute = inbox
+        wiring.pendingQuickConnectProposal = try! QuickConnectLinkCodec().decode(pairingURL(nickname: "Stale Mac"))
+
+        wiring.receiveOpenPawURL(URL(string: "openpaw://pair#v1.invalid")!)
+
+        XCTAssertNil(wiring.pendingQuickConnectProposal)
+        XCTAssertEqual(wiring.pendingInboxRoute, inbox)
+
+        wiring.gate.policy = policy(enabled: false)
+        wiring.openPendingQuickConnectIfUnlocked()
+        XCTAssertNil(wiring.quickConnectCoordinator.proposal)
+    }
+
+    @MainActor
+    func testNewestPairingLinkSupersedesOlderPairingWithoutClearingInboxState() {
+        let wiring = AppWiring()
+        wiring.gate.policy = policy(enabled: false)
+        let inbox = InboxRoute(
+            hostID: UUID(uuidString: "00000000-0000-0000-0000-000000000004")!,
+            itemID: InboxID(rawValue: "inb_222222222222222222222222")
+        )
+        wiring.pendingInboxRoute = inbox
+
+        wiring.receiveOpenPawURL(pairingURL(nickname: "Older Mac"))
+        wiring.receiveOpenPawURL(pairingURL(nickname: "Newest Mac"))
+
+        XCTAssertEqual(wiring.quickConnectCoordinator.proposal?.nickname, "Newest Mac")
+        XCTAssertEqual(wiring.pendingInboxRoute, inbox)
+    }
+
+    func testScannerRejectsNonOpenPawTextAndOrdinaryWebLinksInPlace() {
+        let now = Date()
+        var scanner = OpenPawScannerPolicy(now: { now })
+
+        XCTAssertEqual(scanner.receive("not a URL"), .rejected)
+        XCTAssertEqual(scanner.receive("https://example.com/pair"), .rejected)
+        XCTAssertFalse(scanner.isPaused)
+    }
+
+    func testScannerAcceptsOnlyOneOpenPawPayloadAndPauses() {
+        let now = Date()
+        var scanner = OpenPawScannerPolicy(now: { now })
+        let first = pairingURL(nickname: "First Mac", issuedAt: now)
+        let second = pairingURL(nickname: "Second Mac", issuedAt: now)
+
+        guard case .accepted = scanner.receive(first.absoluteString) else {
+            return XCTFail("Expected the first valid OpenPaw payload to be accepted")
+        }
+        XCTAssertTrue(scanner.isPaused)
+        XCTAssertEqual(scanner.receive(second.absoluteString), .ignored)
+    }
+
+    @MainActor
+    func testScannerAcceptedURLFeedsTheSameOpenPawBoundaryAsExternalLinks() {
+        let now = Date()
+        let url = pairingURL(nickname: "Scanned Mac", issuedAt: now)
+        var scanner = OpenPawScannerPolicy(now: { now })
+        let wiring = AppWiring()
+        wiring.gate.policy = policy(enabled: false)
+
+        if case .accepted(let receivedURL) = scanner.receive(url.absoluteString) {
+            wiring.receiveOpenPawURL(receivedURL)
+        } else {
+            XCTFail("Expected an accepted OpenPaw scanner payload")
+        }
+
+        XCTAssertEqual(wiring.quickConnectCoordinator.proposal?.nickname, "Scanned Mac")
+    }
+
+    func testScannerCancellationProducesNoURLAndLeavesNavigationUntouched() {
+        var scanner = OpenPawScannerPolicy()
+        var navigation = "add-device"
+
+        let outcome = scanner.cancel()
+        if case .accepted = outcome { navigation = "quick-connect" }
+
+        XCTAssertEqual(outcome, .cancelled)
+        XCTAssertEqual(navigation, "add-device")
     }
 
     func testPromptCopyNamesTheProtectedThing() {

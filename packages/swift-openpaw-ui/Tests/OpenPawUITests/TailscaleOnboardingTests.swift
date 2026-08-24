@@ -277,6 +277,7 @@ struct TailscaleAdministratorOnboardingTests {
         #expect(AddDeviceFlowCopy.entryActions == [
             "Tailscale devices",
             "Enter SSH details manually",
+            "Scan pairing QR",
             "Authorize with Tailnet administrator credentials",
         ])
         #expect(AddDeviceFlowCopy.adminRequirement.contains("Tailnet administrator credentials required"))

@@ -37,7 +37,10 @@ struct AppShell: View {
                 // `openApproval(itemID:)`, so rebuilding it on every body evaluation would reset the router's state
                 // and drop a deep link mid-navigation.
                 wiring.rootView()
-                .onAppear { wiring.openPendingInboxRouteIfUnlocked() }
+                .onAppear {
+                    wiring.openPendingInboxRouteIfUnlocked()
+                    wiring.openPendingQuickConnectIfUnlocked()
+                }
                 .sheet(item: $wiring.pastedDraft) { draft in
                     ImageAnnotationEditor(
                         draft: draft,
@@ -93,7 +96,7 @@ struct AppShell: View {
                 )
             }
         }
-        .onOpenURL { wiring.receiveInboxURL($0) }
+        .onOpenURL { wiring.receiveOpenPawURL($0) }
         .task { await wiring.start() }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -264,6 +267,8 @@ final class AppWiring {
     var pendingLink: URL?
     /// Held while the biometric gate is locked. Inbox routing never selects or connects a host behind the lock.
     var pendingInboxRoute: InboxRoute?
+    /// Separate from Inbox routing so cancellation or replacement of one route class cannot mutate the other.
+    var pendingQuickConnectProposal: QuickConnectProposal?
     var pastedDraft: AttachmentDraft?
     /// Remote paths of uploaded attachments, in the order they were attached, for the composer to reference.
     var attachedPaths: [String] = []
@@ -298,20 +303,34 @@ final class AppWiring {
             settings: settings,
             sessionSpaceProvider: LiveMultiplexerSessionSpaceProvider(runner: sessionCommandRunner, restorationStore: restorationStore),
             sessionCommandExecutor: TerminalSessionCommandExecutor(terminal: terminal, runner: sessionCommandRunner),
-            restorationStore: restorationStore
+            restorationStore: restorationStore,
+            onOpenPawURL: { [weak self] url in self?.receiveOpenPawURL(url) }
         )
         cachedRoot = created
         return created
     }
 
-    func receiveInboxURL(_ url: URL) {
-        guard let route = InboxRoute(url: url) else { return }
-        pendingInboxRoute = route
+    func receiveOpenPawURL(_ url: URL) {
+        if let route = InboxRoute(url: url) {
+            pendingInboxRoute = route
+            guard InboxURLAccessGate.refreshAndAllow(
+                gate,
+                onDenied: { [weak self] in self?.cancelActiveInboxRoute() }
+            ) else { return }
+            openPendingInboxRouteIfUnlocked()
+            return
+        }
+
+        guard let proposal = try? QuickConnectLinkCodec().decode(url) else {
+            cancelPendingQuickConnect()
+            return
+        }
+        pendingQuickConnectProposal = proposal
         guard InboxURLAccessGate.refreshAndAllow(
             gate,
-            onDenied: { [weak self] in self?.cancelActiveInboxRoute() }
+            onDenied: { [weak self] in self?.cancelPendingQuickConnect() }
         ) else { return }
-        openPendingInboxRouteIfUnlocked()
+        openPendingQuickConnectIfUnlocked()
     }
 
     func openPendingInboxRouteIfUnlocked() {
@@ -323,6 +342,18 @@ final class AppWiring {
     func cancelActiveInboxRoute() {
         pendingInboxRoute = nil
         cachedRoot?.cancelInboxRouteRequest()
+    }
+
+    func openPendingQuickConnectIfUnlocked() {
+        guard case .unlocked = gate.decision,
+              let proposal = pendingQuickConnectProposal
+        else { return }
+        pendingQuickConnectProposal = nil
+        rootView().openQuickConnect(proposal)
+    }
+
+    func cancelPendingQuickConnect() {
+        pendingQuickConnectProposal = nil
     }
 
     /// A binding to the shared settings-owned terminal font size. Pinch zoom writes through the same persisted settings
@@ -633,6 +664,7 @@ final class AppWiring {
         gate.handleForeground()
         guard gate.decision == .unlocked else {
             cancelActiveInboxRoute()
+            cancelPendingQuickConnect()
             return
         }
         await terminal.reconnectIfNeeded()

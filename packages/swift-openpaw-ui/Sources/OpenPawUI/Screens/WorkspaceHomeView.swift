@@ -57,8 +57,12 @@ public struct WorkspaceHomeView: View {
     private let onOpenApproval: (String) -> Void
     private let onOpenRepository: (String) -> Void
     private let onQuickConnect: (QuickConnectProposal) -> Void
+    private let onOpenPawURL: (URL) -> Void
     private let onAddDevice: () -> Void
     @State private var isShowingProviderImport = false
+    #if os(iOS) && canImport(VisionKit)
+        @State private var isShowingPairingScanner = false
+    #endif
     @Environment(\.scenePhase) private var scenePhase
 
     public init(
@@ -70,6 +74,7 @@ public struct WorkspaceHomeView: View {
         onOpenApproval: @escaping (String) -> Void = { _ in },
         onOpenRepository: @escaping (String) -> Void = { _ in },
         onQuickConnect: @escaping (QuickConnectProposal) -> Void = { _ in },
+        onOpenPawURL: @escaping (URL) -> Void = { _ in },
         onAddDevice: @escaping () -> Void = {}
     ) {
         self.model = model
@@ -80,6 +85,7 @@ public struct WorkspaceHomeView: View {
         self.onOpenApproval = onOpenApproval
         self.onOpenRepository = onOpenRepository
         self.onQuickConnect = onQuickConnect
+        self.onOpenPawURL = onOpenPawURL
         self.onAddDevice = onAddDevice
     }
 
@@ -94,6 +100,19 @@ public struct WorkspaceHomeView: View {
         .sheet(isPresented: $isShowingProviderImport) {
             NavigationStack { ProviderImportView(model: model) }
         }
+        #if os(iOS) && canImport(VisionKit)
+            .fullScreenCover(isPresented: $isShowingPairingScanner) {
+                OpenPawPairingScannerView(
+                    onOpenPawURL: { url in
+                        isShowingPairingScanner = false
+                        Task { @MainActor in
+                            await Task.yield()
+                            onOpenPawURL(url)
+                        }
+                    },
+                    onCancel: { isShowingPairingScanner = false })
+            }
+        #endif
         .task { model.refreshHomeTailnetBootstrap() }
         .onChange(of: scenePhase) { _, phase in if phase == .active { model.refreshHomeTailnetBootstrap() } }
     }
@@ -110,6 +129,7 @@ public struct WorkspaceHomeView: View {
                 if !presentation.pendingApprovals.isEmpty { approvals(presentation.pendingApprovals) }
                 if !presentation.recentWorkspaces.isEmpty { recentWorkspaces(presentation.recentWorkspaces) }
                 addDeviceButton
+                scanPairingButton
             }
             .padding(OpenPawTheme.Space.xl)
             .frame(maxWidth: 1180, alignment: .leading)
@@ -389,6 +409,7 @@ public struct WorkspaceHomeView: View {
                 Panel { VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) { Text(WorkspaceHomeCopy.message).font(OpenPawTheme.Human.prose).foregroundStyle(OpenPawTheme.textSecondary); Text(WorkspaceHomeCopy.localControl).font(OpenPawTheme.Machine.body).foregroundStyle(OpenPawTheme.textPrimary) } }
                 tailnetBootstrapPanel
                 addDeviceButton
+                scanPairingButton
             }
             .padding(OpenPawTheme.Space.xl).frame(maxWidth: 760, alignment: .leading)
         }
@@ -411,5 +432,19 @@ public struct WorkspaceHomeView: View {
                 .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card).stroke(OpenPawTheme.lineStrong))
         }
         .buttonStyle(.plain).accessibilityLabel(WorkspaceHomeCopy.emptyPrimaryAction)
+    }
+
+    @ViewBuilder private var scanPairingButton: some View {
+        #if os(iOS) && canImport(VisionKit)
+            Button { isShowingPairingScanner = true } label: {
+                Label("Scan pairing QR", systemImage: "qrcode.viewfinder")
+                    .font(OpenPawTheme.Machine.headline).foregroundStyle(OpenPawTheme.textPrimary)
+                    .padding(.horizontal, OpenPawTheme.Space.large).frame(minHeight: 44)
+                    .background(OpenPawTheme.graphite).clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card).stroke(OpenPawTheme.lineStrong))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Scan pairing QR")
+        #endif
     }
 }

@@ -410,6 +410,7 @@ public struct RootView: View {
     private let sessionCommandExecutor: any SessionSpaceCommandExecuting
     private let restorationStore: (any SessionRestorationStoring)?
     private let quickConnectCoordinator: QuickConnectCoordinator
+    private let onOpenPawURL: (URL) -> Void
     @State private var sessionSpace = SessionSpaceSnapshot()
     /// Hold-anywhere dictation. Owned here so the gesture and its ring exist on every destination rather than
     /// being reimplemented per screen.
@@ -437,7 +438,8 @@ public struct RootView: View {
         settings: OpenPawSettings = OpenPawSettings(),
         sessionSpaceProvider: any SessionSpaceProviding = EmptySessionSpaceProvider(),
         sessionCommandExecutor: any SessionSpaceCommandExecuting = EmptySessionSpaceCommandExecutor(),
-        restorationStore: (any SessionRestorationStoring)? = nil
+        restorationStore: (any SessionRestorationStoring)? = nil,
+        onOpenPawURL: @escaping (URL) -> Void = { _ in }
     ) {
         self.model = model
         self.terminalSurface = terminalSurface
@@ -445,6 +447,7 @@ public struct RootView: View {
         self.sessionSpaceProvider = sessionSpaceProvider
         self.sessionCommandExecutor = sessionCommandExecutor
         self.restorationStore = restorationStore
+        self.onOpenPawURL = onOpenPawURL
         self.quickConnectCoordinator = quickConnectCoordinator ?? QuickConnectCoordinator(
             model: model,
             installer: ExistingOnlyQuickConnectCredentialInstaller())
@@ -618,7 +621,11 @@ public struct RootView: View {
                     AddDeviceFlow(
                         model: model,
                         settings: settings,
-                        candidates: model.homeTailnetBootstrap.candidates
+                        candidates: model.homeTailnetBootstrap.candidates,
+                        onOpenPawURL: { url in
+                            requestedSheet = nil
+                            onOpenPawURL(url)
+                        }
                     ) { requestedSheet = nil }
                 }
             case .manageHosts:
@@ -1045,6 +1052,7 @@ public struct RootView: View {
                 onOpenApproval: { router.openApproval(itemID: $0) },
                 onOpenRepository: openHomeRepository(_:),
                 onQuickConnect: openQuickConnect(_:),
+                onOpenPawURL: onOpenPawURL,
                 onAddDevice: { requestedSheet = .addDevice }
             )
         case .terminal:
