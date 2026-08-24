@@ -1,5 +1,7 @@
 import Foundation
 
+typealias PairingDeadlineSleep = @Sendable () async throws -> Void
+
 // MARK: - Errors
 
 public enum HostClientError: Error, Sendable {
@@ -53,12 +55,28 @@ public actor HostClient {
 
     public let baseURL: URL
     private let session: URLSession
+    private let pairingDeadlineSleep: PairingDeadlineSleep
     private var signer: RequestSigner?
 
     public init(baseURL: URL, signer: RequestSigner? = nil, session: URLSession = .shared) {
         self.baseURL = baseURL
         self.signer = signer
         self.session = session
+        self.pairingDeadlineSleep = {
+            try await ContinuousClock().sleep(for: .seconds(Self.pairingRequestTimeout))
+        }
+    }
+
+    init(
+        baseURL: URL,
+        signer: RequestSigner? = nil,
+        session: URLSession = .shared,
+        pairingDeadlineSleep: @escaping PairingDeadlineSleep
+    ) {
+        self.baseURL = baseURL
+        self.signer = signer
+        self.session = session
+        self.pairingDeadlineSleep = pairingDeadlineSleep
     }
 
     /// Installs (or clears) the credentials produced by pairing.
@@ -419,12 +437,43 @@ public actor HostClient {
 
     private func sendPairingRequest(_ request: URLRequest) async throws -> Data {
         do {
-            return try await send(request)
+            return try await sendPairingAttempt(request)
         } catch HostClientError.transport(let error) {
             guard !Task.isCancelled, !Self.isCancellation(error) else {
                 throw HostClientError.transport(error)
             }
-            return try await send(request)
+            return try await sendPairingAttempt(request)
+        }
+    }
+
+    private enum PairingAttemptResult: Sendable {
+        case response(Data)
+        case deadline
+    }
+
+    private func sendPairingAttempt(_ request: URLRequest) async throws -> Data {
+        let sleep = pairingDeadlineSleep
+        return try await withThrowingTaskGroup(of: PairingAttemptResult.self) { group in
+            group.addTask { [self] in
+                .response(try await send(request))
+            }
+            group.addTask {
+                try await sleep()
+                try Task.checkCancellation()
+                return .deadline
+            }
+            defer { group.cancelAll() }
+
+            guard let result = try await group.next() else {
+                throw CancellationError()
+            }
+            switch result {
+            case .response(let data):
+                return data
+            case .deadline:
+                try Task.checkCancellation()
+                throw HostClientError.transport(URLError(.timedOut))
+            }
         }
     }
 

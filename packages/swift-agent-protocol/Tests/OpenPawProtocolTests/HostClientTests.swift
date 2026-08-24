@@ -10,6 +10,7 @@ import XCTest
 final class StubResponder: @unchecked Sendable {
     enum Response {
         case success(HTTPURLResponse, Data)
+        case partial(HTTPURLResponse, Data)
         case failure(any Error)
         case pending
     }
@@ -21,12 +22,14 @@ final class StubResponder: @unchecked Sendable {
     private let lock = NSLock()
     private var handler: Handler?
     private var requests: [URLRequest] = []
+    private var stoppedRequestCount = 0
 
     func install(_ handler: @escaping Handler) {
         lock.lock()
         defer { lock.unlock() }
         self.handler = handler
         requests.removeAll()
+        stoppedRequestCount = 0
     }
 
     func respond(to request: URLRequest) -> Response {
@@ -48,26 +51,80 @@ final class StubResponder: @unchecked Sendable {
         defer { lock.unlock() }
         return requests
     }
+
+    func recordStop() {
+        lock.lock()
+        defer { lock.unlock() }
+        stoppedRequestCount += 1
+    }
+
+    var stopped: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return stoppedRequestCount
+    }
 }
 
 final class StubURLProtocol: URLProtocol {
+    private let lifecycleLock = NSLock()
+    private var completed = false
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    private func markCompleted() {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        completed = true
+    }
 
     override func startLoading() {
         switch StubResponder.shared.respond(to: request) {
         case .success(let response, let data):
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
+            markCompleted()
             client?.urlProtocolDidFinishLoading(self)
+        case .partial(let response, let data):
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
         case .failure(let error):
+            markCompleted()
             client?.urlProtocol(self, didFailWithError: error)
         case .pending:
             break
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        lifecycleLock.lock()
+        let wasCompleted = completed
+        lifecycleLock.unlock()
+        if !wasCompleted {
+            StubResponder.shared.recordStop()
+        }
+    }
+}
+
+private final class ManualPairingDeadline: @unchecked Sendable {
+    private let stream: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        let pair = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingOldest(2))
+        stream = pair.stream
+        continuation = pair.continuation
+    }
+
+    func sleep() async throws {
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
+        try Task.checkCancellation()
+    }
+
+    func fire() {
+        continuation.yield(())
+    }
 }
 
 // MARK: - Tests
@@ -86,6 +143,33 @@ final class HostClientTests: XCTestCase {
 
     private func makeClient() -> HostClient {
         HostClient(baseURL: baseURL, signer: signer, session: makeSession())
+    }
+
+    private func makePairingClient(deadline: ManualPairingDeadline) -> HostClient {
+        HostClient(
+            baseURL: baseURL,
+            signer: nil,
+            session: makeSession(),
+            pairingDeadlineSleep: deadline.sleep
+        )
+    }
+
+    private func waitForRecordedRequests(
+        _ count: Int, file: StaticString = #filePath, line: UInt = #line
+    ) async {
+        for _ in 0..<100 where StubResponder.shared.recorded.count < count {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(StubResponder.shared.recorded.count, count, file: file, line: line)
+    }
+
+    private func waitForStoppedRequests(
+        _ count: Int, file: StaticString = #filePath, line: UInt = #line
+    ) async {
+        for _ in 0..<100 where StubResponder.shared.stopped < count {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(StubResponder.shared.stopped, count, file: file, line: line)
     }
 
     private func respond(
@@ -478,6 +562,85 @@ final class HostClientTests: XCTestCase {
         XCTAssertEqual(second.timeoutInterval, first.timeoutInterval)
     }
 
+    func testPairHardDeadlineCancelsPartialResponseThenRetriesTheIdenticalRequest() async throws {
+        let deadline = ManualPairingDeadline()
+        let responseBody = successfulPairingBody
+        StubResponder.shared.install { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: [:]
+            )!
+            if StubResponder.shared.recorded.count == 1 {
+                return .partial(response, Data("still streaming".utf8))
+            }
+            return .success(response, Data(responseBody.utf8))
+        }
+
+        let client = makePairingClient(deadline: deadline)
+        let task = Task {
+            try await client.pair(
+                pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+            )
+        }
+
+        await waitForRecordedRequests(1)
+        deadline.fire()
+        let result = try await task.value
+
+        XCTAssertEqual(result.deviceID, "dev_9")
+        let requests = StubResponder.shared.recorded
+        XCTAssertEqual(requests.count, 2)
+        let first = try XCTUnwrap(requests.first)
+        let second = try XCTUnwrap(requests.last)
+        XCTAssertEqual(second.url, first.url)
+        XCTAssertEqual(second.httpMethod, first.httpMethod)
+        XCTAssertEqual(second.httpBodyData, first.httpBodyData)
+        XCTAssertEqual(second.allHTTPHeaderFields, first.allHTTPHeaderFields)
+        XCTAssertEqual(second.timeoutInterval, first.timeoutInterval)
+        await waitForStoppedRequests(1)
+    }
+
+    func testPairStopsAfterTwoHardDeadlinesAndCancelsBothAttempts() async {
+        let deadline = ManualPairingDeadline()
+        StubResponder.shared.install { _ in .pending }
+        let client = makePairingClient(deadline: deadline)
+        let task = Task {
+            try await client.pair(
+                pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+            )
+        }
+
+        await waitForRecordedRequests(1)
+        deadline.fire()
+        await waitForRecordedRequests(2)
+        deadline.fire()
+
+        do {
+            _ = try await task.value
+            XCTFail("expected hard deadline")
+        } catch let error as HostClientError {
+            guard case .transport(let underlying) = error,
+                  (underlying as? URLError)?.code == .timedOut
+            else {
+                return XCTFail("expected timed out transport error, got \(error)")
+            }
+        } catch {
+            XCTFail("expected HostClientError, got \(error)")
+        }
+
+        XCTAssertEqual(StubResponder.shared.recorded.count, 2)
+        await waitForStoppedRequests(2)
+        let header = "x-openpaw-idempotency-key"
+        XCTAssertEqual(
+            StubResponder.shared.recorded.first?.value(forHTTPHeaderField: header),
+            StubResponder.shared.recorded.last?.value(forHTTPHeaderField: header)
+        )
+        XCTAssertEqual(
+            StubResponder.shared.recorded.first?.httpBodyData,
+            StubResponder.shared.recorded.last?.httpBodyData
+        )
+    }
+
     func testPairStopsAfterOneRetryWhenTransportKeepsFailing() async {
         StubResponder.shared.install { _ in .failure(URLError(.networkConnectionLost)) }
         let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
@@ -529,17 +692,15 @@ final class HostClientTests: XCTestCase {
 
     func testPairDoesNotRetryWhenTheCallingTaskIsCancelled() async {
         StubResponder.shared.install { _ in .pending }
-        let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
+        let deadline = ManualPairingDeadline()
+        let client = makePairingClient(deadline: deadline)
         let task = Task {
             try await client.pair(
                 pairingCode: "123456", deviceName: "iPhone", platform: "ios"
             )
         }
 
-        for _ in 0..<100 where StubResponder.shared.recorded.isEmpty {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        XCTAssertEqual(StubResponder.shared.recorded.count, 1)
+        await waitForRecordedRequests(1)
 
         task.cancel()
         do {
@@ -560,6 +721,7 @@ final class HostClientTests: XCTestCase {
         }
 
         XCTAssertEqual(StubResponder.shared.recorded.count, 1)
+        await waitForStoppedRequests(1)
     }
 
     func testPairDoesNotRetryForbiddenResponse() async {
