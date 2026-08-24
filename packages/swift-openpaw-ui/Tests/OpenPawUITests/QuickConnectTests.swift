@@ -1,4 +1,5 @@
 import Foundation
+import OpenPawProtocol
 import OpenPawTerminalCore
 import Testing
 
@@ -311,12 +312,78 @@ struct QuickConnectTests {
         coordinator.confirm(.existing(.agentForwarding), username: "daniel")
         await waitForCoordinatorToSettle(coordinator)
 
-        guard case .failed = coordinator.stage else {
+        guard case .failed(.reviewing, _) = coordinator.stage else {
             Issue.record("expected expired failure, got \(coordinator.stage)")
             return
         }
         #expect(installer.installCount == 0)
         #expect(model.hostStore.hosts.isEmpty)
+    }
+
+    @MainActor
+    @Test("reconfirmation resets validation failures to the reviewing phase before credential installation")
+    func reconfirmationValidationFailureIsReviewing() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let clock = QuickConnectClock(issuedAt)
+        let installer = QuickConnectCountingInstaller()
+        let model = OpenPawModel(hostStore: HostStore(), terminal: QuickConnectRecordingTerminal())
+        model.hostKeyPrompt = HostKeyPrompt(
+            host: "studio.tailnet.ts.net:22",
+            verdict: .unknown(fingerprint: "SHA256:FIXTURE-UNKNOWN"))
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: installer,
+            now: { clock.value })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForStage(.awaitingHostTrust, coordinator: coordinator)
+        clock.set(expiresAt.addingTimeInterval(1))
+
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForCoordinatorToSettle(coordinator)
+
+        guard case .failed(.reviewing, _) = coordinator.stage else {
+            Issue.record("expected reviewing failure, got \(coordinator.stage)")
+            return
+        }
+        #expect(installer.installCount == 1)
+        #expect(coordinator.currentLease == nil)
+        #expect(coordinator.terminalRouteIntent == nil)
+    }
+
+    @MainActor
+    @Test("cancel clears every owned route and makes a paused completion stale")
+    func cancellationClearsOwnedStateAndPausedCompletion() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let terminal = QuickConnectRecordingTerminal()
+        let model = OpenPawModel(hostStore: HostStore(), terminal: terminal)
+        model.hostKeyPrompt = HostKeyPrompt(
+            host: "studio.tailnet.ts.net:22",
+            verdict: .unknown(fingerprint: "SHA256:FIXTURE-UNKNOWN"))
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectCountingInstaller(),
+            now: { self.issuedAt })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForStage(.awaitingHostTrust, coordinator: coordinator)
+        #expect(coordinator.currentLease != nil)
+        #expect(coordinator.terminalRouteIntent != nil)
+
+        coordinator.cancel()
+        model.hostKeyPrompt = nil
+        coordinator.resumeAfterHostTrust()
+        await Task.yield()
+
+        #expect(coordinator.stage == .cancelled)
+        #expect(coordinator.proposal == nil)
+        #expect(coordinator.currentLease == nil)
+        #expect(coordinator.terminalRouteIntent == nil)
+        #expect(terminal.connectedHosts.count == 1)
     }
 
     @MainActor
@@ -336,6 +403,356 @@ struct QuickConnectTests {
         #expect(model.hostStore.hosts[0].hostname == "studio.local")
         #expect(terminal.connectedHosts == [model.hostStore.hosts[0].id])
         #expect(coordinator.terminalRouteIntent == coordinator.currentLease)
+    }
+
+    @MainActor
+    @Test("canonical existing host preserves metadata and SSH uses the exact confirmed target and username")
+    func canonicalExistingHostPreservesMetadataAndUsesReviewedEndpoint() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let reviewedTarget = try #require(proposal.targets.last)
+        let existingID = UUID()
+        let savedPin = KnownHostEntry(
+            keyType: "ssh-ed25519",
+            fingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            addedAt: issuedAt.addingTimeInterval(-60))
+        let existing = HostRecord(
+            id: existingID,
+            nickname: "My saved workstation",
+            hostname: "STUDIO.LOCAL.",
+            port: reviewedTarget.port,
+            hostAPIPort: 9_999,
+            username: "reviewed-user",
+            auth: .agentForwarding,
+            preferredTransport: .mosh,
+            lastSuccessfulTransport: .eternalTerminal,
+            multiplexerPreference: .zellij,
+            knownHosts: [savedPin],
+            tags: ["favorite", "production"])
+        let terminal = QuickConnectRecordingTerminal()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [existing]), terminal: terminal)
+        let persistence = QuickConnectPersistenceRecorder()
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectCountingInstaller(),
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(
+            .existing(.password(reference: try KeychainReference(identifier: "fixture/reviewed-password"))),
+            target: reviewedTarget,
+            username: " reviewed-user ")
+        await waitForCoordinatorToSettle(coordinator)
+
+        let saved = try #require(model.hostStore.hosts.only)
+        let connected = try #require(terminal.connectedRecords.only)
+        #expect(saved.id == existingID)
+        #expect(saved.nickname == "My saved workstation")
+        #expect(saved.hostname == reviewedTarget.hostname)
+        #expect(saved.port == reviewedTarget.port)
+        #expect(saved.username == "reviewed-user")
+        #expect(saved.preferredTransport == .mosh)
+        #expect(saved.lastSuccessfulTransport == .eternalTerminal)
+        #expect(saved.multiplexerPreference == .zellij)
+        #expect(saved.tags == ["favorite", "production"])
+        #expect(saved.knownHosts == [savedPin])
+        #expect(connected.id == existingID)
+        #expect(connected.hostname == reviewedTarget.hostname)
+        #expect(connected.port == reviewedTarget.port)
+        #expect(connected.username == "reviewed-user")
+        #expect(persistence.stores.count == 1)
+    }
+
+    @MainActor
+    @Test("conflicting QR pins fail review before credential installation persistence or SSH")
+    func conflictingPinsFailBeforeCredentialInstallation() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let target = try #require(proposal.targets.first)
+        let existing = HostRecord(
+            nickname: "Pinned Studio",
+            hostname: target.hostname,
+            port: target.port,
+            username: "daniel",
+            auth: .agentForwarding,
+            knownHosts: [KnownHostEntry(
+                keyType: "ssh-ed25519",
+                fingerprint: "SHA256:DIFFERENT-FIXTURE-PIN",
+                addedAt: issuedAt)])
+        let terminal = QuickConnectRecordingTerminal()
+        let installer = QuickConnectCountingInstaller()
+        let persistence = QuickConnectPersistenceRecorder()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [existing]), terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: installer,
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), target: target, username: "daniel")
+        await waitForCoordinatorToSettle(coordinator)
+
+        guard case .failed(.reviewing, _) = coordinator.stage else {
+            Issue.record("expected reviewing failure, got \(coordinator.stage)")
+            return
+        }
+        #expect(installer.installCount == 0)
+        #expect(persistence.stores.isEmpty)
+        #expect(terminal.connectedRecords.isEmpty)
+        #expect(model.hostStore.hosts == [existing])
+    }
+
+    @MainActor
+    @Test("an existing canonical host without pins adopts reviewed QR pins once")
+    func existingHostWithoutPinsAdoptsProposalPins() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let target = try #require(proposal.targets.first)
+        let existing = HostRecord(
+            nickname: "Saved Studio",
+            hostname: "STUDIO.TAILNET.TS.NET.",
+            port: target.port,
+            username: "daniel",
+            auth: .agentForwarding,
+            tags: ["keep-me"])
+        let model = OpenPawModel(hostStore: HostStore(hosts: [existing]), terminal: QuickConnectRecordingTerminal())
+        let persistence = QuickConnectPersistenceRecorder()
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectCountingInstaller(),
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), target: target, username: "daniel")
+        await waitForCoordinatorToSettle(coordinator)
+
+        let saved = try #require(model.hostStore.hosts.only)
+        #expect(saved.id == existing.id)
+        #expect(saved.tags == ["keep-me"])
+        #expect(saved.knownHosts.map(\.fingerprint) == proposal.hostKeys.map(\.fingerprint))
+        #expect(persistence.stores.count == 1)
+    }
+
+    @MainActor
+    @Test("a newer proposal makes a suspended credential completion stale")
+    func newerProposalSuppressesOldCredentialCompletion() async {
+        let gate = QuickConnectGate()
+        let installer = QuickConnectSuspendedInstaller(gate: gate)
+        let terminal = QuickConnectRecordingTerminal()
+        let persistence = QuickConnectPersistenceRecorder()
+        let model = OpenPawModel(hostStore: HostStore(), terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: installer,
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+        let old = QuickConnectProposal.from(candidate: AddDeviceCandidate(
+            id: "old", nickname: "Old", hostname: "old.example", dnsName: nil,
+            tailscaleIPs: [], os: nil, online: true), now: issuedAt)
+        let new = QuickConnectProposal.from(candidate: AddDeviceCandidate(
+            id: "new", nickname: "New", hostname: "new.example", dnsName: nil,
+            tailscaleIPs: [], os: nil, online: true), now: issuedAt)
+
+        coordinator.begin(old)
+        coordinator.confirm(.existing(.agentForwarding), username: "dev")
+        await gate.waitUntilStarted()
+        coordinator.begin(new)
+        await gate.release()
+        await Task.yield()
+
+        #expect(coordinator.stage == .reviewing)
+        #expect(coordinator.proposal?.id == "new")
+        #expect(model.hostStore.hosts.isEmpty)
+        #expect(persistence.stores.isEmpty)
+        #expect(terminal.connectedRecords.isEmpty)
+        #expect(coordinator.terminalRouteIntent == nil)
+    }
+
+    @MainActor
+    @Test("cancel makes a suspended credential completion stale")
+    func cancelSuppressesCredentialCompletion() async {
+        let gate = QuickConnectGate()
+        let terminal = QuickConnectRecordingTerminal()
+        let persistence = QuickConnectPersistenceRecorder()
+        let model = OpenPawModel(hostStore: HostStore(), terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectSuspendedInstaller(gate: gate),
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+        let proposal = QuickConnectProposal.from(candidate: AddDeviceCandidate(
+            id: "cancelled", nickname: "Cancelled", hostname: "cancelled.example", dnsName: nil,
+            tailscaleIPs: [], os: nil, online: true), now: issuedAt)
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "dev")
+        await gate.waitUntilStarted()
+        coordinator.cancel()
+        await gate.release()
+        await Task.yield()
+
+        #expect(coordinator.stage == .cancelled)
+        #expect(model.hostStore.hosts.isEmpty)
+        #expect(persistence.stores.isEmpty)
+        #expect(terminal.connectedRecords.isEmpty)
+        #expect(coordinator.currentLease == nil)
+        #expect(coordinator.terminalRouteIntent == nil)
+    }
+
+    @MainActor
+    @Test("an external host switch makes a suspended credential completion stale")
+    func hostSwitchSuppressesCredentialCompletion() async {
+        let first = HostRecord(nickname: "First", hostname: "first.example", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Second", hostname: "second.example", username: "dev", auth: .agentForwarding)
+        let gate = QuickConnectGate()
+        let terminal = QuickConnectRecordingTerminal()
+        let persistence = QuickConnectPersistenceRecorder()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectSuspendedInstaller(gate: gate),
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+        let proposal = QuickConnectProposal.from(candidate: AddDeviceCandidate(
+            id: "switch", nickname: "Target", hostname: "target.example", dnsName: nil,
+            tailscaleIPs: [], os: nil, online: true), now: issuedAt)
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "dev")
+        await gate.waitUntilStarted()
+        await model.selectHost(second.id)
+        await gate.release()
+        await waitForCoordinatorToSettle(coordinator)
+
+        #expect(model.selectedHostID == second.id)
+        #expect(persistence.stores.isEmpty)
+        #expect(terminal.connectedRecords.isEmpty)
+        #expect(coordinator.terminalRouteIntent == nil)
+    }
+
+    @MainActor
+    @Test("an external A to B to A switch makes a suspended credential completion stale")
+    func abaHostSwitchSuppressesCredentialCompletion() async {
+        let first = HostRecord(nickname: "First", hostname: "first.example", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Second", hostname: "second.example", username: "dev", auth: .agentForwarding)
+        let gate = QuickConnectGate()
+        let terminal = QuickConnectRecordingTerminal()
+        let persistence = QuickConnectPersistenceRecorder()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectSuspendedInstaller(gate: gate),
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+        let proposal = QuickConnectProposal.from(candidate: AddDeviceCandidate(
+            id: "aba", nickname: "Target", hostname: "target.example", dnsName: nil,
+            tailscaleIPs: [], os: nil, online: true), now: issuedAt)
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "dev")
+        await gate.waitUntilStarted()
+        await model.selectHost(second.id)
+        await model.selectHost(first.id)
+        await gate.release()
+        await waitForCoordinatorToSettle(coordinator)
+
+        #expect(model.selectedHostID == first.id)
+        #expect(persistence.stores.isEmpty)
+        #expect(terminal.connectedRecords.isEmpty)
+        #expect(coordinator.terminalRouteIntent == nil)
+    }
+
+    @MainActor
+    @Test("an external reconnect makes a suspended credential completion stale")
+    func reconnectSuppressesCredentialCompletion() async throws {
+        let existing = HostRecord(nickname: "Existing", hostname: "existing.example", username: "dev", auth: .agentForwarding)
+        let gate = QuickConnectGate()
+        let terminal = QuickConnectRecordingTerminal()
+        let persistence = QuickConnectPersistenceRecorder()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [existing]), terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectSuspendedInstaller(gate: gate),
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+        let proposal = QuickConnectProposal.from(candidate: AddDeviceCandidate(
+            id: "reconnect", nickname: "Target", hostname: "target.example", dnsName: nil,
+            tailscaleIPs: [], os: nil, online: true), now: issuedAt)
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "dev")
+        await gate.waitUntilStarted()
+        _ = try #require(await model.connectSelectedHost())
+        await gate.release()
+        await waitForCoordinatorToSettle(coordinator)
+
+        #expect(terminal.connectedRecords.map(\.id) == [existing.id])
+        #expect(persistence.stores.isEmpty)
+        #expect(coordinator.currentLease == nil)
+        #expect(coordinator.terminalRouteIntent == nil)
+    }
+
+    @MainActor
+    @Test("a reconnect while selected-host teardown is suspended prevents the coordinator from dialing")
+    func reconnectDuringSelectionSuppressesCoordinatorConnect() async {
+        let existing = HostRecord(nickname: "Existing", hostname: "existing.example", username: "dev", auth: .agentForwarding)
+        let disconnectGate = QuickConnectGate()
+        let terminal = QuickConnectRecordingTerminal()
+        terminal.disconnectGate = disconnectGate
+        let persistence = QuickConnectPersistenceRecorder()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [existing]), terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectCountingInstaller(),
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+        let proposal = QuickConnectProposal.from(candidate: AddDeviceCandidate(
+            id: "selection-reconnect", nickname: "Target", hostname: "target.example", dnsName: nil,
+            tailscaleIPs: [], os: nil, online: true), now: issuedAt)
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "dev")
+        await disconnectGate.waitUntilStarted()
+        await model.disconnect()
+        await disconnectGate.release()
+        await waitForCoordinatorToSettle(coordinator)
+
+        #expect(persistence.stores.count == 1)
+        #expect(terminal.connectedRecords.isEmpty)
+        #expect(coordinator.currentLease == nil)
+        #expect(coordinator.terminalRouteIntent == nil)
+    }
+
+    @MainActor
+    @Test("a same-host selection cannot adopt ownership after an ABA switch")
+    func sameHostSelectionCannotAdoptABAOwnership() async throws {
+        let first = HostRecord(nickname: "First", hostname: "first.example", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Second", hostname: "second.example", username: "dev", auth: .agentForwarding)
+        let disconnectGate = QuickConnectGate()
+        let terminal = QuickConnectRecordingTerminal()
+        terminal.disconnectGate = disconnectGate
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), terminal: terminal)
+
+        let initialSelection = Task { await model.selectHost(second.id) }
+        await disconnectGate.waitUntilStarted()
+        let sameHostSelection = Task { await model.selectHost(second.id) }
+        for _ in 0..<10 { await Task.yield() }
+        let away = Task { await model.selectHost(first.id) }
+        for _ in 0..<10 { await Task.yield() }
+        let back = Task { await model.selectHost(second.id) }
+        for _ in 0..<10 { await Task.yield() }
+
+        await disconnectGate.release()
+        _ = await initialSelection.value
+        let staleOwnership = await sameHostSelection.value
+        _ = await away.value
+        _ = await back.value
+
+        #expect(staleOwnership == nil)
+        #expect(model.selectedHostID == second.id)
     }
 
     @MainActor
@@ -361,6 +778,234 @@ struct QuickConnectTests {
     }
 
     @MainActor
+    @Test("pairing redeems exactly once then refreshes and follows")
+    func pairingRedeemsOnceThenRefreshesAndFollows() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let backend = QuickConnectPairingBackend()
+        let terminal = QuickConnectRecordingTerminal()
+        let model = OpenPawModel(hostStore: HostStore(), backend: backend, terminal: terminal)
+        let persistence = QuickConnectPersistenceRecorder()
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectCountingInstaller(),
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel", deviceName: "Fixture Phone")
+        await waitForCoordinatorToSettle(coordinator)
+        await waitForBackendCall("events", backend: backend)
+
+        #expect(coordinator.stage == .connected)
+        #expect(backend.pairingCodes == ["ABCD-EFGH-IJKL-MNOP-QRST-UVWX"])
+        #expect(backend.deviceNames == ["Fixture Phone"])
+        #expect(backend.callCount("health") == 1)
+        #expect(backend.callCount("events") == 1)
+        #expect(terminal.connectedRecords.count == 1)
+        #expect(persistence.stores.count == 1)
+        #expect(coordinator.terminalRouteIntent == coordinator.currentLease)
+    }
+
+    @MainActor
+    @Test("unknown host key pauses and resumes the same owned lease without duplicate persistence or SSH")
+    func unknownHostKeyPausesAndResumesOwnedLease() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let backend = QuickConnectPairingBackend()
+        let terminal = QuickConnectRecordingTerminal()
+        let model = OpenPawModel(hostStore: HostStore(), backend: backend, terminal: terminal)
+        model.hostKeyPrompt = HostKeyPrompt(
+            host: "studio.tailnet.ts.net:22",
+            verdict: .unknown(fingerprint: "SHA256:FIXTURE-UNKNOWN"))
+        let persistence = QuickConnectPersistenceRecorder()
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectCountingInstaller(),
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForStage(.awaitingHostTrust, coordinator: coordinator)
+        let pausedLease = try #require(coordinator.currentLease)
+
+        model.hostKeyPrompt = nil
+        coordinator.resumeAfterHostTrust()
+        await waitForCoordinatorToSettle(coordinator)
+
+        #expect(coordinator.stage == .connected)
+        #expect(coordinator.currentLease == pausedLease)
+        #expect(terminal.connectedRecords.count == 1)
+        #expect(persistence.stores.count == 1)
+        #expect(backend.pairingCodes.count == 1)
+    }
+
+    @MainActor
+    @Test("changed host key is a hard failure and never pairs")
+    func changedHostKeyFailsHard() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let backend = QuickConnectPairingBackend()
+        let model = OpenPawModel(hostStore: HostStore(), backend: backend, terminal: QuickConnectRecordingTerminal())
+        model.hostKeyPrompt = HostKeyPrompt(
+            host: "studio.tailnet.ts.net:22",
+            verdict: .changed(expected: "SHA256:FIXTURE-EXPECTED", actual: "SHA256:FIXTURE-ACTUAL"))
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectCountingInstaller(),
+            now: { self.issuedAt })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForCoordinatorToSettle(coordinator)
+
+        guard case .failed(.connectingSSH, _) = coordinator.stage else {
+            Issue.record("expected changed-key connection failure, got \(coordinator.stage)")
+            return
+        }
+        #expect(backend.pairingCodes.isEmpty)
+        #expect(coordinator.currentLease == nil)
+        #expect(coordinator.terminalRouteIntent == nil)
+    }
+
+    @MainActor
+    @Test("expiry after SSH preserves the saved host and terminal but never pairs")
+    func expiryAfterSSHPreservesTerminalWithoutPairing() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let clock = QuickConnectClock(issuedAt)
+        let backend = QuickConnectPairingBackend()
+        let terminal = QuickConnectRecordingTerminal()
+        terminal.onConnect = { clock.set(self.expiresAt.addingTimeInterval(1)) }
+        let model = OpenPawModel(hostStore: HostStore(), backend: backend, terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectCountingInstaller(),
+            now: { clock.value })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForCoordinatorToSettle(coordinator)
+
+        guard case .failed(.pairing, _) = coordinator.stage else {
+            Issue.record("expected pairing-stage expiry, got \(coordinator.stage)")
+            return
+        }
+        #expect(model.hostStore.hosts.count == 1)
+        #expect(model.connection.isConnected)
+        #expect(terminal.connectedRecords.count == 1)
+        #expect(backend.pairingCodes.isEmpty)
+        #expect(coordinator.terminalRouteIntent == coordinator.currentLease)
+    }
+
+    @MainActor
+    @Test("a stale pairing completion cannot retain terminal route ownership")
+    func stalePairingCompletionClearsTerminalOwnership() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let pairGate = QuickConnectGate()
+        let backend = QuickConnectPairingBackend(pairGate: pairGate)
+        let terminal = QuickConnectRecordingTerminal()
+        let model = OpenPawModel(hostStore: HostStore(), backend: backend, terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectCountingInstaller(),
+            now: { self.issuedAt })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await pairGate.waitUntilStarted()
+        await model.disconnect()
+        await pairGate.release()
+        await waitForCoordinatorToSettle(coordinator)
+
+        #expect(backend.pairingCodes.count == 1)
+        #expect(coordinator.currentLease == nil)
+        #expect(coordinator.terminalRouteIntent == nil)
+    }
+
+    @MainActor
+    @Test("pairing-only retry reopens only the structured lifecycle and never repeats SSH setup")
+    func pairingOnlyRetryDoesNotReconnectSSH() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let backend = QuickConnectPairingBackend()
+        backend.pairFailuresRemaining = 1
+        let terminal = QuickConnectRecordingTerminal()
+        let installer = QuickConnectCountingInstaller()
+        let persistence = QuickConnectPersistenceRecorder()
+        let model = OpenPawModel(hostStore: HostStore(), backend: backend, terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: installer,
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForCoordinatorToSettle(coordinator)
+        guard case .failed(.pairing, _) = coordinator.stage else {
+            Issue.record("expected first pairing failure, got \(coordinator.stage)")
+            return
+        }
+        let ownedLease = try #require(coordinator.currentLease)
+        await backend.disconnect()
+
+        coordinator.retryPairing()
+        await waitForCoordinatorToSettle(coordinator)
+        await waitForBackendCall("events", backend: backend)
+
+        #expect(coordinator.stage == .connected)
+        #expect(coordinator.currentLease == ownedLease)
+        #expect(installer.installCount == 1)
+        #expect(persistence.stores.count == 1)
+        #expect(terminal.connectedRecords.count == 1)
+        #expect(backend.connectIDs.count == 2)
+        #expect(backend.pairingCodes.count == 2)
+        #expect(backend.callCount("health") == 1)
+        #expect(backend.callCount("events") == 1)
+    }
+
+    @MainActor
+    @Test("pairing-only retry rejects a stale lease without any repeated work")
+    func pairingOnlyRetryRejectsStaleLease() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
+            try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let backend = QuickConnectPairingBackend()
+        backend.pairFailuresRemaining = 1
+        let terminal = QuickConnectRecordingTerminal()
+        let installer = QuickConnectCountingInstaller()
+        let persistence = QuickConnectPersistenceRecorder()
+        let model = OpenPawModel(hostStore: HostStore(), backend: backend, terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: installer,
+            now: { self.issuedAt },
+            persistHostStore: { persistence.record($0) })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForCoordinatorToSettle(coordinator)
+        await model.disconnect()
+
+        coordinator.retryPairing()
+        await waitForCoordinatorToSettle(coordinator)
+
+        guard case .failed(.pairing, _) = coordinator.stage else {
+            Issue.record("expected stale retry failure, got \(coordinator.stage)")
+            return
+        }
+        #expect(installer.installCount == 1)
+        #expect(persistence.stores.count == 1)
+        #expect(terminal.connectedRecords.count == 1)
+        #expect(backend.connectIDs.count == 1)
+        #expect(backend.pairingCodes.count == 1)
+        #expect(coordinator.currentLease == nil)
+        #expect(coordinator.terminalRouteIntent == nil)
+    }
+
+    @MainActor
     private func waitForCoordinatorToSettle(_ coordinator: QuickConnectCoordinator) async {
         for _ in 0..<1_000 {
             switch coordinator.stage {
@@ -369,6 +1014,24 @@ struct QuickConnectTests {
             }
         }
         Issue.record("coordinator did not settle")
+    }
+
+    @MainActor
+    private func waitForStage(_ expected: QuickConnectCoordinator.Stage, coordinator: QuickConnectCoordinator) async {
+        for _ in 0..<1_000 {
+            if coordinator.stage == expected { return }
+            await Task.yield()
+        }
+        Issue.record("coordinator did not reach \(expected); got \(coordinator.stage)")
+    }
+
+    @MainActor
+    private func waitForBackendCall(_ name: String, backend: QuickConnectPairingBackend) async {
+        for _ in 0..<1_000 {
+            if backend.callCount(name) > 0 { return }
+            await Task.yield()
+        }
+        Issue.record("backend did not record \(name)")
     }
 
     private func expectDecodeError(_ error: QuickConnectLinkError, codec: QuickConnectLinkCodec, envelope: QuickConnectEnvelopeV1) throws {
@@ -413,22 +1076,162 @@ private final class QuickConnectCountingInstaller: QuickConnectCredentialInstall
     }
 }
 
+private actor QuickConnectGate {
+    private var started = false
+    private var released = false
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func suspend() async {
+        started = true
+        let waiters = startedWaiters
+        startedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { continuation in
+            if released { continuation.resume() }
+            else { releaseWaiters.append(continuation) }
+        }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { startedWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private final class QuickConnectSuspendedInstaller: QuickConnectCredentialInstalling, @unchecked Sendable {
+    private let gate: QuickConnectGate
+    init(gate: QuickConnectGate) { self.gate = gate }
+    func install(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod {
+        await gate.suspend()
+        if case .existing(let auth) = choice { return auth }
+        return .agentForwarding
+    }
+}
+
 private final class QuickConnectRecordingTerminal: TerminalBackend, @unchecked Sendable {
     private let continuation: AsyncStream<ConnectionState>.Continuation
     let stateStream: AsyncStream<ConnectionState>
     let outputStream = AsyncStream<Data> { $0.finish() }
-    private(set) var connectedHosts: [HostRecord.ID] = []
+    private(set) var connectedRecords: [HostRecord] = []
+    var connectedHosts: [HostRecord.ID] { connectedRecords.map(\.id) }
+    var disconnectGate: QuickConnectGate?
+    var onConnect: (@Sendable () -> Void)?
+    private var disconnectCount = 0
     init() {
         var continuation: AsyncStream<ConnectionState>.Continuation!
         stateStream = AsyncStream { continuation = $0 }
         self.continuation = continuation
     }
-    func connect(host: HostRecord) async throws { connectedHosts.append(host.id); continuation.yield(.connected(.ssh)) }
-    func disconnect() async { continuation.yield(.disconnected(reason: nil)) }
+    func connect(host: HostRecord) async throws {
+        connectedRecords.append(host)
+        onConnect?()
+        continuation.yield(.connected(.ssh))
+    }
+    func disconnect() async {
+        disconnectCount += 1
+        if disconnectCount == 1, let disconnectGate { await disconnectGate.suspend() }
+        continuation.yield(.disconnected(reason: nil))
+    }
     func send(text: String) async throws {}
     func send(chord: KeyChord, applicationCursorKeys: Bool) async throws {}
     func resize(columns: Int, rows: Int) async throws {}
     func run(command: String) async throws -> String { "" }
+}
+
+private final class QuickConnectClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var now: Date
+    init(_ now: Date) { self.now = now }
+    var value: Date { lock.withLock { now } }
+    func set(_ value: Date) { lock.withLock { now = value } }
+}
+
+private enum QuickConnectFixtureError: Error { case expectedFailure }
+
+private final class QuickConnectPairingBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawHostPairing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls: [String] = []
+    private var ready = false
+    private var recordedConnectIDs: [HostRecord.ID] = []
+    private var recordedPairingCodes: [String] = []
+    private var recordedDeviceNames: [String] = []
+    private let pairGate: QuickConnectGate?
+    var pairFailuresRemaining = 0
+
+    init(pairGate: QuickConnectGate? = nil) { self.pairGate = pairGate }
+
+    var pairingCodes: [String] { lock.withLock { recordedPairingCodes } }
+    var deviceNames: [String] { lock.withLock { recordedDeviceNames } }
+    var connectIDs: [HostRecord.ID] { lock.withLock { recordedConnectIDs } }
+    var isReady: Bool { get async { lock.withLock { ready } } }
+
+    func callCount(_ name: String) -> Int { lock.withLock { calls.filter { $0 == name }.count } }
+    private func record(_ name: String) { lock.withLock { calls.append(name) } }
+
+    func connect(hostID: HostRecord.ID) async throws {
+        lock.withLock {
+            recordedConnectIDs.append(hostID)
+            ready = true
+        }
+    }
+
+    func disconnect() async { lock.withLock { ready = false } }
+
+    func pair(pairingCode: String, deviceName: String) async throws -> PairingResult {
+        let shouldFail = lock.withLock {
+            recordedPairingCodes.append(pairingCode)
+            recordedDeviceNames.append(deviceName)
+            if pairFailuresRemaining > 0 {
+                pairFailuresRemaining -= 1
+                return true
+            }
+            return false
+        }
+        if let pairGate { await pairGate.suspend() }
+        if shouldFail { throw QuickConnectFixtureError.expectedFailure }
+        return PairingResult(
+            deviceID: "fixture-device",
+            token: "fixture-token",
+            hmacKeyB64: Data(repeating: 7, count: 32).base64EncodedString(),
+            capabilities: [])
+    }
+
+    func health() async throws -> HealthInfo {
+        record("health")
+        return HealthInfo(version: "fixture", protocolVersion: "1.0", agents: [], capabilities: [], previewPorts: [], adapterVersions: [:])
+    }
+    func sessions() async throws -> [SessionSummary] { record("sessions"); return [] }
+    func inbox(status: InboxStatus?) async throws -> [InboxItem] { record("inbox"); return [] }
+    func resolve(item: InboxItem, action: ActionID, answer: String?, detailAcknowledged: Bool) async throws -> ResolveResult { throw QuickConnectFixtureError.expectedFailure }
+    func events(session: String?, afterSeq: UInt64?) -> AsyncThrowingStream<Event, any Error> {
+        record("events")
+        return AsyncThrowingStream { $0.finish() }
+    }
+    func repos() async throws -> [RepoSummary] { record("repos"); return [] }
+    func repoStatus(_ repo: String) async throws -> RepoStatus { throw QuickConnectFixtureError.expectedFailure }
+    func diff(repo: String, mode: DiffMode, path: String?) async throws -> Diff { throw QuickConnectFixtureError.expectedFailure }
+    func tree(repo: String, ref: String, path: String) async throws -> [TreeEntry] { throw QuickConnectFixtureError.expectedFailure }
+    func blob(repo: String, ref: String, path: String) async throws -> Blob { throw QuickConnectFixtureError.expectedFailure }
+    func search(repo: String, query: String, path: String?) async throws -> [ContentMatch] { throw QuickConnectFixtureError.expectedFailure }
+    func upload(data: Data, filename: String) async throws -> UploadResult { throw QuickConnectFixtureError.expectedFailure }
+    func previewURL(port: Int, path: String) throws -> URL { URL(string: "http://127.0.0.1:\(port)\(path)")! }
+    func tailscaleDevices() async throws -> TailscaleDevicesResponse { TailscaleDevicesResponse(version: 1, candidates: []) }
+    func audit(limit: Int) async throws -> [AuditEntry] { [] }
+}
+
+@MainActor
+private final class QuickConnectPersistenceRecorder {
+    private(set) var stores: [HostStore] = []
+    func record(_ store: HostStore) { stores.append(store) }
 }
 
 private extension Array {

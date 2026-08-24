@@ -6,6 +6,27 @@ import OpenPawProtocol
 @MainActor
 @Observable
 public final class QuickConnectCoordinator {
+    private enum ValidationError: Error, CustomStringConvertible {
+        case unreviewedTarget
+        case conflictingHostKeyPin
+        case changedHostKey
+
+        var description: String {
+            switch self {
+            case .unreviewedTarget: "The confirmed SSH target is not part of this proposal."
+            case .conflictingHostKeyPin: "The saved host key conflicts with the reviewed Quick Connect fingerprint."
+            case .changedHostKey: "The SSH host key changed and cannot be trusted through Quick Connect."
+            }
+        }
+    }
+
+    private struct PendingConfirmation {
+        var proposal: QuickConnectProposal
+        var deviceName: String
+        var selection: HostSelectionLease
+        var operationSnapshot: HostOperationSnapshot
+    }
+
     public enum FailurePoint: Sendable, Hashable { case reviewing, installingCredential, savingHost, connectingSSH, openingHostAPI, pairing, loadingWorkspace }
     public enum Stage: Sendable, Hashable {
         case idle
@@ -33,7 +54,7 @@ public final class QuickConnectCoordinator {
     private let persistHostStore: @MainActor @Sendable (HostStore) -> Void
     private var generation = 0
     private var task: Task<Void, Never>?
-    private var pendingConfirmation: (proposal: QuickConnectProposal, target: QuickConnectTarget, username: String, auth: AuthMethod, deviceName: String)?
+    private var pendingConfirmation: PendingConfirmation?
 
     public init(model: OpenPawModel, installer: any QuickConnectCredentialInstalling, now: @escaping @Sendable () -> Date = Date.init, persistHostStore: @escaping @MainActor @Sendable (HostStore) -> Void = { _ in }) {
         self.model = model
@@ -63,11 +84,15 @@ public final class QuickConnectCoordinator {
         generation += 1
         let generation = generation
         task?.cancel()
+        pendingConfirmation = nil
+        currentLease = nil
+        terminalRouteIntent = nil
+        stage = .reviewing
         let credential = CredentialBox(choice)
-        let selectionSnapshot = model.selectedHostID
+        let operationSnapshot = model.currentHostOperationSnapshot
         let storeSnapshot = model.hostStore
         task = Task { [weak self] in
-            await self?.run(proposal: proposal, target: reviewedTarget, username: reviewedUsername, credential: credential, deviceName: deviceName, selectionSnapshot: selectionSnapshot, storeSnapshot: storeSnapshot, generation: generation)
+            await self?.run(proposal: proposal, target: reviewedTarget, username: reviewedUsername, credential: credential, deviceName: deviceName, operationSnapshot: operationSnapshot, storeSnapshot: storeSnapshot, generation: generation)
         }
     }
 
@@ -76,7 +101,30 @@ public final class QuickConnectCoordinator {
         let generation = generation
         task?.cancel()
         task = Task { [weak self] in
-            await self?.connectAndPair(proposal: pending.proposal, target: pending.target, username: pending.username, auth: pending.auth, deviceName: pending.deviceName, generation: generation)
+            await self?.resume(pending: pending, generation: generation)
+        }
+    }
+
+    /// Retries only pairing for the currently owned SSH lease.
+    ///
+    /// Credential installation, host persistence, host selection, and Terminal connection are deliberately absent.
+    public func retryPairing() {
+        guard case .failed(let point, _) = stage,
+              point == .openingHostAPI || point == .pairing,
+              let pending = pendingConfirmation,
+              pending.proposal.pairingCode != nil,
+              let lease = currentLease else { return }
+        guard model.ownsConnection(lease) else {
+            currentLease = nil
+            terminalRouteIntent = nil
+            stage = .failed(.pairing, String(describing: HostPairingError.staleConnection))
+            return
+        }
+        generation += 1
+        let generation = generation
+        task?.cancel()
+        task = Task { [weak self] in
+            await self?.retryPairing(pending: pending, lease: lease, generation: generation)
         }
     }
 
@@ -84,70 +132,143 @@ public final class QuickConnectCoordinator {
         generation += 1
         task?.cancel()
         task = nil
+        proposal = nil
         pendingConfirmation = nil
         currentLease = nil
+        terminalRouteIntent = nil
         stage = .cancelled
     }
 
-    private func run(proposal: QuickConnectProposal, target: QuickConnectTarget, username: String, credential: CredentialBox, deviceName: String, selectionSnapshot: HostRecord.ID?, storeSnapshot: HostStore, generation: Int) async {
+    private func run(proposal: QuickConnectProposal, target: QuickConnectTarget, username: String, credential: CredentialBox, deviceName: String, operationSnapshot: HostOperationSnapshot, storeSnapshot: HostStore, generation: Int) async {
         do {
             try ensureCurrent(generation, proposal: proposal)
             try ensureNotExpired(proposal)
+            try validateReview(proposal: proposal, target: target, username: username, store: storeSnapshot)
             stage = .installingCredential
             let auth = try await installCredential(credential.take())
             try ensureCurrent(generation, proposal: proposal)
-            guard model.selectedHostID == selectionSnapshot, model.hostStore == storeSnapshot else { throw HostPairingError.staleConnection }
+            guard model.ownsHostOperation(operationSnapshot), model.hostStore == storeSnapshot else { throw HostPairingError.staleConnection }
             try ensureNotExpired(proposal)
             await connectAndPair(proposal: proposal, target: target, username: username, auth: auth, deviceName: deviceName, generation: generation)
         } catch is CancellationError {
             if self.generation == generation { stage = .cancelled }
         } catch {
-            if self.generation == generation { stage = .failed(.installingCredential, String(describing: error)) }
+            if self.generation == generation { stage = .failed(failurePoint, String(describing: error)) }
         }
     }
 
-    private func connectAndPair(proposal: QuickConnectProposal, target: QuickConnectTarget? = nil, username: String? = nil, auth: AuthMethod, deviceName: String, generation: Int) async {
+    private func connectAndPair(proposal: QuickConnectProposal, target: QuickConnectTarget, username: String, auth: AuthMethod, deviceName: String, generation: Int) async {
         do {
             try ensureCurrent(generation, proposal: proposal)
             stage = .savingHost
-            let reviewedTarget = target ?? proposal.targets.first!
-            let reviewedUsername = username ?? proposal.username
-            let host = makeHost(proposal: proposal, target: reviewedTarget, username: reviewedUsername, auth: auth)
+            let host = makeHost(proposal: proposal, target: target, username: username, auth: auth)
             model.hostStore.upsert(host)
             persistHostStore(model.hostStore)
-            await model.selectHost(host.id)
-            try ensureCurrent(generation, proposal: proposal)
-            stage = .connectingSSH
-            pendingConfirmation = (proposal, reviewedTarget, reviewedUsername, auth, deviceName)
-            let lease = await model.connectSelectedHost(purpose: proposal.pairingCode == nil ? .normal : .awaitingPairing)
-            guard let lease else {
-                if let prompt = model.hostKeyPrompt, prompt.allowsTrust { stage = .awaitingHostTrust; return }
+            guard let selection = await model.selectHost(host.id), model.ownsSelection(selection) else {
                 throw HostPairingError.staleConnection
             }
-            guard model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
-            currentLease = lease
-            terminalRouteIntent = lease
-            if model.hostKeyPrompt != nil { stage = .awaitingHostTrust; return }
-            stage = .openingHostAPI
-            if let code = proposal.pairingCode {
-                stage = .pairing
-                _ = try await model.pairHost(pairingCode: code, deviceName: deviceName, lease: lease)
-            }
             try ensureCurrent(generation, proposal: proposal)
-            guard model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
-            stage = .loadingWorkspace
-            try ensureCurrent(generation, proposal: proposal)
-            guard model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
-            stage = .connected
-            pendingConfirmation = nil
+            let pending = PendingConfirmation(
+                proposal: proposal,
+                deviceName: deviceName,
+                selection: selection,
+                operationSnapshot: model.currentHostOperationSnapshot)
+            pendingConfirmation = pending
+            try await connectOwnedHost(pending: pending, generation: generation)
         } catch is CancellationError {
             if self.generation == generation { stage = .cancelled }
         } catch {
-            if self.generation == generation {
-                if currentLease != nil || model.connection.isConnected { terminalRouteIntent = currentLease ?? model.currentConnectionLease }
-                stage = .failed(failurePoint, String(describing: error))
-            }
+            recordFailure(error, generation: generation)
         }
+    }
+
+    private func resume(pending: PendingConfirmation, generation: Int) async {
+        do {
+            try ensureCurrent(generation, proposal: pending.proposal)
+            if let lease = currentLease, model.ownsConnection(lease) {
+                try await finishPairing(pending: pending, lease: lease, generation: generation)
+                return
+            }
+            guard model.ownsSelection(pending.selection), model.ownsHostOperation(pending.operationSnapshot) else {
+                throw HostPairingError.staleConnection
+            }
+            try await connectOwnedHost(pending: pending, generation: generation)
+        } catch is CancellationError {
+            if self.generation == generation { stage = .cancelled }
+        } catch {
+            recordFailure(error, generation: generation)
+        }
+    }
+
+    private func retryPairing(pending: PendingConfirmation, lease: HostConnectionLease, generation: Int) async {
+        do {
+            try ensureCurrent(generation, proposal: pending.proposal)
+            guard model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
+            stage = .openingHostAPI
+            try await model.prepareHostPairing(lease: lease)
+            try ensureCurrent(generation, proposal: pending.proposal)
+            guard model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
+            try await finishPairing(pending: pending, lease: lease, generation: generation)
+        } catch is CancellationError {
+            if self.generation == generation { stage = .cancelled }
+        } catch {
+            recordFailure(error, generation: generation)
+        }
+    }
+
+    private func connectOwnedHost(pending: PendingConfirmation, generation: Int) async throws {
+        try ensureCurrent(generation, proposal: pending.proposal)
+        guard model.ownsSelection(pending.selection) else { throw HostPairingError.staleConnection }
+        stage = .connectingSSH
+        let lease = await model.connectSelectedHost(purpose: pending.proposal.pairingCode == nil ? .normal : .awaitingPairing)
+        var updatedPending = pending
+        updatedPending.operationSnapshot = model.currentHostOperationSnapshot
+        pendingConfirmation = updatedPending
+
+        if let prompt = model.hostKeyPrompt {
+            guard prompt.allowsTrust else { throw ValidationError.changedHostKey }
+            if let lease {
+                guard model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
+                currentLease = lease
+                terminalRouteIntent = lease
+            }
+            stage = .awaitingHostTrust
+            return
+        }
+
+        guard let lease, model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
+        currentLease = lease
+        terminalRouteIntent = lease
+        try await finishPairing(pending: updatedPending, lease: lease, generation: generation)
+    }
+
+    private func finishPairing(pending: PendingConfirmation, lease: HostConnectionLease, generation: Int) async throws {
+        try ensureCurrent(generation, proposal: pending.proposal)
+        guard model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
+        stage = .openingHostAPI
+        if let code = pending.proposal.pairingCode {
+            stage = .pairing
+            try ensureNotExpired(pending.proposal)
+            _ = try await model.pairHost(pairingCode: code, deviceName: pending.deviceName, lease: lease)
+        }
+        try ensureCurrent(generation, proposal: pending.proposal)
+        guard model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
+        stage = .loadingWorkspace
+        try ensureCurrent(generation, proposal: pending.proposal)
+        guard model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
+        stage = .connected
+        pendingConfirmation = nil
+    }
+
+    private func recordFailure(_ error: any Error, generation: Int) {
+        guard self.generation == generation else { return }
+        if let lease = currentLease, model.ownsConnection(lease) {
+            terminalRouteIntent = lease
+        } else {
+            currentLease = nil
+            terminalRouteIntent = nil
+        }
+        stage = .failed(failurePoint, String(describing: error))
     }
 
     private func installCredential(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod {
@@ -167,14 +288,36 @@ public final class QuickConnectCoordinator {
 
     private func makeHost(proposal: QuickConnectProposal, target: QuickConnectTarget, username: String, auth: AuthMethod) -> HostRecord {
         let pins = proposal.hostKeys.map { KnownHostEntry(keyType: $0.algorithm, fingerprint: $0.fingerprint, addedAt: now()) }
-        if var existing = model.hostStore.hosts.first(where: { $0.username == username && $0.hostname == target.hostname && $0.port == target.port }) {
-            existing.nickname = proposal.nickname
+        if var existing = matchingHost(target: target, username: username, in: model.hostStore) {
+            existing.hostname = target.hostname
+            existing.port = target.port
+            existing.username = username
             existing.hostAPIPort = proposal.hostAPIPort.flatMap(UInt16.init(exactly:))
             existing.auth = auth
-            if !pins.isEmpty { existing.knownHosts = pins }
+            if existing.knownHosts.isEmpty, !pins.isEmpty { existing.knownHosts = pins }
             return existing
         }
         return HostRecord(nickname: proposal.nickname, hostname: target.hostname, port: target.port, hostAPIPort: proposal.hostAPIPort.flatMap(UInt16.init(exactly:)), username: username, auth: auth, knownHosts: pins)
+    }
+
+    private func validateReview(proposal: QuickConnectProposal, target: QuickConnectTarget, username: String, store: HostStore) throws {
+        guard proposal.targets.contains(target) else { throw ValidationError.unreviewedTarget }
+        guard let existing = matchingHost(target: target, username: username, in: store), !existing.knownHosts.isEmpty else { return }
+        let savedPins = Dictionary(grouping: existing.knownHosts, by: { $0.keyType.lowercased() })
+        let conflicts = proposal.hostKeys.contains { proposed in
+            guard let pins = savedPins[proposed.algorithm.lowercased()] else { return false }
+            return !pins.contains(where: { $0.fingerprint == proposed.fingerprint })
+        }
+        if conflicts { throw ValidationError.conflictingHostKeyPin }
+    }
+
+    private func matchingHost(target: QuickConnectTarget, username: String, in store: HostStore) -> HostRecord? {
+        let targetKey = QuickConnectLinkCodec.canonicalTargetKey(target.hostname)
+        return store.hosts.first {
+            $0.username == username
+                && $0.port == target.port
+                && QuickConnectLinkCodec.canonicalTargetKey($0.hostname) == targetKey
+        }
     }
 
     private func ensureCurrent(_ generation: Int, proposal: QuickConnectProposal) throws {

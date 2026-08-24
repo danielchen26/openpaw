@@ -44,6 +44,33 @@ public struct HostConnectionLease: Sendable, Hashable {
     }
 }
 
+/// Snapshot of the exact selected-host and connection-request epoch.
+///
+/// This is intentionally valid for a short validation window, such as credential installation. It detects host
+/// selection ABA and same-host reconnects even when the visible selected host id ends where it started.
+public struct HostOperationSnapshot: Sendable, Hashable {
+    public var selectedHostID: HostRecord.ID?
+    public var hostSelectionToken: Int
+    public var connectionRequestID: Int
+
+    public init(selectedHostID: HostRecord.ID?, hostSelectionToken: Int, connectionRequestID: Int) {
+        self.selectedHostID = selectedHostID
+        self.hostSelectionToken = hostSelectionToken
+        self.connectionRequestID = connectionRequestID
+    }
+}
+
+/// Ownership of one completed selected-host transaction.
+public struct HostSelectionLease: Sendable, Hashable {
+    public var hostID: HostRecord.ID
+    public var hostSelectionToken: Int
+
+    public init(hostID: HostRecord.ID, hostSelectionToken: Int) {
+        self.hostID = hostID
+        self.hostSelectionToken = hostSelectionToken
+    }
+}
+
 public enum HostConnectPurpose: Sendable, Hashable {
     case normal
     case awaitingPairing
@@ -1232,10 +1259,18 @@ public final class OpenPawModel {
     ///
     /// The host id changes before the asynchronous teardown so every in-flight refresh and event stream becomes stale
     /// immediately. The caller must make a separate `connectSelectedHost()` request after this transaction finishes.
-    public func selectHost(_ hostID: HostRecord.ID?) async {
+    @discardableResult
+    public func selectHost(_ hostID: HostRecord.ID?) async -> HostSelectionLease? {
+        let connectionRequestSnapshot = connectionRequestID
+        let hostSelectionSnapshot = hostSelectionGeneration
         if hostID == selectedHostID {
             if let hostSelectionOperation { await hostSelectionOperation.value }
-            return
+            guard connectionRequestID == connectionRequestSnapshot,
+                  hostSelectionGeneration == hostSelectionSnapshot,
+                  let hostID,
+                  selectedHostID == hostID,
+                  !isSwitchingHost else { return nil }
+            return HostSelectionLease(hostID: hostID, hostSelectionToken: hostSelectionSnapshot)
         }
         hostSelectionGeneration += 1
         let selectionGeneration = hostSelectionGeneration
@@ -1257,6 +1292,12 @@ public final class OpenPawModel {
         }
         hostSelectionOperation = operation
         await operation.value
+        guard connectionRequestID == connectionRequestSnapshot,
+              hostSelectionGeneration == selectionGeneration,
+              let hostID,
+              selectedHostID == hostID,
+              !isSwitchingHost else { return nil }
+        return HostSelectionLease(hostID: hostID, hostSelectionToken: selectionGeneration)
     }
 
     @discardableResult
@@ -1338,8 +1379,40 @@ public final class OpenPawModel {
             requestID: connectionRequestID)
     }
 
+    public var currentHostOperationSnapshot: HostOperationSnapshot {
+        HostOperationSnapshot(
+            selectedHostID: selectedHostID,
+            hostSelectionToken: hostSelectionGeneration,
+            connectionRequestID: connectionRequestID)
+    }
+
+    public func ownsHostOperation(_ snapshot: HostOperationSnapshot) -> Bool {
+        currentHostOperationSnapshot == snapshot
+    }
+
+    public func ownsSelection(_ lease: HostSelectionLease) -> Bool {
+        selectedHostID == lease.hostID && hostSelectionGeneration == lease.hostSelectionToken && !isSwitchingHost
+    }
+
     public func ownsConnection(_ lease: HostConnectionLease) -> Bool {
         connectionLease(hostID: lease.hostID, requestID: lease.requestID) == lease
+    }
+
+    /// Reopens only the structured side of an owned SSH connection when a pairing retry needs it.
+    public func prepareHostPairing(lease: HostConnectionLease) async throws {
+        guard ownsConnection(lease), let host = selectedHost, host.id == lease.hostID else {
+            throw HostPairingError.staleConnection
+        }
+        guard let lifecycle = backend as? any StructuredBackendLifecycle else { return }
+        if await lifecycle.isReady {
+            structuredBackendReady = true
+            return
+        }
+        guard try await connectStructuredBackend(lifecycle, host: host), ownsConnection(lease) else {
+            throw HostPairingError.staleConnection
+        }
+        structuredBackendReady = true
+        updateProviderCapabilityState()
     }
 
     @discardableResult
