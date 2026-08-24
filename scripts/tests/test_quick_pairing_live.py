@@ -230,6 +230,23 @@ class QuickPairingLiveContractTests(unittest.TestCase):
             self.assertFalse(run_root.exists())
             self.assertTrue(registry.cleaned)
 
+    def test_pair_audit_count_is_secret_free_and_skips_torn_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / "audit.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps({"action": "device.pair", "target": "phone"}),
+                        json.dumps({"action": "inbox.resolve", "target": "item"}),
+                        "{\"action\":\"device.pair\"",
+                        json.dumps({"action": "device.pair", "target": "tablet"}),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(self.harness.pair_audit_count(state), 2)
+
     def test_replay_request_rejects_the_consumed_pairing_code(self) -> None:
         class Client:
             def json(self, method, path, body):

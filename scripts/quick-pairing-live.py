@@ -766,6 +766,22 @@ def state_device_count(state_dir: Path) -> int:
     return len(devices) if isinstance(devices, list) else 0
 
 
+def pair_audit_count(state_dir: Path) -> int:
+    try:
+        lines = (state_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    count = 0
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and value.get("action") == "device.pair":
+            count += 1
+    return count
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", help="reuse an existing openpaw-host binary")
@@ -858,7 +874,8 @@ def main() -> int:
             raise HarnessError(
                 f"live Quick Connect XCUITest failed with exit {xcodebuild.returncode}; "
                 f"coordination checkpoints reached: {checkpoints}; "
-                f"persisted host device count: {state_device_count(layout.host_state)}\n"
+                f"persisted host device count: {state_device_count(layout.host_state)}; "
+                f"persisted pairing audit count: {pair_audit_count(layout.host_state)}\n"
                 f"{errors}\n{xcode_output[-5000:]}"
             )
         if not {"/ready", "/connected", "/persisted"}.issubset(coordinator.events):
