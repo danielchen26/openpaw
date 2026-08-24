@@ -44,6 +44,16 @@ public struct HostConnectionLease: Sendable, Hashable {
     }
 }
 
+public enum HostConnectPurpose: Sendable, Hashable {
+    case normal
+    case awaitingPairing
+}
+
+public enum HostPairingError: Error, Sendable, Hashable {
+    case unavailable
+    case staleConnection
+}
+
 @MainActor
 @Observable
 public final class OpenPawModel {
@@ -1250,7 +1260,7 @@ public final class OpenPawModel {
     }
 
     @discardableResult
-    public func connectSelectedHost() async -> HostConnectionLease? {
+    public func connectSelectedHost(purpose: HostConnectPurpose = .normal) async -> HostConnectionLease? {
         guard !isSwitchingHost, let terminal, let host = selectedHost else { return nil }
         connectionRequestID += 1
         let requestID = connectionRequestID
@@ -1286,15 +1296,17 @@ public final class OpenPawModel {
                   connection.isConnected else { return nil }
             if let lifecycle = backend as? any StructuredBackendLifecycle {
                 do {
-                    guard try await connectStructuredBackend(lifecycle, hostID: targetHostID) else { return nil }
+                    guard try await connectStructuredBackend(lifecycle, host: host) else { return nil }
                     structuredBackendReady = true
                     updateProviderCapabilityState()
                     guard connectionRequestID == requestID,
                           selectedHostID == targetHostID,
                           connection.isConnected,
                           structuredBackendReady else { return nil }
-                    await refresh()
-                    startFollowing(session: selectedSessionID)
+                    if purpose == .normal {
+                        await refresh()
+                        startFollowing(session: selectedSessionID)
+                    }
                 } catch {
                     structuredBackendReady = false
                     clearHostDerivedState(preservingActiveRepoImport: preservesActiveRepoImport)
@@ -1303,8 +1315,10 @@ public final class OpenPawModel {
             } else {
                 structuredBackendReady = backend != nil
                 updateProviderCapabilityState()
-                await refresh()
-                startFollowing(session: selectedSessionID)
+                if purpose == .normal {
+                    await refresh()
+                    startFollowing(session: selectedSessionID)
+                }
             }
             if structuredBackendReady { resumeRepoImportPollingAfterReconnect() }
         } catch {
@@ -1328,6 +1342,16 @@ public final class OpenPawModel {
         connectionLease(hostID: lease.hostID, requestID: lease.requestID) == lease
     }
 
+    @discardableResult
+    public func pairHost(pairingCode: String, deviceName: String, lease: HostConnectionLease) async throws -> PairingResult {
+        guard ownsConnection(lease), let pairing = backend as? any OpenPawHostPairing else { throw HostPairingError.unavailable }
+        let result = try await pairing.pair(pairingCode: pairingCode, deviceName: deviceName)
+        guard ownsConnection(lease) else { throw HostPairingError.staleConnection }
+        await refresh()
+        startFollowing(session: selectedSessionID)
+        return result
+    }
+
     private func connectionLease(hostID: HostRecord.ID, requestID: Int) -> HostConnectionLease? {
         guard connectionRequestID == requestID,
               selectedHostID == hostID,
@@ -1348,8 +1372,9 @@ public final class OpenPawModel {
     /// owns the final disconnect/connect pair and cannot be torn down by its predecessor.
     private func connectStructuredBackend(
         _ lifecycle: any StructuredBackendLifecycle,
-        hostID: HostRecord.ID
+        host: HostRecord
     ) async throws -> Bool {
+        let hostID = host.id
         structuredConnectRequestID += 1
         let requestID = structuredConnectRequestID
         let previousOperation = structuredConnectOperation
@@ -1368,7 +1393,7 @@ public final class OpenPawModel {
                 throw StructuredConnectSuperseded()
             }
             do {
-                try await lifecycle.connect(hostID: hostID)
+                try await lifecycle.connect(hostID: hostID, options: StructuredBackendConnectOptions(hostAPIPort: host.hostAPIPort))
             } catch {
                 guard structuredConnectRequestID == requestID,
                     selectedHostID == hostID,

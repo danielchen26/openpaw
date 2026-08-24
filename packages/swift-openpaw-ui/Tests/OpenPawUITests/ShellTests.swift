@@ -1327,12 +1327,13 @@ private actor SuspendedLifecycleGate {
     }
 }
 
-private final class LifecycleRecordingBackend: RecordingBackend, StructuredBackendLifecycle, @unchecked Sendable {
+private class LifecycleRecordingBackend: RecordingBackend, StructuredBackendLifecycle, @unchecked Sendable {
     private let lock2 = NSLock()
     private var ready = false
     private var recordedConnectIDs: [HostRecord.ID] = []
     private var recordedDisconnectCount = 0
     private var recordedActiveHostID: HostRecord.ID?
+    private var recordedConnectOptions: [StructuredBackendConnectOptions] = []
     var failConnect = false
     var suspendedHostID: HostRecord.ID?
     var connectGate: SuspendedLifecycleGate?
@@ -1342,11 +1343,17 @@ private final class LifecycleRecordingBackend: RecordingBackend, StructuredBacke
     var connectIDs: [HostRecord.ID] { locked { recordedConnectIDs } }
     var disconnectCount: Int { locked { recordedDisconnectCount } }
     var activeHostID: HostRecord.ID? { locked { recordedActiveHostID } }
+    var connectOptions: [StructuredBackendConnectOptions] { locked { recordedConnectOptions } }
     var isReady: Bool { get async { locked { ready } } }
 
     func connect(hostID: HostRecord.ID) async throws {
+        try await connect(hostID: hostID, options: .init())
+    }
+
+    func connect(hostID: HostRecord.ID, options: StructuredBackendConnectOptions) async throws {
         let gate = locked {
             recordedConnectIDs.append(hostID)
+            recordedConnectOptions.append(options)
             return suspendedHostID == hostID ? connectGate : nil
         }
         if let gate { await gate.suspend() }
@@ -1373,6 +1380,21 @@ private final class LifecycleRecordingBackend: RecordingBackend, StructuredBacke
         lock2.lock()
         defer { lock2.unlock() }
         return body()
+    }
+}
+
+private final class PairingLifecycleRecordingBackend: LifecycleRecordingBackend, OpenPawHostPairing, @unchecked Sendable {
+    private let pairGate: SuspendedLifecycleGate
+    private let pairLock = NSLock()
+    private var recordedPairingCodes: [String] = []
+    var pairingCodes: [String] { pairLock.withLock { recordedPairingCodes } }
+
+    init(pairGate: SuspendedLifecycleGate) { self.pairGate = pairGate }
+
+    func pair(pairingCode: String, deviceName: String) async throws -> PairingResult {
+        pairLock.withLock { recordedPairingCodes.append(pairingCode) }
+        await pairGate.suspend()
+        return PairingResult(deviceID: deviceName, token: "token", hmacKeyB64: Data(repeating: 1, count: 32).base64EncodedString(), capabilities: [])
     }
 }
 
@@ -1637,6 +1659,54 @@ struct StructuredBackendLifecycleTests {
         #expect(model.structuredBackendReady == false)
         #expect(model.canRefreshRemoteState == false)
         #expect(model.lastError?.title == "Structured host features are unavailable")
+    }
+
+    @MainActor
+    @Test("Reconnect derives the structured API port from the saved host")
+    func reconnectUsesSavedHostAPIPort() async {
+        let host = HostRecord(nickname: "Custom", hostname: "custom", hostAPIPort: 4_317, username: "dev", auth: .agentForwarding)
+        let backend = LifecycleRecordingBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend, terminal: RecordingTerminalBackend())
+
+        _ = await model.connectSelectedHost()
+
+        #expect(backend.connectOptions == [.init(hostAPIPort: 4_317)])
+    }
+
+    @MainActor
+    @Test("Awaiting pairing opens both transports but skips protected refresh")
+    func awaitingPairingSkipsRefreshUntilPairSucceeds() async {
+        let host = HostRecord(nickname: "Pair", hostname: "pair", username: "dev", auth: .agentForwarding)
+        let backend = LifecycleRecordingBackend()
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]), backend: backend, terminal: RecordingTerminalBackend())
+
+        let lease = await model.connectSelectedHost(purpose: .awaitingPairing)
+
+        #expect(lease != nil)
+        #expect(model.structuredBackendReady)
+        #expect(backend.callCount("health") == 0)
+        #expect(backend.callCount("sessions") == 0)
+    }
+
+    @MainActor
+    @Test("A stale pairing completion cannot refresh a newer host")
+    func stalePairingCompletionIsRejected() async throws {
+        let first = HostRecord(nickname: "One", hostname: "one", username: "dev", auth: .agentForwarding)
+        let second = HostRecord(nickname: "Two", hostname: "two", username: "dev", auth: .agentForwarding)
+        let gate = SuspendedLifecycleGate()
+        let backend = PairingLifecycleRecordingBackend(pairGate: gate)
+        let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), backend: backend, terminal: RecordingTerminalBackend())
+        let lease = try #require(await model.connectSelectedHost(purpose: .awaitingPairing))
+        let pairing = Task { try await model.pairHost(pairingCode: "once", deviceName: "Phone", lease: lease) }
+        await gate.waitUntilStarted()
+
+        await model.selectHost(second.id)
+        _ = await model.connectSelectedHost()
+        await gate.release()
+
+        await #expect(throws: HostPairingError.staleConnection) { try await pairing.value }
+        #expect(backend.pairingCodes == ["once"])
+        #expect(backend.callCount("health") == 1)
     }
 
     @MainActor

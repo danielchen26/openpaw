@@ -66,7 +66,24 @@ public extension OpenPawBackend {
 public protocol StructuredBackendLifecycle: Sendable {
     var isReady: Bool { get async }
     func connect(hostID: HostRecord.ID) async throws
+    func connect(hostID: HostRecord.ID, options: StructuredBackendConnectOptions) async throws
     func disconnect() async
+}
+
+public struct StructuredBackendConnectOptions: Sendable, Hashable {
+    public var hostAPIPort: UInt16?
+    public init(hostAPIPort: UInt16? = nil) { self.hostAPIPort = hostAPIPort }
+}
+
+public extension StructuredBackendLifecycle {
+    func connect(hostID: HostRecord.ID, options: StructuredBackendConnectOptions) async throws {
+        try await connect(hostID: hostID)
+    }
+}
+
+public protocol OpenPawHostPairing: Sendable {
+    @discardableResult
+    func pair(pairingCode: String, deviceName: String) async throws -> PairingResult
 }
 
 public enum PairedHostCapabilityStatus: Sendable, Hashable {

@@ -22,7 +22,7 @@ protocol LoopbackForwarder: Sendable {
 /// to it through a `direct-tcpip` channel on the SSH connection the terminal already established. That is the whole
 /// security model of the structured side: there is no port to scan, no certificate to get wrong, and no path that
 /// works when the SSH connection is down.
-final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, PairedHostCapabilityProviding {
+final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawHostPairing, PairedHostCapabilityProviding {
 
     /// The port `openpaw-host` binds on the remote machine. Configurable because a user may run two hosts, and
     /// defaulted because almost nobody does.
@@ -59,11 +59,16 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, PairedHo
     var isReady: Bool { get async { await state.client != nil } }
 
     func connect(hostID: HostRecord.ID) async throws {
+        try await connect(hostID: hostID, options: StructuredBackendConnectOptions())
+    }
+
+    func connect(hostID: HostRecord.ID, options: StructuredBackendConnectOptions) async throws {
         await disconnect()
         let epoch = lifecycleEpoch.update { $0 += 1; return $0 }
         activeHostID.set(hostID)
+        let attemptRemotePort = options.hostAPIPort ?? remotePort
         do {
-            let port = try await forwarder.start(remotePort: remotePort)
+            let port = try await forwarder.start(remotePort: attemptRemotePort)
             guard activeHostID.get() == hostID, lifecycleEpoch.get() == epoch else {
                 await forwarder.stop()
                 throw HostClientError.transport(URLError(.cancelled))

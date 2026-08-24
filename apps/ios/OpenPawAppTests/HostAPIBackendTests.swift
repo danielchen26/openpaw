@@ -1,6 +1,7 @@
 import Foundation
 import OpenPawProtocol
 import OpenPawTerminalCore
+import OpenPawUI
 import XCTest
 
 @testable import OpenPawApp
@@ -72,6 +73,40 @@ final class HostAPIBackendTests: XCTestCase {
         XCTAssertFalse(backend.isPaired)
         XCTAssertEqual(stopCountAfterFailure, 2)
         XCTAssertThrowsError(try backend.previewURL(port: 3000, path: "/"))
+    }
+
+    func testStructuredConnectOptionAppliesOnlyToOwnedAttempt() async throws {
+        let forwarder = FakeForwarder(port: 49_324)
+        let backend = HostAPIBackend(forwarder: forwarder, remotePort: 9_999, urlSession: Self.stubSession())
+
+        try await backend.connect(hostID: HostRecord.ID(), options: .init(hostAPIPort: 4_317))
+        try await backend.connect(hostID: HostRecord.ID())
+
+        let ports = await forwarder.startedRemotePorts
+        XCTAssertEqual(ports, [4_317, 9_999])
+    }
+
+    func testNilStructuredConnectOptionUsesDefaultRemotePort() async throws {
+        let forwarder = FakeForwarder(port: 49_325)
+        let backend = HostAPIBackend(forwarder: forwarder, urlSession: Self.stubSession())
+
+        try await backend.connect(hostID: HostRecord.ID(), options: .init(hostAPIPort: nil))
+
+        let ports = await forwarder.startedRemotePorts
+        XCTAssertEqual(ports, [HostAPIBackend.defaultRemotePort])
+    }
+
+    func testConnectOptionUsesAttemptPortWithoutMutatingDefault() async throws {
+        let hostA = HostRecord.ID()
+        let hostB = HostRecord.ID()
+        let forwarder = FakeForwarder(port: 49_324)
+        let backend = HostAPIBackend(forwarder: forwarder, credentials: FakeCredentialStore(), remotePort: 8_787, urlSession: Self.stubSession())
+
+        try await backend.connect(hostID: hostA, options: StructuredBackendConnectOptions(hostAPIPort: 4_317))
+        try await backend.connect(hostID: hostB)
+
+        let ports = await forwarder.startedRemotePorts
+        XCTAssertEqual(ports, [4_317, 8_787])
     }
 
     private static func stubSession() -> URLSession {

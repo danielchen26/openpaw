@@ -99,6 +99,8 @@ public struct HostRecord: Sendable, Hashable, Codable, Identifiable {
     public var nickname: String
     public var hostname: String
     public var port: Int
+    /// Optional remote `openpaw-host` structured API port. Nil preserves legacy hosts and means the app default.
+    public var hostAPIPort: UInt16?
     public var username: String
     public var auth: AuthMethod
     /// Pinned by the user; `nil` means the `auto` policy chooses.
@@ -115,6 +117,7 @@ public struct HostRecord: Sendable, Hashable, Codable, Identifiable {
         nickname: String,
         hostname: String,
         port: Int = 22,
+        hostAPIPort: UInt16? = nil,
         username: String,
         auth: AuthMethod,
         preferredTransport: TransportKind? = nil,
@@ -127,6 +130,7 @@ public struct HostRecord: Sendable, Hashable, Codable, Identifiable {
         self.nickname = nickname
         self.hostname = hostname
         self.port = port
+        self.hostAPIPort = hostAPIPort
         self.username = username
         self.auth = auth
         self.preferredTransport = preferredTransport
@@ -153,6 +157,7 @@ public struct HostRecord: Sendable, Hashable, Codable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, nickname, hostname, port, username, auth
+        case hostAPIPort = "host_api_port"
         case preferredTransport = "preferred_transport"
         case lastSuccessfulTransport = "last_successful_transport"
         case multiplexerPreference = "multiplexer_preference"

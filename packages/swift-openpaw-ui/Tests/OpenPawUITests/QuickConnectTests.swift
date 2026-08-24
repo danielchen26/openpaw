@@ -283,6 +283,94 @@ struct QuickConnectTests {
         #expect(String(describing: QuickConnectCredentialInstallError.storageFailed).contains("do-not-print-me") == false)
     }
 
+    @MainActor
+    @Test("begin only reviews and does not mutate hosts or connect")
+    func coordinatorDoesNotMutateBeforeConfirm() {
+        let terminal = QuickConnectRecordingTerminal()
+        let model = OpenPawModel(hostStore: HostStore(), terminal: terminal)
+        let installer = QuickConnectCountingInstaller()
+        let coordinator = QuickConnectCoordinator(model: model, installer: installer, now: { self.issuedAt })
+
+        coordinator.begin(.from(candidate: AddDeviceCandidate(id: "node", nickname: "Studio", hostname: "studio.local", dnsName: nil, tailscaleIPs: [], os: nil, online: true), now: issuedAt))
+
+        #expect(coordinator.stage == .reviewing)
+        #expect(model.hostStore.hosts.isEmpty)
+        #expect(terminal.connectedHosts.isEmpty)
+        #expect(installer.installCount == 0)
+    }
+
+    @MainActor
+    @Test("expired QR fails before credential installation")
+    func expiredCoordinatorProposalStopsBeforeCredentialInstall() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let model = OpenPawModel(hostStore: HostStore(), terminal: QuickConnectRecordingTerminal())
+        let installer = QuickConnectCountingInstaller()
+        let coordinator = QuickConnectCoordinator(model: model, installer: installer, now: { self.expiresAt.addingTimeInterval(1) })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForCoordinatorToSettle(coordinator)
+
+        guard case .failed = coordinator.stage else {
+            Issue.record("expected expired failure, got \(coordinator.stage)")
+            return
+        }
+        #expect(installer.installCount == 0)
+        #expect(model.hostStore.hosts.isEmpty)
+    }
+
+    @MainActor
+    @Test("plain SSH candidate saves one exact host and emits terminal route intent")
+    func candidateConnectsWithoutStructuredHost() async {
+        let proposal = QuickConnectProposal.from(candidate: AddDeviceCandidate(id: "node", nickname: "Studio", hostname: "studio.local", dnsName: nil, tailscaleIPs: [], os: nil, online: true), now: issuedAt)
+        let terminal = QuickConnectRecordingTerminal()
+        let model = OpenPawModel(hostStore: HostStore(), terminal: terminal)
+        let coordinator = QuickConnectCoordinator(model: model, installer: QuickConnectCountingInstaller(), now: { self.issuedAt })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForCoordinatorToSettle(coordinator)
+
+        #expect(coordinator.stage == .connected)
+        #expect(model.hostStore.hosts.count == 1)
+        #expect(model.hostStore.hosts[0].hostname == "studio.local")
+        #expect(terminal.connectedHosts == [model.hostStore.hosts[0].id])
+        #expect(coordinator.terminalRouteIntent == coordinator.currentLease)
+    }
+
+    @MainActor
+    @Test("QR persistence keeps displayed API port and confirmed host key when pairing fails")
+    func qrPersistsPortPinsAndTerminalIntentBeforePairFailure() async throws {
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+        let model = OpenPawModel(hostStore: HostStore(), terminal: QuickConnectRecordingTerminal())
+        let coordinator = QuickConnectCoordinator(model: model, installer: QuickConnectCountingInstaller(), now: { self.issuedAt })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForCoordinatorToSettle(coordinator)
+
+        guard case .failed = coordinator.stage else {
+            Issue.record("expected pairing failure without pairing backend")
+            return
+        }
+        let host = try #require(model.hostStore.hosts.only)
+        #expect(host.hostAPIPort == 4_317)
+        #expect(host.knownHosts.map(\.fingerprint) == proposal.hostKeys.map(\.fingerprint))
+        #expect(model.connection.isConnected)
+        #expect(coordinator.terminalRouteIntent != nil)
+    }
+
+    @MainActor
+    private func waitForCoordinatorToSettle(_ coordinator: QuickConnectCoordinator) async {
+        for _ in 0..<1_000 {
+            switch coordinator.stage {
+            case .connected, .failed, .cancelled: return
+            default: await Task.yield()
+            }
+        }
+        Issue.record("coordinator did not settle")
+    }
+
     private func expectDecodeError(_ error: QuickConnectLinkError, codec: QuickConnectLinkCodec, envelope: QuickConnectEnvelopeV1) throws {
         let complete = QuickConnectEnvelopeV1(
             version: envelope.version,
@@ -310,6 +398,41 @@ struct QuickConnectTests {
     private func iso(_ date: Date) -> String {
         ISO8601DateFormatter().string(from: date)
     }
+}
+
+private final class QuickConnectCountingInstaller: QuickConnectCredentialInstalling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var installCount: Int { lock.withLock { count } }
+    func install(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod {
+        lock.withLock { count += 1 }
+        switch choice {
+        case .existing(let auth): return auth
+        default: return .agentForwarding
+        }
+    }
+}
+
+private final class QuickConnectRecordingTerminal: TerminalBackend, @unchecked Sendable {
+    private let continuation: AsyncStream<ConnectionState>.Continuation
+    let stateStream: AsyncStream<ConnectionState>
+    let outputStream = AsyncStream<Data> { $0.finish() }
+    private(set) var connectedHosts: [HostRecord.ID] = []
+    init() {
+        var continuation: AsyncStream<ConnectionState>.Continuation!
+        stateStream = AsyncStream { continuation = $0 }
+        self.continuation = continuation
+    }
+    func connect(host: HostRecord) async throws { connectedHosts.append(host.id); continuation.yield(.connected(.ssh)) }
+    func disconnect() async { continuation.yield(.disconnected(reason: nil)) }
+    func send(text: String) async throws {}
+    func send(chord: KeyChord, applicationCursorKeys: Bool) async throws {}
+    func resize(columns: Int, rows: Int) async throws {}
+    func run(command: String) async throws -> String { "" }
+}
+
+private extension Array {
+    var only: Element? { count == 1 ? self[0] : nil }
 }
 
 private final class RecordingQuickConnectCredentialInstaller: QuickConnectCredentialInstalling, @unchecked Sendable {

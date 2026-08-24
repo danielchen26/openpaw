@@ -42,6 +42,37 @@ final class HostStoreTests: XCTestCase {
         XCTAssertEqual(restored.hosts[1].auth, .agentForwarding)
     }
 
+    func testHostAPIPortRoundTripsWhenPresent() throws {
+        var original = store()
+        original.hosts[0].hostAPIPort = 4_317
+
+        let restored = try HostStore.import(from: try original.export())
+
+        XCTAssertEqual(restored.hosts[0].hostAPIPort, 4_317)
+        XCTAssertTrue(String(decoding: try original.export(), as: UTF8.self).contains("\"host_api_port\" : 4317"))
+    }
+
+    func testLegacyHostWithoutHostAPIPortDecodesAsNil() throws {
+        let legacy = #"{"version":1,"hosts":[{"id":"2A2A2A2A-0000-4000-8000-000000000001","nickname":"legacy","hostname":"legacy.example.com","port":22,"username":"root","auth":{"method":"agent-forwarding"},"known_hosts":[],"tags":[]}]}"#
+
+        let restored = try HostStore.import(from: Data(legacy.utf8))
+
+        XCTAssertNil(restored.hosts[0].hostAPIPort)
+    }
+
+    func testHostAPIPortIsOptionalAndRoundTripsBackCompatibly() throws {
+        var original = store()
+        original.hosts[0].hostAPIPort = 4_317
+
+        let restored = try HostStore.import(from: try original.export())
+        XCTAssertEqual(restored.hosts[0].hostAPIPort, 4_317)
+        XCTAssertNil(restored.hosts[1].hostAPIPort)
+
+        let legacy = #"{"hosts":[{"auth":{"method":"agent-forwarding"},"hostname":"legacy","id":"2A2A2A2A-0000-4000-8000-000000000099","known_hosts":[],"nickname":"legacy","port":22,"tags":[],"username":"me"}],"version":1}"#
+        let decoded = try HostStore.import(from: Data(legacy.utf8))
+        XCTAssertNil(decoded.hosts[0].hostAPIPort)
+    }
+
     func testExportCarriesReferencesAndNeverKeyMaterial() throws {
         let json = String(decoding: try store().export(), as: UTF8.self)
 
