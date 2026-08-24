@@ -220,6 +220,20 @@ class QuickPairingLiveContractTests(unittest.TestCase):
         seed_block = source[source.index("let seedApp"):source.index("let app = XCUIApplication()")]
         self.assertNotIn("OPENPAW_DEBUG_PAIRING_PHASE_PORT", seed_block)
 
+    def test_generated_xcuitest_navigates_from_terminal_to_home_with_root_pager_fling(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            test_file = Path(directory) / "ConnectFlowUITests.swift"
+            test_file.write_text("final class ConnectFlowUITests {\n}\n", encoding="utf-8")
+
+            self.harness.append_live_xcuitest(test_file)
+            source = test_file.read_text(encoding="utf-8")
+
+        relaunch = source[source.index("app.terminate()") :]
+        self.assertNotIn('app.buttons["root.destination.home"]', relaunch)
+        self.assertIn("CGVector(dx: 0.18, dy: 0.18)", relaunch)
+        self.assertIn("CGVector(dx: 0.82, dy: 0.18)", relaunch)
+        self.assertIn('NSPredicate(format: "value == %@", "Home")', relaunch)
+
     def test_coordination_accepts_only_fixed_pairing_phase_whitelist(self) -> None:
         server = self.harness.CoordinationServer(
             0, "SIM-UDID", lambda: "openpaw://pair#v1.safe", self.harness.SecretSet()
@@ -436,10 +450,14 @@ class QuickPairingLiveContractTests(unittest.TestCase):
         terminal_surface = source.index(
             'XCTAssertTrue(app.textViews.firstMatch.waitForExistence(timeout: 15)', terminal_wait
         )
-        home = source.index('let home = app.buttons["root.destination.home"]', terminal_surface)
-        home_tap = source.index("home.tap()", home)
+        home_fling = source.index(
+            "CGVector(dx: 0.18, dy: 0.18)", terminal_surface
+        )
+        home_wait = source.index(
+            'predicate: NSPredicate(format: "value == %@", "Home")', home_fling
+        )
         workspace = source.index(
-            'app.buttons["Open repository workspace"].waitForExistence(timeout: 30)', home_tap
+            'app.buttons["Open repository workspace"].waitForExistence(timeout: 30)', home_wait
         )
         persisted = source.index('notify("/persisted")', workspace)
 
@@ -447,11 +465,12 @@ class QuickPairingLiveContractTests(unittest.TestCase):
         self.assertLess(resume_wait, resume_tap)
         self.assertLess(resume_tap, terminal_wait)
         self.assertLess(terminal_wait, terminal_surface)
-        self.assertLess(terminal_surface, home)
-        self.assertLess(home, home_tap)
-        self.assertLess(home_tap, workspace)
+        self.assertLess(terminal_surface, home_fling)
+        self.assertLess(home_fling, home_wait)
+        self.assertLess(home_wait, workspace)
         self.assertLess(workspace, persisted)
         self.assertNotIn('app.buttons["root.destination.terminal"].tap()', source)
+        self.assertNotIn('app.buttons["root.destination.home"]', source)
 
     def test_xcodebuild_is_registered_for_signal_cleanup_and_failures_report_checkpoints(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

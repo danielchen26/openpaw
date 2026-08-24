@@ -687,9 +687,15 @@ def append_live_xcuitest(test_file: Path) -> None:
             predicate: NSPredicate(format: "value == %@", "Terminal"), object: pager)
         XCTAssertEqual(XCTWaiter.wait(for: [reselected], timeout: 60), .completed, app.debugDescription)
         XCTAssertTrue(app.textViews.firstMatch.waitForExistence(timeout: 15), app.debugDescription)
-        let home = app.buttons["root.destination.home"]
-        XCTAssertTrue(home.waitForExistence(timeout: 15), app.debugDescription)
-        home.tap()
+        let window = app.windows.firstMatch
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.18))
+            .press(
+                forDuration: 0.05,
+                thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.18))
+            )
+        let homeSelected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Home"), object: pager)
+        XCTAssertEqual(XCTWaiter.wait(for: [homeSelected], timeout: 15), .completed, app.debugDescription)
         XCTAssertTrue(app.buttons["Open repository workspace"].waitForExistence(timeout: 30), app.debugDescription)
         notify("/persisted")
     }
