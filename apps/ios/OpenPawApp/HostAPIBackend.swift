@@ -113,27 +113,42 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
     /// replayed request is rejected on the nonce.
     @discardableResult
     func pair(pairingCode: String, deviceName: String) async throws -> PairingResult {
-        let client = try await state.requireClient()
-        guard let hostID = activeHostID.get() else { throw HostClientError.transport(URLError(.notConnectedToInternet)) }
-        let epoch = lifecycleEpoch.get()
-        let result = try await client.pair(
-            pairingCode: pairingCode,
-            deviceName: deviceName,
-            platform: "ios"
-        )
-        guard let signer = result.signer else {
-            throw HostClientError.decoding(
-                DecodingError.dataCorrupted(
-                    .init(codingPath: [], debugDescription: "the host sent an HMAC key this build cannot read")
-                )
+        let client = try await state.beginPairing()
+        do {
+            guard let hostID = activeHostID.get() else { throw HostClientError.transport(URLError(.notConnectedToInternet)) }
+            let epoch = lifecycleEpoch.get()
+
+            // The simulator can drop the first URLSession request made over a freshly opened loopback tunnel. A pairing
+            // code is single-use, so it must never be that sacrificial request. Health is unauthenticated and idempotent;
+            // its result is deliberately ignored, then ownership is revalidated before the code leaves this device.
+            _ = try? await client.health()
+            try Task.checkCancellation()
+            guard activeHostID.get() == hostID, lifecycleEpoch.get() == epoch, await state.client === client else {
+                throw HostClientError.transport(URLError(.cancelled))
+            }
+            let result = try await client.pair(
+                pairingCode: pairingCode,
+                deviceName: deviceName,
+                platform: "ios"
             )
+            guard let signer = result.signer else {
+                throw HostClientError.decoding(
+                    DecodingError.dataCorrupted(
+                        .init(codingPath: [], debugDescription: "the host sent an HMAC key this build cannot read")
+                    )
+                )
+            }
+            guard activeHostID.get() == hostID, lifecycleEpoch.get() == epoch, await state.client === client else {
+                throw HostClientError.transport(URLError(.cancelled))
+            }
+            try credentials.save(result, hostID: hostID)
+            await client.setSigner(signer)
+            await state.endPairing(client: client)
+            return result
+        } catch {
+            await state.endPairing(client: client)
+            throw error
         }
-        guard activeHostID.get() == hostID, lifecycleEpoch.get() == epoch, await state.client === client else {
-            throw HostClientError.transport(URLError(.cancelled))
-        }
-        try credentials.save(result, hostID: hostID)
-        await client.setSigner(signer)
-        return result
     }
 
     /// Forgets the pairing on this device. The host keeps its own record until the user revokes it there, which is
@@ -286,14 +301,30 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
     /// The client, replaced whenever the tunnel is rebuilt on a new local port.
     private actor State {
         var client: HostClient?
+        private var pairingClient: HostClient?
 
         func install(client: HostClient?) {
             self.client = client
+            pairingClient = nil
         }
 
         func requireClient() throws -> HostClient {
             guard let client else { throw HostClientError.transport(URLError(.networkConnectionLost)) }
             return client
+        }
+
+        func beginPairing() throws -> HostClient {
+            guard let client else { throw HostClientError.transport(URLError(.networkConnectionLost)) }
+            guard pairingClient == nil else {
+                throw HostClientError.badRequest("Pairing is already in progress")
+            }
+            pairingClient = client
+            return client
+        }
+
+        func endPairing(client: HostClient) {
+            guard pairingClient === client else { return }
+            pairingClient = nil
         }
     }
 }

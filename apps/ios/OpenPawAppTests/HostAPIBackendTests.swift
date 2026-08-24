@@ -55,6 +55,117 @@ final class HostAPIBackendTests: XCTestCase {
         XCTAssertNotNil(credentials.signers[hostA])
     }
 
+    func testPairSacrificesAHealthWarmupBeforeSendingTheSingleUseCode() async throws {
+        let hostID = HostRecord.ID()
+        let credentials = FakeCredentialStore()
+        let backend = HostAPIBackend(
+            forwarder: FakeForwarder(port: 49_326),
+            credentials: credentials,
+            urlSession: Self.stubSession())
+        let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
+        StubURLProtocol.outcomes = [
+            .failure(URLError(.networkConnectionLost)),
+            .response(200, Data(#"{"device_id":"dev_warm","token":"tok_warm","hmac_key_b64":"\#(key)","capabilities":["devices.read"]}"#.utf8)),
+        ]
+
+        try await backend.connect(hostID: hostID)
+        let result = try await backend.pair(pairingCode: "single-use", deviceName: "iPhone")
+
+        XCTAssertEqual(result.deviceID, "dev_warm")
+        XCTAssertEqual(credentials.savedHostIDs, [hostID])
+        XCTAssertEqual(StubURLProtocol.recordedRequestPaths, ["/v1/health", "/v1/pair"])
+    }
+
+    func testPairCancellationDuringHealthWarmupNeverSendsTheSingleUseCode() async throws {
+        let hostID = HostRecord.ID()
+        let gate = DispatchSemaphore(value: 0)
+        let backend = HostAPIBackend(
+            forwarder: FakeForwarder(port: 49_327),
+            credentials: FakeCredentialStore(),
+            urlSession: Self.stubSession())
+        StubURLProtocol.outcomes = [
+            .responseAfter(gate, 200, Data(#"{"version":"fixture","protocol_version":"1.0","agents":[],"capabilities":[],"preview_ports":[],"adapter_versions":{}}"#.utf8)),
+            .response(500, Data()),
+        ]
+
+        try await backend.connect(hostID: hostID)
+        let pairing = Task {
+            try await backend.pair(pairingCode: "must-not-leave", deviceName: "iPhone")
+        }
+        for _ in 0..<10_000 where StubURLProtocol.recordedRequestPaths != ["/v1/health"] {
+            await Task.yield()
+        }
+        XCTAssertEqual(StubURLProtocol.recordedRequestPaths, ["/v1/health"])
+
+        pairing.cancel()
+        gate.signal()
+        do {
+            _ = try await pairing.value
+            XCTFail("cancelled pairing unexpectedly completed")
+        } catch is CancellationError {
+            // Expected: cancellation is observed before the single-use code is sent.
+        } catch {
+            XCTFail("expected CancellationError, got \(type(of: error))")
+        }
+
+        XCTAssertEqual(StubURLProtocol.recordedRequestPaths, ["/v1/health"])
+    }
+
+    func testConcurrentPairCallsRedeemTheSingleUseCodeAtMostOnce() async throws {
+        let hostID = HostRecord.ID()
+        let healthGate = DispatchSemaphore(value: 0)
+        let firstRequestStarted = DispatchSemaphore(value: 0)
+        let secondRequestStarted = DispatchSemaphore(value: 0)
+        let backend = HostAPIBackend(
+            forwarder: FakeForwarder(port: 49_328),
+            credentials: FakeCredentialStore(),
+            urlSession: Self.stubSession())
+        let health = Data(#"{"version":"fixture","protocol_version":"1.0","agents":[],"capabilities":[],"preview_ports":[],"adapter_versions":{}}"#.utf8)
+        let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
+        let paired = Data(#"{"device_id":"dev_once","token":"tok_once","hmac_key_b64":"\#(key)","capabilities":[]}"#.utf8)
+        StubURLProtocol.outcomes = [
+            .responseAfter(healthGate, 200, health),
+            .response(200, paired),
+        ]
+        StubURLProtocol.requestStartSignals = [firstRequestStarted, secondRequestStarted]
+
+        try await backend.connect(hostID: hostID)
+        let first = Task { try await backend.pair(pairingCode: "single-use", deviceName: "First") }
+        XCTAssertEqual(firstRequestStarted.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(StubURLProtocol.recordedRequestPaths, ["/v1/health"])
+        let second = Task { try await backend.pair(pairingCode: "single-use", deviceName: "Second") }
+        XCTAssertEqual(secondRequestStarted.wait(timeout: .now() + 0.5), .timedOut)
+
+        healthGate.signal()
+        var successes = 0
+        for operation in [first, second] {
+            do {
+                _ = try await operation.value
+                successes += 1
+            } catch {}
+        }
+
+        XCTAssertEqual(successes, 1)
+        XCTAssertEqual(StubURLProtocol.recordedRequestPaths, ["/v1/health", "/v1/pair"])
+    }
+
+    func testDeviceCredentialStoreRoundTripsRealPairingResultInKeychain() throws {
+        let hostID = HostRecord.ID()
+        let store = DeviceCredentialStore(service: "dev.openpaw.tests.pairing.\(UUID().uuidString)")
+        let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
+        let result = PairingResult(
+            deviceID: "dev_keychain",
+            token: "token-keychain",
+            hmacKeyB64: key,
+            capabilities: ["devices.read"])
+        defer { try? store.clear(hostID: hostID) }
+
+        try store.save(result, hostID: hostID)
+
+        XCTAssertEqual(store.loadSigner(hostID: hostID), result.signer)
+        XCTAssertEqual(store.loadCapabilities(hostID: hostID), ["devices.read"])
+    }
+
     func testConnectFailureClearsActiveHostClientAndTunnel() async throws {
         let host = HostRecord.ID()
         let credentials = FakeCredentialStore(signers: [host: signer(deviceID: "a")])
@@ -185,12 +296,30 @@ private final class FakeCredentialStore: DeviceCredentialStoring, @unchecked Sen
 }
 
 private final class StubURLProtocol: URLProtocol {
+    enum Outcome {
+        case response(Int, Data)
+        case responseAfter(DispatchSemaphore, Int, Data)
+        case failure(any Error)
+    }
+
     static let lock = NSLock()
     static var response: (status: Int, body: Data) = (200, Data())
+    static var outcomes: [Outcome] = []
+    static var requestPaths: [String] = []
+    static var requestStartSignals: [DispatchSemaphore] = []
+
+    static var recordedRequestPaths: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestPaths
+    }
 
     static func reset() {
         lock.lock()
         response = (200, Data())
+        outcomes = []
+        requestPaths = []
+        requestStartSignals = []
         lock.unlock()
     }
 
@@ -199,12 +328,28 @@ private final class StubURLProtocol: URLProtocol {
 
     override func startLoading() {
         Self.lock.lock()
-        let response = Self.response
+        Self.requestPaths.append(request.url?.path ?? "")
+        let requestStartSignal = Self.requestStartSignals.isEmpty ? nil : Self.requestStartSignals.removeFirst()
+        let outcome = Self.outcomes.isEmpty
+            ? Outcome.response(Self.response.status, Self.response.body)
+            : Self.outcomes.removeFirst()
         Self.lock.unlock()
-        let http = HTTPURLResponse(url: request.url!, statusCode: response.status, httpVersion: nil, headerFields: nil)!
-        client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: response.body)
-        client?.urlProtocolDidFinishLoading(self)
+        requestStartSignal?.signal()
+        switch outcome {
+        case .response(let status, let body):
+            let http = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: body)
+            client?.urlProtocolDidFinishLoading(self)
+        case .responseAfter(let gate, let status, let body):
+            gate.wait()
+            let http = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: body)
+            client?.urlProtocolDidFinishLoading(self)
+        case .failure(let error):
+            client?.urlProtocol(self, didFailWithError: error)
+        }
     }
 
     override func stopLoading() {}
