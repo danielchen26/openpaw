@@ -28,6 +28,7 @@ pub mod audit;
 pub mod auth;
 pub mod bus;
 pub mod config;
+pub mod pairing_link;
 pub mod state;
 pub mod supervisor;
 pub mod uploads;

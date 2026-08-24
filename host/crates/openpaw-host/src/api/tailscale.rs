@@ -201,6 +201,17 @@ pub struct TailscaleDeviceCandidate {
     pub last_seen: Option<String>,
 }
 
+/// Sanitized metadata for the local Tailscale node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailscaleSelfNode {
+    /// Human-readable local host name.
+    pub display_name: String,
+    /// Optional MagicDNS/FQDN name.
+    pub dns_name: Option<String>,
+    /// Normalized Tailscale IP addresses.
+    pub tailscale_ips: Vec<String>,
+}
+
 /// Route handler for `GET /v1/tailscale/devices`.
 pub async fn devices(
     axum::extract::State(app): axum::extract::State<crate::AppState>,
@@ -293,6 +304,30 @@ pub fn parse_status_json(bytes: &[u8]) -> Result<TailscaleDevicesResponse, Tails
     Ok(TailscaleDevicesResponse {
         version: 1,
         candidates,
+    })
+}
+
+/// Parse `tailscale status --json` and return sanitized local `Self` node metadata.
+pub fn parse_self_node(bytes: &[u8]) -> Result<TailscaleSelfNode, TailscaleParseError> {
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|e| TailscaleParseError::Malformed(e.to_string()))?;
+    let backend_state = backend_state(&value)?;
+    if backend_state != BackendState::Running {
+        return Err(TailscaleParseError::Unavailable(
+            TailscaleUnavailable::logged_out(),
+        ));
+    }
+    let node = value
+        .get("Self")
+        .or_else(|| value.get("self"))
+        .ok_or_else(|| {
+            TailscaleParseError::Malformed("tailscale status is missing Self".to_owned())
+        })?;
+    let candidate = candidate_from_peer(node)?;
+    Ok(TailscaleSelfNode {
+        display_name: candidate.display_name,
+        dns_name: candidate.dns_name,
+        tailscale_ips: candidate.tailscale_ips,
     })
 }
 

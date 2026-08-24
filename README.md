@@ -85,10 +85,18 @@ Install the agent hooks so approvals reach your phone instead of only your termi
 ```sh
 ./target/release/openpaw-host pairing-code
 # ABCD-EFGH-IJKL-MNOP-QRST-UVWX   (valid 5 minutes)
+
+# Or show a local Quick Connect QR and copyable link.
+./target/release/openpaw-host pair --name "Daniel's iPhone" --qr
 ```
 
-Add the host in the app, then paste the code. The app forwards `127.0.0.1:8787` over its own SSH connection —
-nothing is published to a network interface, and no cloud service is involved.
+Add the host in the app, then paste the code or scan the QR. Quick Connect links
+contain only local SSH target metadata, optional host-key fingerprints, and the
+same five-minute single-use pairing code. They never include passwords, private
+keys, hook tokens, bearer tokens, HMAC keys, or commands. The app still asks you
+to confirm the SSH credential. It forwards `127.0.0.1:8787` over its own SSH
+connection; nothing is published to a network interface, and no cloud service is
+involved.
 
 ### 3. Build the app
 

@@ -12,6 +12,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use openpaw_host::api::pair::IssueResponse;
 use openpaw_host::auth::{HOOK_TOKEN_HEADER, Profile};
+use openpaw_host::pairing_link::{self, PairingLinkOptions};
 use openpaw_host::{AppState, Config, config, state, supervisor};
 use tracing_subscriber::EnvFilter;
 
@@ -99,6 +100,26 @@ enum Command {
         /// Capability profile to grant.
         #[arg(long, default_value = "operator")]
         profile: Profile,
+
+        /// Print a Quick Connect QR to stderr and link to stdout.
+        #[arg(long)]
+        qr: bool,
+
+        /// Override proposed SSH host.
+        #[arg(long)]
+        ssh_host: Option<String>,
+
+        /// Override proposed SSH username.
+        #[arg(long)]
+        ssh_user: Option<String>,
+
+        /// Override proposed SSH port.
+        #[arg(long)]
+        ssh_port: Option<u16>,
+
+        /// Optional SSH host public-key file to fingerprint.
+        #[arg(long)]
+        host_key_public_file: Option<PathBuf>,
     },
 
     /// Mint an unnamed pairing code and print it.
@@ -106,6 +127,26 @@ enum Command {
         /// Capability profile to grant.
         #[arg(long, default_value = "operator")]
         profile: Profile,
+
+        /// Print a Quick Connect QR to stderr and link to stdout.
+        #[arg(long)]
+        qr: bool,
+
+        /// Override proposed SSH host.
+        #[arg(long)]
+        ssh_host: Option<String>,
+
+        /// Override proposed SSH username.
+        #[arg(long)]
+        ssh_user: Option<String>,
+
+        /// Override proposed SSH port.
+        #[arg(long)]
+        ssh_port: Option<u16>,
+
+        /// Optional SSH host public-key file to fingerprint.
+        #[arg(long)]
+        host_key_public_file: Option<PathBuf>,
     },
 
     /// Print the resolved configuration and state paths.
@@ -130,11 +171,38 @@ async fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => serve(&state_dir, &cli.overrides).await,
-        Command::Pair { name, profile } => {
-            request_code(&state_dir, &cli.overrides, Some(name), profile).await
+        Command::Pair {
+            name,
+            profile,
+            qr,
+            ssh_host,
+            ssh_user,
+            ssh_port,
+            host_key_public_file,
+        } => {
+            let link = PairingLinkOptions {
+                ssh_host,
+                ssh_user,
+                ssh_port,
+                host_key_public_file,
+            };
+            request_code(&state_dir, &cli.overrides, Some(name), profile, qr, link).await
         }
-        Command::PairingCode { profile } => {
-            request_code(&state_dir, &cli.overrides, None, profile).await
+        Command::PairingCode {
+            profile,
+            qr,
+            ssh_host,
+            ssh_user,
+            ssh_port,
+            host_key_public_file,
+        } => {
+            let link = PairingLinkOptions {
+                ssh_host,
+                ssh_user,
+                ssh_port,
+                host_key_public_file,
+            };
+            request_code(&state_dir, &cli.overrides, None, profile, qr, link).await
         }
         Command::Doctor => doctor(&state_dir, &cli.overrides),
     }
@@ -239,6 +307,8 @@ async fn request_code(
     overrides: &Overrides,
     name: Option<String>,
     profile: Profile,
+    qr: bool,
+    link_options: PairingLinkOptions,
 ) -> Result<()> {
     let mut config = Config::load(state_dir)?;
     overrides.apply(&mut config);
@@ -283,9 +353,46 @@ async fn request_code(
     let issued: IssueResponse =
         serde_json::from_slice(&bytes).context("parsing the pairing-code response")?;
 
-    // The code is the machine-readable output and goes to stdout, alone, so
-    // `openpaw-host pairing-code | pbcopy` does the obvious thing. Everything a
-    // human wants to read goes to stderr, where it cannot corrupt a pipe.
+    // Without --qr, stdout remains exactly the code plus newline, so
+    // `openpaw-host pairing-code | pbcopy` stays byte-for-byte compatible.
+    if qr {
+        let tailscale = openpaw_host::api::tailscale::default_runner()
+            .status_json()
+            .await
+            .ok();
+        let hostname = pairing_link::probe_hostname().await.ok();
+        let link = pairing_link::build_pairing_link(
+            &issued.code,
+            &link_options,
+            tailscale.as_deref(),
+            hostname.as_deref(),
+            pairing_link::current_username().as_deref(),
+            time::OffsetDateTime::now_utc(),
+        )?;
+
+        eprintln!();
+        eprintln!("  OpenPaw Quick Connect");
+        eprintln!("  Profile:   {:?}", issued.profile);
+        eprintln!("  SSH user:  {}", link.envelope.username);
+        eprintln!("  Targets:");
+        for target in &link.envelope.targets {
+            eprintln!(
+                "    - {}:{} ({:?})",
+                target.hostname, target.port, target.source
+            );
+        }
+        eprintln!(
+            "  Valid for: {} minutes (until {})",
+            issued.expires_in_seconds / 60,
+            issued.expires_at
+        );
+        eprintln!();
+        eprintln!("{}", pairing_link::render_terminal_qr(&link.url));
+        println!("{}", link.url);
+        return Ok(());
+    }
+
+    // The code is the machine-readable output and goes to stdout, alone.
     eprintln!();
     eprintln!("  Profile:   {:?}", issued.profile);
     eprintln!(
@@ -298,7 +405,7 @@ async fn request_code(
         config.port
     );
     eprintln!();
-    println!("{}", issued.code);
+    print!("{}", pairing_link::code_stdout(&issued.code));
     Ok(())
 }
 
