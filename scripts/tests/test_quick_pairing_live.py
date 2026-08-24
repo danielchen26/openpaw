@@ -358,6 +358,42 @@ class QuickPairingLiveContractTests(unittest.TestCase):
         self.assertIn('app.open(pairingURL())', source)
         self.assertNotIn('XCUIApplication(bundleIdentifier: "com.apple.springboard")', source)
 
+    def test_generated_live_test_accepts_automatic_or_manual_resume_before_proving_keychain_signer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            test_file = Path(directory) / "ConnectFlowUITests.swift"
+            test_file.write_text(
+                "import XCTest\n\nfinal class ConnectFlowUITests: XCTestCase {\n}\n",
+                encoding="utf-8",
+            )
+
+            self.harness.append_live_xcuitest(test_file)
+            source = test_file.read_text(encoding="utf-8")
+
+        self.assertIn('if (pager.value as? String) != "Terminal" {', source)
+        conditional_resume = source.index('if (pager.value as? String) != "Terminal" {')
+        resume_wait = source.index('XCTAssertTrue(resume.waitForExistence(timeout: 60)', conditional_resume)
+        resume_tap = source.index("resume.tap()", resume_wait)
+        terminal_wait = source.index('predicate: NSPredicate(format: "value == %@", "Terminal")', resume_tap)
+        terminal_surface = source.index(
+            'XCTAssertTrue(app.textViews.firstMatch.waitForExistence(timeout: 15)', terminal_wait
+        )
+        home = source.index('let home = app.buttons["root.destination.home"]', terminal_surface)
+        home_tap = source.index("home.tap()", home)
+        workspace = source.index(
+            'app.buttons["Open repository workspace"].waitForExistence(timeout: 30)', home_tap
+        )
+        persisted = source.index('notify("/persisted")', workspace)
+
+        self.assertLess(conditional_resume, resume_wait)
+        self.assertLess(resume_wait, resume_tap)
+        self.assertLess(resume_tap, terminal_wait)
+        self.assertLess(terminal_wait, terminal_surface)
+        self.assertLess(terminal_surface, home)
+        self.assertLess(home, home_tap)
+        self.assertLess(home_tap, workspace)
+        self.assertLess(workspace, persisted)
+        self.assertNotIn('app.buttons["root.destination.terminal"].tap()', source)
+
     def test_xcodebuild_is_registered_for_signal_cleanup_and_failures_report_checkpoints(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
 

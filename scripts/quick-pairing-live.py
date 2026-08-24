@@ -659,8 +659,18 @@ def append_live_xcuitest(test_file: Path) -> None:
         app.launch()
         let connect = app.buttons["Connect to Debug daemon"]
         if connect.waitForExistence(timeout: 10) { connect.tap() }
-        let resume = app.buttons["Resume Debug daemon"]
-        XCTAssertTrue(resume.waitForExistence(timeout: 60), app.debugDescription)
+        if (pager.value as? String) != "Terminal" {
+            let resume = app.buttons["Resume Debug daemon"]
+            XCTAssertTrue(resume.waitForExistence(timeout: 60), app.debugDescription)
+            resume.tap()
+        }
+        let reselected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Terminal"), object: pager)
+        XCTAssertEqual(XCTWaiter.wait(for: [reselected], timeout: 60), .completed, app.debugDescription)
+        XCTAssertTrue(app.textViews.firstMatch.waitForExistence(timeout: 15), app.debugDescription)
+        let home = app.buttons["root.destination.home"]
+        XCTAssertTrue(home.waitForExistence(timeout: 15), app.debugDescription)
+        home.tap()
         XCTAssertTrue(app.buttons["Open repository workspace"].waitForExistence(timeout: 30), app.debugDescription)
         notify("/persisted")
     }
