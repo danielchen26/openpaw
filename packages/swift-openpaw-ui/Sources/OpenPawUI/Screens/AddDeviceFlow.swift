@@ -76,9 +76,19 @@ public struct AddDeviceFlowState: Sendable, Hashable {
     private var editDetailsReturnStep: AddDeviceFlowStep = .welcome
     private var candidateListReturnStep: AddDeviceFlowStep = .tailscaleCandidates
 
-    public init(hosts: [HostRecord], discovered: [AddDeviceCandidate] = []) {
+    public init(
+        hosts: [HostRecord],
+        discovered: [AddDeviceCandidate] = [],
+        initiallySelectedCandidateID: AddDeviceCandidate.ID? = nil
+    ) {
         self.step = .welcome
         self.discovered = discovered
+        if let initiallySelectedCandidateID,
+           let candidate = discovered.first(where: { $0.id == initiallySelectedCandidateID }) {
+            selectedCandidate = candidate
+            candidateListReturnStep = .tailscaleCandidates
+            step = .confirmCandidate
+        }
     }
 
     public mutating func startTailscaleDiscovery() {
@@ -174,13 +184,18 @@ public struct AddDeviceFlow: View {
         model: OpenPawModel,
         settings: OpenPawSettings,
         candidates: [AddDeviceCandidate] = [],
+        initiallySelectedCandidateID: AddDeviceCandidate.ID? = nil,
         onDismiss: @escaping () -> Void
     ) {
         self.model = model
         self.settings = settings
         self.candidates = candidates
         self.onDismiss = onDismiss
-        _state = State(initialValue: AddDeviceFlowState(hosts: model.hostStore.hosts, discovered: candidates))
+        _state = State(initialValue: AddDeviceFlowState(
+            hosts: model.hostStore.hosts,
+            discovered: candidates,
+            initiallySelectedCandidateID: initiallySelectedCandidateID
+        ))
     }
 
     @_spi(SnapshotTesting) public init(

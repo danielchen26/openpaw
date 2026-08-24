@@ -96,6 +96,46 @@ struct HomeTailnetBootstrapTests {
         )
     }
 
+    @Test("Home exposes every automatically loaded Tailnet candidate as a visible device row")
+    func homeShowsAutomaticallyLoadedCandidateRows() {
+        let first = AddDeviceCandidate(
+            id: "node-1",
+            nickname: "Build Mac",
+            hostname: "build.example.ts.net",
+            source: .tailscaleAdministrator
+        )
+        let second = AddDeviceCandidate(
+            id: "node-2",
+            nickname: "Office Mac",
+            hostname: "office.example.ts.net",
+            source: .tailscaleAdministrator
+        )
+
+        #expect(
+            WorkspaceHomeCandidateSelection.visibleRows(explicit: [first], bootstrap: [first, second])
+                .map(\.id) == ["node-1", "node-2"]
+        )
+    }
+
+    @Test("Tapping a Home Tailnet device opens that candidate directly for review")
+    func homeCandidateStartsDirectReview() {
+        let candidate = AddDeviceCandidate(
+            id: "node-1",
+            nickname: "Build Mac",
+            hostname: "build.example.ts.net",
+            source: .tailscaleAdministrator
+        )
+
+        let state = AddDeviceFlowState(
+            hosts: [],
+            discovered: [candidate],
+            initiallySelectedCandidateID: candidate.id
+        )
+
+        #expect(state.step == .confirmCandidate)
+        #expect(state.selectedCandidate == candidate)
+    }
+
     @MainActor
     @Test("Home probes the fixed local Tailscale identity endpoint even when the route hint misses it")
     func localIdentityDoesNotDependOnTheHeuristicRouteHint() async {

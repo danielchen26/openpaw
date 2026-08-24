@@ -18,6 +18,13 @@ public enum WorkspaceHomeCandidateSelection {
         var seen = Set<String>()
         return (explicit + bootstrap).filter { seen.insert($0.id).inserted }
     }
+
+    public static func visibleRows(
+        explicit: [AddDeviceCandidate],
+        bootstrap: [AddDeviceCandidate]
+    ) -> [AddDeviceCandidate] {
+        merge(explicit: explicit, bootstrap: bootstrap)
+    }
 }
 
 @MainActor
@@ -30,6 +37,7 @@ public struct WorkspaceHomeView: View {
     private let onOpenApproval: (String) -> Void
     private let onOpenRepository: (String) -> Void
     @State private var isAdding = false
+    @State private var selectedTailnetCandidateID: AddDeviceCandidate.ID?
     @State private var isShowingProviderImport = false
     @Environment(\.scenePhase) private var scenePhase
 
@@ -64,11 +72,12 @@ public struct WorkspaceHomeView: View {
                 AddDeviceFlow(
                     model: model,
                     settings: settings,
-                    candidates: WorkspaceHomeCandidateSelection.merge(
-                        explicit: candidates,
-                        bootstrap: model.homeTailnetBootstrap.candidates
-                    )
-                ) { isAdding = false }
+                    candidates: visibleTailnetCandidates,
+                    initiallySelectedCandidateID: selectedTailnetCandidateID
+                ) {
+                    selectedTailnetCandidateID = nil
+                    isAdding = false
+                }
             }
         }
         .sheet(isPresented: $isShowingProviderImport) {
@@ -150,6 +159,7 @@ public struct WorkspaceHomeView: View {
 
     private var tailnetBootstrapPanel: some View {
         let state = model.homeTailnetBootstrap
+        let visibleCandidates = visibleTailnetCandidates
         return Panel {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
                 Text("tailnet / local identity / candidates")
@@ -162,7 +172,22 @@ public struct WorkspaceHomeView: View {
                     .font(OpenPawTheme.Human.prose)
                     .foregroundStyle(OpenPawTheme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button(state.candidateCount > 0 ? "Review \(state.candidateCount) candidate\(state.candidateCount == 1 ? "" : "s")" : "Review candidates") {
+                if !visibleCandidates.isEmpty {
+                    VStack(spacing: OpenPawTheme.Space.small) {
+                        ForEach(visibleCandidates) { candidate in
+                            Button {
+                                selectedTailnetCandidateID = candidate.id
+                                isAdding = true
+                            } label: {
+                                tailnetCandidateRow(candidate)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(candidate.accessibilityLabel)
+                        }
+                    }
+                }
+                Button(visibleCandidates.isEmpty ? "Review candidates" : "Add another device") {
+                    selectedTailnetCandidateID = nil
                     isAdding = true
                 }
                 .disabled(state.phase == .loading)
@@ -170,9 +195,47 @@ public struct WorkspaceHomeView: View {
                 .buttonStyle(.borderedProminent)
             }
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("Tailnet discovery")
         .accessibilityValue(tailnetBootstrapDetail(state))
+    }
+
+    private var visibleTailnetCandidates: [AddDeviceCandidate] {
+        WorkspaceHomeCandidateSelection.visibleRows(
+            explicit: candidates,
+            bootstrap: model.homeTailnetBootstrap.candidates
+        )
+    }
+
+    private func tailnetCandidateRow(_ candidate: AddDeviceCandidate) -> some View {
+        HStack(spacing: OpenPawTheme.Space.medium) {
+            Circle()
+                .fill(candidate.online ? OpenPawTheme.ok : OpenPawTheme.textTertiary)
+                .frame(width: 10, height: 10)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+                Text(candidate.nickname)
+                    .font(OpenPawTheme.Machine.body)
+                    .foregroundStyle(OpenPawTheme.textPrimary)
+                    .lineLimit(1)
+                Text(candidate.dnsName ?? candidate.hostname)
+                    .font(OpenPawTheme.Machine.code)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Text(candidate.online ? "Online" : "Offline")
+                .font(OpenPawTheme.Human.caption)
+                .foregroundStyle(candidate.online ? OpenPawTheme.ok : OpenPawTheme.textTertiary)
+            Image(systemName: "chevron.right")
+                .foregroundStyle(OpenPawTheme.textTertiary)
+                .accessibilityHidden(true)
+        }
+        .padding(OpenPawTheme.Space.medium)
+        .frame(minHeight: 52)
+        .background(OpenPawTheme.graphite)
+        .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card).stroke(OpenPawTheme.lineStrong))
     }
 
     private func tailnetBootstrapDetail(_ state: HomeTailnetBootstrapState) -> String {
