@@ -191,6 +191,46 @@ impl Harness {
         self.app.audit.tail(100).await.expect("audit tail")
     }
 
+    async fn issue_pairing_code(&self) -> String {
+        let response = self
+            .client
+            .post(format!("{}/v1/pairing-code", self.base))
+            .header(auth::HOOK_TOKEN_HEADER, self.app.store.hook_token())
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("issue pairing code");
+        assert_eq!(response.status(), 200);
+        response
+            .json::<Value>()
+            .await
+            .expect("pairing code response")["code"]
+            .as_str()
+            .expect("pairing code")
+            .to_owned()
+    }
+
+    fn pair_request(
+        &self,
+        pairing_code: &str,
+        device_name: &str,
+        platform: &str,
+        idempotency_key: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let request = self
+            .client
+            .post(format!("{}/v1/pair", self.base))
+            .json(&json!({
+                "pairing_code": pairing_code,
+                "device_name": device_name,
+                "platform": platform,
+            }));
+        match idempotency_key {
+            Some(key) => request.header("x-openpaw-idempotency-key", key),
+            None => request,
+        }
+    }
+
     fn break_audit_path(&self) {
         let path = self.app.audit.path().to_path_buf();
         let _ = std::fs::remove_file(&path);
@@ -241,6 +281,10 @@ fn enroll(app: &AppState, device_id: &str, profile: Profile) -> Creds {
             .decode(hmac_key_b64)
             .expect("hmac key"),
     }
+}
+
+fn pairing_idempotency_key(byte: u8) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([byte; 32])
 }
 
 fn session() -> SessionId {
@@ -2471,6 +2515,216 @@ async fn pairing_needs_a_code_and_the_code_comes_from_the_running_daemon() {
         entries.iter().any(|entry| entry.action == "device.pair"),
         "{entries:?}"
     );
+}
+
+#[tokio::test]
+async fn pairing_idempotency_replays_identical_credentials_without_side_effects() {
+    let harness = Harness::boot().await;
+    let code = harness.issue_pairing_code().await;
+    let key = pairing_idempotency_key(1);
+    let devices_before = harness.app.store.devices().len();
+
+    let first = harness
+        .pair_request(&code.to_lowercase(), " iPad ", " ios ", Some(&key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200);
+    let first: Value = first.json().await.unwrap();
+    let audit_after_first = harness.audit_entries().await;
+
+    let replay = harness
+        .pair_request(&code.replace('-', ""), "iPad", "ios", Some(&key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), 200);
+    assert_eq!(replay.json::<Value>().await.unwrap(), first);
+    assert_eq!(harness.app.store.devices().len(), devices_before + 1);
+    assert_eq!(harness.audit_entries().await, audit_after_first);
+}
+
+#[tokio::test]
+async fn pairing_idempotency_rejects_a_key_reused_for_another_fingerprint() {
+    let harness = Harness::boot().await;
+    let code = harness.issue_pairing_code().await;
+    let key = pairing_idempotency_key(2);
+
+    let first = harness
+        .pair_request(&code, "iPad", "ios", Some(&key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200);
+    let devices_after_first = harness.app.store.devices().len();
+    let audit_after_first = harness.audit_entries().await;
+
+    let conflict = harness
+        .pair_request(&code, "iPad", "android", Some(&key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), 409);
+    assert_eq!(harness.app.store.devices().len(), devices_after_first);
+    assert_eq!(harness.audit_entries().await, audit_after_first);
+}
+
+#[tokio::test]
+async fn pairing_idempotency_does_not_recover_a_consumed_code_under_another_key() {
+    let harness = Harness::boot().await;
+    let code = harness.issue_pairing_code().await;
+
+    let first = harness
+        .pair_request(&code, "iPad", "ios", Some(&pairing_idempotency_key(3)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200);
+    let devices_after_first = harness.app.store.devices().len();
+    let audit_after_first = harness.audit_entries().await.len();
+
+    let replay = harness
+        .pair_request(&code, "iPad", "ios", Some(&pairing_idempotency_key(4)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), 403);
+    assert_eq!(harness.app.store.devices().len(), devices_after_first);
+    let audit = harness.audit_entries().await;
+    assert_eq!(audit.len(), audit_after_first + 1);
+    assert!(audit[0].result.starts_with("rejected:"), "{audit:?}");
+}
+
+#[tokio::test]
+async fn pairing_idempotency_serializes_concurrent_retries() {
+    let harness = Harness::boot().await;
+    let code = harness.issue_pairing_code().await;
+    let key = pairing_idempotency_key(5);
+    let devices_before = harness.app.store.devices().len();
+
+    let left = harness
+        .pair_request(&code, "iPad", "ios", Some(&key))
+        .send();
+    let right = harness
+        .pair_request(&code, "iPad", "ios", Some(&key))
+        .send();
+    let (left, right) = tokio::join!(left, right);
+    let left = left.unwrap();
+    let right = right.unwrap();
+    assert_eq!(left.status(), 200);
+    assert_eq!(right.status(), 200);
+    assert_eq!(
+        left.json::<Value>().await.unwrap(),
+        right.json::<Value>().await.unwrap()
+    );
+    assert_eq!(harness.app.store.devices().len(), devices_before + 1);
+    assert!(
+        harness
+            .audit_entries()
+            .await
+            .iter()
+            .all(|entry| !entry.result.starts_with("rejected:"))
+    );
+}
+
+#[tokio::test]
+async fn pairing_idempotency_rejects_noncanonical_keys_without_consuming_the_code() {
+    let harness = Harness::boot().await;
+    let code = harness.issue_pairing_code().await;
+    let valid = pairing_idempotency_key(6);
+    let invalid = [
+        valid[..valid.len() - 1].to_owned(),
+        format!("{valid}A"),
+        format!("{}*", &valid[..valid.len() - 1]),
+        format!("{valid}="),
+    ];
+
+    for key in invalid {
+        let response = harness
+            .pair_request(&code, "iPad", "ios", Some(&key))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400, "key {key:?}");
+    }
+
+    let response = harness
+        .pair_request(&code, "iPad", "ios", Some(&valid))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
+async fn pairing_idempotency_publishes_recovery_only_after_the_durable_audit() {
+    let harness = Harness::boot().await;
+    let code = harness.issue_pairing_code().await;
+    let key = pairing_idempotency_key(7);
+    let devices_before = harness.app.store.devices().len();
+    let audit_path = harness.app.audit.path().to_path_buf();
+    harness.break_audit_path();
+
+    let response = harness
+        .pair_request(&code, "iPad", "ios", Some(&key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 500);
+    assert_eq!(harness.app.store.devices().len(), devices_before + 1);
+
+    std::fs::remove_dir(&audit_path).expect("repair audit path");
+    let response = harness
+        .pair_request(&code, "iPad", "ios", Some(&key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    assert!(
+        harness.audit_entries().await[0]
+            .result
+            .starts_with("rejected:")
+    );
+}
+
+#[tokio::test]
+async fn pairing_idempotency_evicts_the_oldest_entry_over_capacity() {
+    let harness = Harness::boot().await;
+    let mut first = None;
+    let mut newest = None;
+
+    for byte in 0..=64 {
+        let code = harness.issue_pairing_code().await;
+        let key = pairing_idempotency_key(byte);
+        let response = harness
+            .pair_request(&code, "iPad", "ios", Some(&key))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body: Value = response.json().await.unwrap();
+        if byte == 0 {
+            first = Some((code.clone(), key.clone()));
+        }
+        newest = Some((code, key, body));
+    }
+
+    let (newest_code, newest_key, newest_body) = newest.unwrap();
+    let response = harness
+        .pair_request(&newest_code, "iPad", "ios", Some(&newest_key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.json::<Value>().await.unwrap(), newest_body);
+
+    let (first_code, first_key) = first.unwrap();
+    let response = harness
+        .pair_request(&first_code, "iPad", "ios", Some(&first_key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
 }
 
 #[tokio::test]

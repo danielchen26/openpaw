@@ -61,12 +61,18 @@ Quick Connect links must never contain credential or signing secret classes, inc
 
 ```http
 POST /v1/pair
+X-OpenPaw-Idempotency-Key: <unpadded base64url of 32 random bytes>
 {"pairing_code": "ABCD-…", "device_name": "Daniel's iPhone", "platform": "ios"}
 
 200 {"device_id": "dev_…", "token": "…", "hmac_key_b64": "…", "capabilities": ["…"]}
 ```
 
-The code is consumed on first use. The token and key are returned exactly once and belong in the Keychain.
+Without the optional idempotency header, the code is consumed on first use and the token and key are returned only by
+that request. The header value must be the canonical unpadded base64url encoding of exactly 32 bytes. With it, the host
+keeps up to 64 successful responses in memory for 60 seconds. Retrying the same normalized pairing code, device name and
+platform under the same key returns the identical response without creating another device or rejected audit entry.
+Reusing a key for a different request returns `409`; replaying a consumed code under a different key returns `403`.
+Recovery entries never reach disk and disappear on host restart. Store the returned token and key in the Keychain.
 
 ## Routes
 

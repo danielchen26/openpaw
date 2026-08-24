@@ -64,6 +64,8 @@ pub struct AppState {
     pub nonces: Arc<auth::NonceCache>,
     /// Outstanding pairing codes.
     pub pairing: Arc<auth::PairingCodes>,
+    /// Short-lived recovery for successful pairing responses.
+    pub pair_recovery: Arc<api::pair::PairRecovery>,
     /// Loopback preview proxy.
     pub proxy: Arc<openpaw_preview::Proxy>,
     /// Dynamic workspace registry.
@@ -112,6 +114,7 @@ impl AppState {
             audit: Arc::new(audit),
             nonces: Arc::new(auth::NonceCache::new()),
             pairing: Arc::new(auth::PairingCodes::new()),
+            pair_recovery: Arc::new(api::pair::PairRecovery::new()),
             proxy: Arc::new(proxy),
             workspaces: workspace_registry,
             provider_manager,
