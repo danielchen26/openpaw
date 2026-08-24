@@ -242,7 +242,9 @@ final class QuickConnectKeychainCredentialInstallerTests: XCTestCase {
 
         let auth = try await installer.install(.password(label: "Studio login", secret: "pw"))
 
-        XCTAssertEqual(auth, .password(reference: try KeychainReference(identifier: "quick-connect/password/Studio-login")))
+        guard case .password(let reference) = auth else { return XCTFail("Expected password reference") }
+        XCTAssertTrue(reference.identifier.hasPrefix("quick-connect/password/"))
+        XCTAssertTrue(reference.identifier.hasSuffix("/Studio-login"))
         XCTAssertEqual(recorder.writes.map(\.requiresUserPresence), [false])
         XCTAssertEqual(String(data: recorder.writes[0].data, encoding: .utf8), "pw")
     }
@@ -257,7 +259,21 @@ final class QuickConnectKeychainCredentialInstallerTests: XCTestCase {
         } catch QuickConnectCredentialInstallError.storageFailed {}
 
         XCTAssertEqual(recorder.writes.map(\.requiresUserPresence), [true, false])
-        XCTAssertEqual(recorder.deletes, [try KeychainReference(identifier: "quick-connect/private-key/Studio-key")])
+        XCTAssertEqual(recorder.deletes, [recorder.writes[0].reference])
+        XCTAssertTrue(recorder.writes[0].reference.identifier.hasPrefix("quick-connect/private-key/"))
+        XCTAssertTrue(recorder.writes[0].reference.identifier.hasSuffix("/Studio-key"))
+    }
+
+    func testRepeatedPasswordInstallsUseUniqueReferences() async throws {
+        let recorder = CredentialStoreRecorder()
+        let installer = QuickConnectKeychainCredentialInstaller(storeSecret: recorder.store, deleteSecret: recorder.delete)
+
+        let first = try await installer.install(.password(label: "Studio login", secret: "pw"))
+        let second = try await installer.install(.password(label: "Studio login", secret: "pw"))
+
+        guard case .password(let firstRef) = first, case .password(let secondRef) = second else { return XCTFail("Expected password references") }
+        XCTAssertNotEqual(firstRef, secondRef)
+        XCTAssertEqual(recorder.writes.map(\.reference), [firstRef, secondRef])
     }
 }
 

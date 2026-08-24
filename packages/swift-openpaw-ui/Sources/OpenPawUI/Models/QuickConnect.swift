@@ -1,5 +1,8 @@
 import Foundation
 import OpenPawTerminalCore
+#if canImport(Darwin)
+    import Darwin
+#endif
 
 public struct QuickConnectTarget: Sendable, Hashable, Codable {
     public enum Source: String, Sendable, Hashable, Codable { case magicDNS = "magic_dns", tailnet, explicit }
@@ -15,20 +18,28 @@ public struct QuickConnectHostKey: Sendable, Hashable, Codable {
     public init(algorithm: String, fingerprint: String) { self.algorithm = algorithm; self.fingerprint = fingerprint }
 }
 
+public enum QuickConnectProfile: String, Sendable, Hashable, Codable {
+    case observer
+    case `operator`
+}
+
 public struct QuickConnectEnvelopeV1: Sendable, Hashable, Codable {
     public var version: Int
     public var issuedAt: Date
     public var expiresAt: Date
+    public var sessionID: String
+    public var hostAPIPort: Int
+    public var profile: QuickConnectProfile
     public var pairingCode: String?
     public var nickname: String
     public var username: String
     public var targets: [QuickConnectTarget]
     public var hostKeys: [QuickConnectHostKey]
 
-    public init(version: Int = 1, issuedAt: Date, expiresAt: Date, pairingCode: String?, nickname: String, username: String, targets: [QuickConnectTarget], hostKeys: [QuickConnectHostKey] = []) {
-        self.version = version; self.issuedAt = issuedAt; self.expiresAt = expiresAt; self.pairingCode = pairingCode; self.nickname = nickname; self.username = username; self.targets = targets; self.hostKeys = hostKeys
+    public init(version: Int = 1, issuedAt: Date, expiresAt: Date, sessionID: String = "test-session", hostAPIPort: Int = 4317, profile: QuickConnectProfile = .operator, pairingCode: String?, nickname: String, username: String, targets: [QuickConnectTarget], hostKeys: [QuickConnectHostKey] = []) {
+        self.version = version; self.issuedAt = issuedAt; self.expiresAt = expiresAt; self.sessionID = sessionID; self.hostAPIPort = hostAPIPort; self.profile = profile; self.pairingCode = pairingCode; self.nickname = nickname; self.username = username; self.targets = targets; self.hostKeys = hostKeys
     }
-    private enum CodingKeys: String, CodingKey { case version = "v", issuedAt = "issued_at", expiresAt = "expires_at", pairingCode = "pairing_code", nickname, username, targets, hostKeys = "host_keys" }
+    private enum CodingKeys: String, CodingKey { case version = "v", issuedAt = "issued_at", expiresAt = "expires_at", sessionID = "session_id", hostAPIPort = "host_api_port", profile, pairingCode = "pairing_code", nickname, username, targets, hostKeys = "host_keys" }
 }
 
 public struct QuickConnectProposal: Identifiable, Sendable, Hashable {
@@ -36,6 +47,9 @@ public struct QuickConnectProposal: Identifiable, Sendable, Hashable {
     public var version: Int
     public var issuedAt: Date?
     public var expiresAt: Date?
+    public var sessionID: String?
+    public var hostAPIPort: Int?
+    public var profile: QuickConnectProfile?
     public var pairingCode: String?
     public var nickname: String
     public var username: String
@@ -51,12 +65,14 @@ public struct QuickConnectProposal: Identifiable, Sendable, Hashable {
         if let dns = candidate.dnsName, !dns.isEmpty { targets.append(.init(hostname: dns, source: .magicDNS)) }
         targets += candidate.tailscaleIPs.filter { !$0.isEmpty }.map { .init(hostname: $0, source: .tailnet) }
         if !candidate.hostname.isEmpty, !targets.contains(where: { normalized($0.hostname) == normalized(candidate.hostname) }) { targets.append(.init(hostname: candidate.hostname, source: .explicit)) }
-        return QuickConnectProposal(id: candidate.id, version: 1, issuedAt: nil, expiresAt: nil, pairingCode: nil, nickname: candidate.nickname, username: "", dnsName: candidate.dnsName, tailscaleIPs: candidate.tailscaleIPs, online: candidate.online, targets: targets, hostKeys: [], envelope: nil)
+        return QuickConnectProposal(id: candidate.id, version: 1, issuedAt: nil, expiresAt: nil, sessionID: nil, hostAPIPort: nil, profile: nil, pairingCode: nil, nickname: candidate.nickname, username: "", dnsName: candidate.dnsName, tailscaleIPs: candidate.tailscaleIPs, online: candidate.online, targets: targets, hostKeys: [], envelope: nil)
     }
 
     public func matches(existing host: HostRecord) -> Bool {
         guard host.username == username else { return false }
-        return targets.contains { $0.port == host.port && QuickConnectProposal.normalized($0.hostname) == QuickConnectProposal.normalized(host.hostname) }
+        return targets.contains { target in
+            target.port == host.port && QuickConnectLinkCodec.canonicalTargetKey(target.hostname) == QuickConnectLinkCodec.canonicalTargetKey(host.hostname)
+        }
     }
 
     public func credentialConfirmationCandidate(in store: HostStore) -> QuickConnectCredentialConfirmation? {
@@ -117,7 +133,7 @@ public protocol QuickConnectCredentialInstalling: Sendable {
     func install(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod
 }
 
-public struct QuickConnectStoredSecretRequest: Sendable, Hashable {
+public struct QuickConnectStoredSecretRequest: Sendable, Hashable, CustomStringConvertible, CustomDebugStringConvertible {
     public var data: Data
     public var reference: KeychainReference
     public var requiresUserPresence: Bool
@@ -127,14 +143,21 @@ public struct QuickConnectStoredSecretRequest: Sendable, Hashable {
         self.reference = reference
         self.requiresUserPresence = requiresUserPresence
     }
+
+    public var description: String {
+        "QuickConnectStoredSecretRequest(data: <redacted>, reference: \(reference), requiresUserPresence: \(requiresUserPresence))"
+    }
+
+    public var debugDescription: String { description }
 }
 
 public enum QuickConnectCredentialReferences {
     public static let labelLimit = 64
 
-    public static func reference(kind: String, label: String) throws -> KeychainReference {
+    public static func reference(kind: String, transactionID: String, label: String) throws -> KeychainReference {
         let bounded = try boundedLabel(label)
-        return try KeychainReference(identifier: "quick-connect/\(kind)/\(bounded)")
+        let transaction = try boundedLabel(transactionID)
+        return try KeychainReference(identifier: "quick-connect/\(kind)/\(transaction)/\(bounded)")
     }
 
     public static func boundedLabel(_ label: String) throws -> String {
@@ -144,21 +167,21 @@ public enum QuickConnectCredentialReferences {
         return trimmed.map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "_" || $0 == "-" ? String($0) : "-" }.joined()
     }
 
-    public static func storageRequests(for choice: QuickConnectCredentialChoice) throws -> (auth: AuthMethod, requests: [QuickConnectStoredSecretRequest]) {
+    public static func storageRequests(for choice: QuickConnectCredentialChoice, transactionID: String = UUID().uuidString) throws -> (auth: AuthMethod, requests: [QuickConnectStoredSecretRequest]) {
         switch choice {
         case .existing(let auth):
             return (auth, [])
         case .password(let label, let secret):
             guard let data = secret.data(using: .utf8), !data.isEmpty else { throw QuickConnectCredentialInstallError.emptySecret }
-            let ref = try reference(kind: "password", label: label)
+            let ref = try reference(kind: "password", transactionID: transactionID, label: label)
             return (.password(reference: ref), [.init(data: data, reference: ref, requiresUserPresence: false)])
         case .privateKey(let label, let key, let passphraseLabel, let passphrase):
             guard !key.isEmpty else { throw QuickConnectCredentialInstallError.emptySecret }
-            let keyRef = try reference(kind: "private-key", label: label)
+            let keyRef = try reference(kind: "private-key", transactionID: transactionID, label: label)
             var requests = [QuickConnectStoredSecretRequest(data: key, reference: keyRef, requiresUserPresence: true)]
             let passRef: KeychainReference?
             if let passphrase, !passphrase.isEmpty {
-                let ref = try reference(kind: "passphrase", label: passphraseLabel ?? "\(label)-passphrase")
+                let ref = try reference(kind: "passphrase", transactionID: transactionID, label: passphraseLabel ?? "\(label)-passphrase")
                 guard let data = passphrase.data(using: .utf8), !data.isEmpty else { throw QuickConnectCredentialInstallError.emptySecret }
                 requests.append(.init(data: data, reference: ref, requiresUserPresence: false))
                 passRef = ref
@@ -202,6 +225,7 @@ public struct QuickConnectLinkCodec: Sendable {
     private func decode(_ url: URL, store: HostStore?) throws -> QuickConnectProposal {
         guard url.scheme == "openpaw" else { throw QuickConnectLinkError.invalidScheme }
         guard url.host == "pair" else { throw QuickConnectLinkError.invalidHost }
+        guard url.user == nil, url.password == nil, url.port == nil, url.path.isEmpty, url.query == nil else { throw QuickConnectLinkError.invalidHost }
         guard let fragment = url.fragment else { throw QuickConnectLinkError.missingFragment }
         guard fragment.utf8.count <= Self.maxFragmentBytes else { throw QuickConnectLinkError.oversizedFragment }
         guard fragment.hasPrefix("v") else { throw QuickConnectLinkError.invalidFragment }
@@ -213,33 +237,122 @@ public struct QuickConnectLinkCodec: Sendable {
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
         let envelope: QuickConnectEnvelopeV1
         do { envelope = try decoder.decode(QuickConnectEnvelopeV1.self, from: data) } catch { throw QuickConnectLinkError.invalidFragment }
-        try validate(envelope, at: now(), checkExpiry: true)
-        return QuickConnectProposal(id: envelope.pairingCode ?? UUID().uuidString, version: envelope.version, issuedAt: envelope.issuedAt, expiresAt: envelope.expiresAt, pairingCode: envelope.pairingCode.map(Self.normalizePairingCode), nickname: envelope.nickname, username: envelope.username, dnsName: envelope.targets.first(where: { $0.source == .magicDNS })?.hostname, tailscaleIPs: envelope.targets.filter { $0.source == .tailnet }.map(\.hostname), online: false, targets: envelope.targets, hostKeys: envelope.hostKeys, envelope: envelope)
+        let canonical = try canonicalEnvelope(envelope, at: now(), checkExpiry: true)
+        return QuickConnectProposal(id: UUID().uuidString, version: canonical.version, issuedAt: canonical.issuedAt, expiresAt: canonical.expiresAt, sessionID: canonical.sessionID, hostAPIPort: canonical.hostAPIPort, profile: canonical.profile, pairingCode: canonical.pairingCode.map(Self.normalizePairingCode), nickname: canonical.nickname, username: canonical.username, dnsName: canonical.targets.first(where: { $0.source == .magicDNS })?.hostname, tailscaleIPs: canonical.targets.filter { $0.source == .tailnet }.map(\.hostname), online: false, targets: canonical.targets, hostKeys: canonical.hostKeys, envelope: canonical)
     }
 
     private func validate(_ envelope: QuickConnectEnvelopeV1, at now: Date, checkExpiry: Bool) throws {
+        _ = try canonicalEnvelope(envelope, at: now, checkExpiry: checkExpiry)
+    }
+
+    private func canonicalEnvelope(_ envelope: QuickConnectEnvelopeV1, at now: Date, checkExpiry: Bool) throws -> QuickConnectEnvelopeV1 {
         guard envelope.version == 1 else { throw QuickConnectLinkError.versionMismatch }
         if checkExpiry, now > envelope.expiresAt { throw QuickConnectLinkError.expired }
-        guard envelope.expiresAt.timeIntervalSince(envelope.issuedAt) <= 300 else { throw QuickConnectLinkError.expiryTooLong }
+        let lifetime = envelope.expiresAt.timeIntervalSince(envelope.issuedAt)
+        guard lifetime > 0, lifetime <= 300 else { throw QuickConnectLinkError.expiryTooLong }
+        let sessionID = envelope.sessionID
+        let hostAPIPort = envelope.hostAPIPort
+        guard Self.validSessionID(sessionID) else { throw QuickConnectLinkError.invalidFragment }
+        guard (1...65535).contains(hostAPIPort) else { throw QuickConnectLinkError.invalidPort }
+        guard Self.validPrintable(envelope.nickname, max: 80), Self.validUsername(envelope.username) else { throw QuickConnectLinkError.invalidFragment }
         guard let code = envelope.pairingCode, !Self.normalizePairingCode(code).isEmpty else { throw QuickConnectLinkError.emptyPairingCode }
-        guard !envelope.targets.isEmpty else { throw QuickConnectLinkError.invalidTarget }
+        guard (1...8).contains(envelope.targets.count) else { throw QuickConnectLinkError.invalidTarget }
+        guard envelope.hostKeys.count <= 4 else { throw QuickConnectLinkError.unsupportedFingerprintAlgorithm(envelope.hostKeys.first?.algorithm ?? "") }
         var seen = Set<String>()
+        var lastSourceRank = -1
+        var canonicalTargets: [QuickConnectTarget] = []
         for target in envelope.targets {
             guard (1...65535).contains(target.port) else { throw QuickConnectLinkError.invalidPort }
-            guard Self.validHost(target.hostname) else { throw QuickConnectLinkError.invalidTarget }
-            let key = "\(QuickConnectProposal.normalized(target.hostname)):\(target.port)"
+            let rank = Self.sourceRank(target.source)
+            guard rank >= lastSourceRank else { throw QuickConnectLinkError.invalidTarget }
+            lastSourceRank = rank
+            let canonicalHost = try Self.canonicalHost(target.hostname, source: target.source)
+            let key = "\(canonicalHost):\(target.port)"
             guard seen.insert(key).inserted else { throw QuickConnectLinkError.duplicateTarget }
+            canonicalTargets.append(QuickConnectTarget(hostname: canonicalHost, port: target.port, source: target.source))
         }
         for key in envelope.hostKeys {
             guard ["ssh-ed25519", "ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"].contains(key.algorithm) else { throw QuickConnectLinkError.unsupportedFingerprintAlgorithm(key.algorithm) }
-            guard key.fingerprint.hasPrefix("SHA256:") else { throw QuickConnectLinkError.unsupportedFingerprintAlgorithm(key.algorithm) }
+            guard Self.validSHA256Fingerprint(key.fingerprint) else { throw QuickConnectLinkError.unsupportedFingerprintAlgorithm(key.algorithm) }
         }
+        return QuickConnectEnvelopeV1(version: envelope.version, issuedAt: envelope.issuedAt, expiresAt: envelope.expiresAt, sessionID: sessionID, hostAPIPort: hostAPIPort, profile: envelope.profile, pairingCode: envelope.pairingCode, nickname: envelope.nickname, username: envelope.username, targets: canonicalTargets, hostKeys: envelope.hostKeys)
     }
 
     private static func normalizePairingCode(_ code: String) -> String { code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
-    private static func validHost(_ host: String) -> Bool {
-        guard !host.isEmpty, host.rangeOfCharacter(from: .whitespacesAndNewlines) == nil, host.rangeOfCharacter(from: .controlCharacters) == nil, !host.contains("@"), !host.contains("://") else { return false }
-        return true
+    private static func sourceRank(_ source: QuickConnectTarget.Source) -> Int {
+        switch source { case .magicDNS: 0; case .tailnet: 1; case .explicit: 2 }
+    }
+
+    private static func validSessionID(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 64 && value.range(of: #"^[A-Za-z0-9._:-]+$"#, options: .regularExpression) != nil
+    }
+
+    private static func validPrintable(_ value: String, max: Int) -> Bool {
+        !value.isEmpty && value.count <= max && value.rangeOfCharacter(from: .controlCharacters) == nil
+    }
+
+    private static func validUsername(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 64 && value.range(of: #"^[A-Za-z_][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil
+    }
+
+    public static func canonicalTargetKey(_ host: String) -> String {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return (canonicalIPv4(trimmed) ?? canonicalIPv6(trimmed) ?? canonicalDNS(trimmed) ?? trimmed.lowercased())
+    }
+
+    private static func canonicalHost(_ host: String, source: QuickConnectTarget.Source) throws -> String {
+        guard !host.isEmpty, host.rangeOfCharacter(from: .whitespacesAndNewlines) == nil, host.rangeOfCharacter(from: .controlCharacters) == nil, !host.contains("@"), !host.contains("://"), !host.contains("/"), !host.contains("[") && !host.contains("]") else { throw QuickConnectLinkError.invalidTarget }
+        if let ip = canonicalIPv4(host) ?? canonicalIPv6(host) {
+            return ip
+        }
+        guard !host.contains(":"), source != .tailnet, let dns = canonicalDNS(host) else { throw QuickConnectLinkError.invalidTarget }
+        return dns
+    }
+
+    private static func canonicalDNS(_ host: String) -> String? {
+        let lower = host.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        guard !lower.isEmpty, lower.count <= 253 else { return nil }
+        let labels = lower.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.allSatisfy({ label in
+            guard (1...63).contains(label.count), label.first?.isLetter == true || label.first?.isNumber == true, label.last?.isLetter == true || label.last?.isNumber == true else { return false }
+            return label.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" }
+        }) else { return nil }
+        return lower
+    }
+
+    private static func canonicalIPv4(_ host: String) -> String? {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return nil }
+        var octets: [String] = []
+        for part in parts {
+            guard !part.isEmpty, part.allSatisfy(\.isNumber), let value = Int(part), (0...255).contains(value) else { return nil }
+            octets.append(String(value))
+        }
+        return octets.joined(separator: ".")
+    }
+
+    private static func canonicalIPv6(_ host: String) -> String? {
+        #if canImport(Darwin)
+            var addr = in6_addr()
+            guard host.withCString({ inet_pton(AF_INET6, $0, &addr) }) == 1 else { return nil }
+            var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            return withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: UInt8.self, capacity: MemoryLayout<in6_addr>.size) { bytes in
+                    inet_ntop(AF_INET6, bytes, &buffer, socklen_t(INET6_ADDRSTRLEN)).map { String(cString: $0).lowercased() }
+                }
+            }
+        #else
+            return nil
+        #endif
+    }
+
+    private static func validSHA256Fingerprint(_ fingerprint: String) -> Bool {
+        guard fingerprint.hasPrefix("SHA256:") else { return false }
+        let payload = String(fingerprint.dropFirst("SHA256:".count))
+        guard !payload.isEmpty, !payload.contains("="), payload.range(of: #"^[A-Za-z0-9+/]+$"#, options: .regularExpression) != nil else { return false }
+        var padded = payload
+        while padded.count % 4 != 0 { padded.append("=") }
+        return Data(base64Encoded: padded)?.count == 32
     }
 }
 
