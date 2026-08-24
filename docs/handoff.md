@@ -64,27 +64,32 @@ replay receives a rejection. No camera injection or cloud service is used.
 Credential boundary: the generated private key remains outside the repository and is supplied only to the existing
 DEBUG+simulator `-openpaw-debug-seed-key` launch hook. The hook imports it through OpenPaw's own
 `KeychainStore`/credential path. The Python harness never edits the simulator Keychain. The private key, hook token,
-pairing code, returned bearer token, HMAC key, and secret-bearing `openpaw://` URL must not appear in console output;
-captured subprocess diagnostics are redacted before any failure is printed.
+pairing code, returned bearer token, HMAC key, and secret-bearing `openpaw://` URL must not appear in console output.
+Xcode diagnostics are captured and redacted before any failure is printed; long-lived `sshd` and host daemon output is
+sent to `/dev/null` so an undrained pipe cannot block the real service under test.
 
-Attempted on 2026-08-24 with:
+Completed on 2026-08-24. After building the current host binary, two consecutive runs of:
 
 ```sh
-python3 scripts/quick-pairing-live.py
+python3 scripts/quick-pairing-live.py --binary host/target/debug/openpaw-host
 ```
 
-The just-in-time issuance blocker is fixed and covered by contracts: server construction and Xcode startup do not mint
-a link; the first `/ready` request mints and opens it once; duplicate `/ready` requests reuse the same result; factory
-failure is stable and redacted. Clean dedicated-simulator runs then presented `Quick Connect to 127` with four to five
-minutes remaining, connected real SSH, accepted the unknown host key, and persisted exactly one device in the real
-host state. The latest run failed before `/connected`: the app changed from `Pairing device` to `Quick Connect failed`
-with “The host could not be paired,” even though the harness observed `persisted host device count: 1`. This localizes
-the remaining blocker after successful `/v1/pair` persistence but before Terminal selection, most likely while the app
-accepts or persists the returned pairing credentials. A separate real SSH-forwarded diagnostic received HTTP 200 and
-one persisted device from the same host binary. Every run printed
-`cleanup verified: child processes stopped and scratch run removed`. No simulator-only fake was substituted. Signer
-persistence, Terminal selection, replay rejection, and the five success evidence lines must not be claimed until the
-focused live run exits zero.
+exited zero and printed all five required evidence lines: real SSH connected, real pairing redeemed once, signer
+persisted for the selected host, Terminal selected, and pairing-code replay rejected. Both runs also verified child
+process and scratch-directory cleanup.
+
+The intermittent server-committed/client-timed-out failure was caused by the harness, not pairing persistence or the
+SSH forwarder. It launched the long-lived host and `sshd` with `stdout=PIPE` but never drained either pipe. With the
+fixture home, the host emitted 17,224 bytes in 45 seconds, enough to fill the macOS pipe. `/v1/pair` durably inserts the
+device, syncs the audit, and publishes recovery before its final `tracing::info!`; a full pipe therefore blocked after
+commit but before HTTP response while retaining the recovery lock, so both 15-second client attempts timed out. The
+harness now sends daemon output to `/dev/null`, with a contract test preventing undrained pipes.
+
+A separate relaunch race was also fixed. Automatic reconnect could reach Terminal after the test checked the pager but
+before the Resume button appeared. The generated XCUITest now waits for either Terminal or a visible Resume action,
+then proves the terminal surface and authenticated Home workspace before reporting signer persistence. Secret-safe
+phase diagnostics are restricted to fixed DEBUG+simulator categories and confirmed successful phases in the passing
+runs. The unrelated `apps/ios/OpenPaw.xcodeproj/project.pbxproj` modification remained unstaged and uncommitted.
 
 ## Simulator acceptance completed on 2026-08-21
 
