@@ -73,6 +73,35 @@ struct QuickConnectTests {
         #expect(throws: QuickConnectLinkError.invalidFragment) { try QuickConnectLinkCodec(now: { issuedAt }).decode(url) }
     }
 
+    @Test("decoder rejects duplicate JSON keys before decoding")
+    func decoderRejectsDuplicateJSONKeys() throws {
+        let codec = QuickConnectLinkCodec(now: { issuedAt })
+        let validPrefix = #"""
+        "v":1,"issued_at":"\#(iso(issuedAt))","expires_at":"\#(iso(expiresAt))","session_id":"ses_duplicate_keys","host_api_port":4317,"profile":"operator","pairing_code":"ABCD-EFGH-IJKL-MNOP-QRST-UVWX","nickname":"Studio","username":"daniel"
+        """#
+
+        let duplicateEnvelope = try rawURL(#"{\#(validPrefix),"nick\u006eame":"Other","targets":[{"hostname":"studio.local","port":22,"source":"explicit"}],"host_keys":[]}"#)
+        #expect(throws: QuickConnectLinkError.duplicateJSONKey("nickname")) { try codec.decode(duplicateEnvelope) }
+
+        let duplicateTarget = try rawURL(#"{\#(validPrefix),"targets":[{"hostname":"studio.local","hostname":"other.local","port":22,"source":"explicit"}],"host_keys":[]}"#)
+        #expect(throws: QuickConnectLinkError.duplicateJSONKey("hostname")) { try codec.decode(duplicateTarget) }
+
+        let duplicateHostKey = try rawURL(#"{\#(validPrefix),"targets":[{"hostname":"studio.local","port":22,"source":"explicit"}],"host_keys":[{"algorithm":"ssh-ed25519","algorithm":"ssh-rsa","fingerprint":"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}"#)
+        #expect(throws: QuickConnectLinkError.duplicateJSONKey("algorithm")) { try codec.decode(duplicateHostKey) }
+    }
+
+    @Test("duplicate-key scan accepts escaped strings and valid nested JSON")
+    func duplicateKeyScanAcceptsEscapedStringsAndNestedJSON() throws {
+        let json = #"""
+        {"v":1,"issued_at":"\#(iso(issuedAt))","expires_at":"\#(iso(expiresAt))","session_id":"ses_nested_json","host_api_port":4317,"profile":"operator","pairing_code":"ABCD-EFGH-IJKL-MNOP-QRST-UVWX","nickname":"Studio","username":"daniel","targets":[{"hostname":"studio.local","port":22,"source":"explicit","metadata":{"message":"quote: \" slash: \\ braces: {[]}","items":[1,true,null,{"nested":"yes"}]}}],"host_keys":[],"extra":{"arrays":[[],[{}]],"object":{"value":"ok"}}}
+        """#
+
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(try rawURL(json))
+
+        #expect(proposal.sessionID == "ses_nested_json")
+        #expect(proposal.targets.map(\.hostname) == ["studio.local"])
+    }
+
     @Test("decoder enforces exact URL authority with no userinfo port path or query")
     func decoderEnforcesExactURLShape() throws {
         let codec = QuickConnectLinkCodec(now: { issuedAt })
@@ -1054,6 +1083,14 @@ struct QuickConnectTests {
 
     private func rawURL(_ object: [String: Any]) throws -> URL {
         let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return rawURL(data)
+    }
+
+    private func rawURL(_ json: String) throws -> URL {
+        try rawURL(#require(json.data(using: .utf8)))
+    }
+
+    private func rawURL(_ data: Data) -> URL {
         let payload = data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
         return URL(string: "openpaw://pair#v1.\(payload)")!
     }

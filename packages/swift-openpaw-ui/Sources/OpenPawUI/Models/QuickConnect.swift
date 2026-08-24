@@ -196,6 +196,7 @@ public enum QuickConnectCredentialReferences {
 public enum QuickConnectLinkError: Error, Sendable, Hashable {
     case invalidScheme, invalidHost, missingFragment, invalidFragment, oversizedFragment, oversizedPayload
     case unsupportedVersion(String), versionMismatch, invalidPort, invalidTarget, duplicateTarget
+    case duplicateJSONKey(String)
     case expired, expiryTooLong, emptyPairingCode, unsupportedFingerprintAlgorithm(String)
 }
 
@@ -234,6 +235,15 @@ public struct QuickConnectLinkCodec: Sendable {
         guard parts[0] == "v1" else { throw QuickConnectLinkError.unsupportedVersion(parts[0]) }
         guard let data = dataFromBase64URL(parts[1]) else { throw QuickConnectLinkError.invalidFragment }
         guard data.count <= Self.maxPayloadBytes else { throw QuickConnectLinkError.oversizedPayload }
+        do {
+            if let key = try DuplicateJSONKeyScanner.firstDuplicateKey(in: data) {
+                throw QuickConnectLinkError.duplicateJSONKey(key)
+            }
+        } catch let error as QuickConnectLinkError {
+            throw error
+        } catch {
+            throw QuickConnectLinkError.invalidFragment
+        }
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
         let envelope: QuickConnectEnvelopeV1
         do { envelope = try decoder.decode(QuickConnectEnvelopeV1.self, from: data) } catch { throw QuickConnectLinkError.invalidFragment }
@@ -361,6 +371,143 @@ public struct QuickConnectLinkCodec: Sendable {
         var padded = payload
         while padded.count % 4 != 0 { padded.append("=") }
         return Data(base64Encoded: padded)?.count == 32
+    }
+}
+
+private struct DuplicateJSONKeyScanner {
+    private enum ScanError: Error { case invalidJSON }
+
+    private let bytes: [UInt8]
+    private var index = 0
+
+    static func firstDuplicateKey(in data: Data) throws -> String? {
+        var scanner = DuplicateJSONKeyScanner(bytes: Array(data))
+        let duplicate = try scanner.scanValue()
+        if duplicate != nil { return duplicate }
+        scanner.skipWhitespace()
+        guard scanner.index == scanner.bytes.count else { throw ScanError.invalidJSON }
+        return nil
+    }
+
+    private mutating func scanValue() throws -> String? {
+        skipWhitespace()
+        guard let byte = current else { throw ScanError.invalidJSON }
+        switch byte {
+        case 0x7B: return try scanObject()
+        case 0x5B: return try scanArray()
+        case 0x22:
+            try scanString()
+            return nil
+        case 0x74:
+            try scanLiteral("true")
+            return nil
+        case 0x66:
+            try scanLiteral("false")
+            return nil
+        case 0x6E:
+            try scanLiteral("null")
+            return nil
+        case 0x2D, 0x30 ... 0x39:
+            try scanNumber()
+            return nil
+        default:
+            throw ScanError.invalidJSON
+        }
+    }
+
+    private mutating func scanObject() throws -> String? {
+        try consume(0x7B)
+        skipWhitespace()
+        if consumeIfPresent(0x7D) { return nil }
+
+        var keys = Set<String>()
+        while true {
+            skipWhitespace()
+            let keyRange = try scanString()
+            let key = try JSONDecoder().decode(String.self, from: Data(bytes[keyRange]))
+            if !keys.insert(key).inserted { return key }
+            skipWhitespace()
+            try consume(0x3A)
+            if let nestedDuplicate = try scanValue() { return nestedDuplicate }
+            skipWhitespace()
+            if consumeIfPresent(0x7D) { return nil }
+            try consume(0x2C)
+        }
+    }
+
+    private mutating func scanArray() throws -> String? {
+        try consume(0x5B)
+        skipWhitespace()
+        if consumeIfPresent(0x5D) { return nil }
+
+        while true {
+            if let nestedDuplicate = try scanValue() { return nestedDuplicate }
+            skipWhitespace()
+            if consumeIfPresent(0x5D) { return nil }
+            try consume(0x2C)
+        }
+    }
+
+    @discardableResult
+    private mutating func scanString() throws -> Range<Int> {
+        let start = index
+        try consume(0x22)
+        while let byte = current {
+            index += 1
+            switch byte {
+            case 0x22:
+                return start ..< index
+            case 0x5C:
+                guard let escaped = current else { throw ScanError.invalidJSON }
+                index += 1
+                if escaped == 0x75 {
+                    for _ in 0 ..< 4 {
+                        guard let hex = current, Self.isHexDigit(hex) else { throw ScanError.invalidJSON }
+                        index += 1
+                    }
+                } else if ![0x22, 0x5C, 0x2F, 0x62, 0x66, 0x6E, 0x72, 0x74].contains(escaped) {
+                    throw ScanError.invalidJSON
+                }
+            case 0x00 ... 0x1F:
+                throw ScanError.invalidJSON
+            default:
+                continue
+            }
+        }
+        throw ScanError.invalidJSON
+    }
+
+    private mutating func scanLiteral(_ literal: StaticString) throws {
+        for expected in String(describing: literal).utf8 { try consume(expected) }
+    }
+
+    private mutating func scanNumber() throws {
+        let start = index
+        while let byte = current, [0x2B, 0x2D, 0x2E, 0x45, 0x65].contains(byte) || (0x30 ... 0x39).contains(byte) {
+            index += 1
+        }
+        guard index > start else { throw ScanError.invalidJSON }
+    }
+
+    private mutating func skipWhitespace() {
+        while let byte = current, [0x20, 0x09, 0x0A, 0x0D].contains(byte) { index += 1 }
+    }
+
+    private var current: UInt8? { index < bytes.count ? bytes[index] : nil }
+
+    private mutating func consume(_ expected: UInt8) throws {
+        guard current == expected else { throw ScanError.invalidJSON }
+        index += 1
+    }
+
+    private mutating func consumeIfPresent(_ expected: UInt8) -> Bool {
+        guard current == expected else { return false }
+        index += 1
+        return true
+    }
+
+    private static func isHexDigit(_ byte: UInt8) -> Bool {
+        (0x30 ... 0x39).contains(byte) || (0x41 ... 0x46).contains(byte) || (0x61 ... 0x66).contains(byte)
     }
 }
 
