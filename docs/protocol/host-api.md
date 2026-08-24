@@ -42,6 +42,23 @@ profile holds only read capabilities, so an observer device physically cannot ap
 openpaw-host pairing-code          # ABCD-EFGH-IJKL-MNOP-QRST-UVWX, valid 5 minutes, single use
 ```
 
+Quick Connect shares the same code as a scanned proposal link:
+
+```text
+openpaw://pair#v1.<base64url-json-payload>
+```
+
+The fragment is exactly `v1.` plus unpadded base64url of compact UTF-8 JSON with sorted keys. A v1 envelope may contain only:
+
+- `v`: integer envelope version, currently `1`.
+- `issued_at` and `expires_at`: timestamps. `expires_at` must be no more than five minutes after `issued_at`.
+- `pairing_code`: the normalized OpenPaw pairing code. It is single use and consumed by `POST /v1/pair`.
+- `nickname` and `username`: display/login hints.
+- `targets`: ordered connection hints. Clients try MagicDNS first, then Tailnet IPv4/IPv6, then an explicit hostname. Each target has `hostname`, `port`, and `source`.
+- `host_keys`: optional SSH host key pins with an allowed SSH key algorithm and `SHA256:` fingerprint.
+
+Quick Connect links must never contain credential or signing secret classes, including passwords, private keys, hook tokens, bearer tokens, HMAC secrets, pairing response tokens, or keychain material. Scanning a link creates an untrusted proposal only. It must not mutate host stores or keychains, and it is not proof of host trust. Trust is established later by pairing, host-key verification, and user approval.
+
 ```http
 POST /v1/pair
 {"pairing_code": "ABCD-…", "device_name": "Daniel's iPhone", "platform": "ios"}
