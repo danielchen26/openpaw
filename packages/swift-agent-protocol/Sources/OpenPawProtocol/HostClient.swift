@@ -47,6 +47,7 @@ public actor HostClient {
     public static let filenameHeader = "X-OpenPaw-Filename"
     /// Header the host may use to name the capability a 403 was missing.
     public static let requiredCapabilityHeader = "X-OpenPaw-Required-Capability"
+    private static let pairingIdempotencyHeader = "x-openpaw-idempotency-key"
 
     public let baseURL: URL
     private let session: URLSession
@@ -73,15 +74,25 @@ public actor HostClient {
     }
 
     public func pair(
-        pairingCode: String, deviceName: String, platform: String
+        pairingCode: String,
+        deviceName: String,
+        platform: String,
+        idempotencyKey: String? = nil
     ) async throws -> PairingResult {
         let body = try encode(
             PairRequest(pairingCode: pairingCode, deviceName: deviceName, platform: platform)
         )
         let request = try makeRequest(
-            method: "POST", path: "/v1/pair", body: body, signed: false
+            method: "POST",
+            path: "/v1/pair",
+            body: body,
+            headers: [
+                Self.pairingIdempotencyHeader:
+                    idempotencyKey ?? Self.makePairingIdempotencyKey()
+            ],
+            signed: false
         )
-        return try decode(PairingResult.self, from: try await send(request))
+        return try decode(PairingResult.self, from: try await sendPairingRequest(request))
     }
 
     // MARK: Sessions, inbox
@@ -401,6 +412,33 @@ public actor HostClient {
             throw Self.error(for: http, body: data)
         }
         return data
+    }
+
+    private func sendPairingRequest(_ request: URLRequest) async throws -> Data {
+        do {
+            return try await send(request)
+        } catch HostClientError.transport(let error) {
+            guard !Task.isCancelled, !Self.isCancellation(error) else {
+                throw HostClientError.transport(error)
+            }
+            return try await send(request)
+        }
+    }
+
+    private static func isCancellation(_ error: any Error) -> Bool {
+        if error is CancellationError { return true }
+        return (error as? URLError)?.code == .cancelled
+    }
+
+    public static func makePairingIdempotencyKey() -> String {
+        var generator = SystemRandomNumberGenerator()
+        let bytes = Data(
+            (0..<32).map { _ in UInt8.random(in: .min ... .max, using: &generator) }
+        )
+        return bytes.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 
     static func error(for response: HTTPURLResponse, body: Data) -> HostClientError {

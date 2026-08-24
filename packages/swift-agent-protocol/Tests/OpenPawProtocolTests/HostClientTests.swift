@@ -8,7 +8,13 @@ import XCTest
 /// Thread safe holder for the stub's response builder. `URLProtocol` subclasses are
 /// instantiated by Foundation on arbitrary threads, so the handler needs a lock.
 final class StubResponder: @unchecked Sendable {
-    typealias Handler = @Sendable (URLRequest) -> (HTTPURLResponse, Data)
+    enum Response {
+        case success(HTTPURLResponse, Data)
+        case failure(any Error)
+        case pending
+    }
+
+    typealias Handler = @Sendable (URLRequest) -> Response
 
     static let shared = StubResponder()
 
@@ -23,7 +29,7 @@ final class StubResponder: @unchecked Sendable {
         requests.removeAll()
     }
 
-    func respond(to request: URLRequest) -> (HTTPURLResponse, Data) {
+    func respond(to request: URLRequest) -> Response {
         lock.lock()
         let handler = self.handler
         requests.append(request)
@@ -32,7 +38,7 @@ final class StubResponder: @unchecked Sendable {
             let response = HTTPURLResponse(
                 url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil
             )!
-            return (response, Data("no stub installed".utf8))
+            return .success(response, Data("no stub installed".utf8))
         }
         return handler(request)
     }
@@ -49,10 +55,16 @@ final class StubURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        let (response, data) = StubResponder.shared.respond(to: request)
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: data)
-        client?.urlProtocolDidFinishLoading(self)
+        switch StubResponder.shared.respond(to: request) {
+        case .success(let response, let data):
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        case .failure(let error):
+            client?.urlProtocol(self, didFailWithError: error)
+        case .pending:
+            break
+        }
     }
 
     override func stopLoading() {}
@@ -84,8 +96,16 @@ final class HostClientTests: XCTestCase {
                 url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
                 headerFields: headers
             )!
-            return (response, Data(body.utf8))
+            return .success(response, Data(body.utf8))
         }
+    }
+
+    private var successfulPairingBody: String {
+        let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
+        return """
+            {"device_id":"dev_9","token":"tok_9","hmac_key_b64":"\(key)",\
+            "capabilities":["sessions.read"]}
+            """
     }
 
     func testProviderAndRepoImportContractsRoundTripWithoutSecretsOrPaths() async throws {
@@ -347,14 +367,7 @@ final class HostClientTests: XCTestCase {
     }
 
     func testPairSendsSnakeCaseBodyAndInstallsASigner() async throws {
-        let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
-        respond(
-            status: 200,
-            body: """
-                {"device_id":"dev_9","token":"tok_9","hmac_key_b64":"\(key)",\
-                "capabilities":["sessions.read"]}
-                """
-        )
+        respond(status: 200, body: successfulPairingBody)
         let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
         let pairing = try await client.pair(
             pairingCode: "123456", deviceName: "iPhone", platform: "ios"
@@ -375,6 +388,211 @@ final class HostClientTests: XCTestCase {
                 "platform": "ios",
             ]
         )
+        let headerName = "x-openpaw-idempotency-key"
+        XCTAssertTrue(request.allHTTPHeaderFields?.keys.contains(headerName) == true)
+        let idempotencyKey = try XCTUnwrap(request.value(forHTTPHeaderField: headerName))
+        XCTAssertEqual(idempotencyKey.count, 43)
+        XCTAssertNotNil(
+            idempotencyKey.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression)
+        )
+        let paddedBase64 = idempotencyKey
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/") + "="
+        XCTAssertEqual(Data(base64Encoded: paddedBase64)?.count, 32)
+    }
+
+    func testPairRetriesNetworkConnectionLostOnceWithTheIdenticalRequest() async throws {
+        let responseBody = successfulPairingBody
+        StubResponder.shared.install { request in
+            if StubResponder.shared.recorded.count == 1 {
+                return .failure(URLError(.networkConnectionLost))
+            }
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: [:]
+            )!
+            return .success(response, Data(responseBody.utf8))
+        }
+
+        let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
+        _ = try await client.pair(
+            pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+        )
+
+        let requests = StubResponder.shared.recorded
+        XCTAssertEqual(requests.count, 2)
+        let first = try XCTUnwrap(requests.first)
+        let second = try XCTUnwrap(requests.last)
+        XCTAssertEqual(second.url, first.url)
+        XCTAssertEqual(second.httpMethod, first.httpMethod)
+        XCTAssertEqual(second.httpBodyData, first.httpBodyData)
+        XCTAssertEqual(second.allHTTPHeaderFields, first.allHTTPHeaderFields)
+        let headerName = "x-openpaw-idempotency-key"
+        XCTAssertEqual(
+            second.value(forHTTPHeaderField: headerName),
+            try XCTUnwrap(first.value(forHTTPHeaderField: headerName))
+        )
+    }
+
+    func testPairStopsAfterOneRetryWhenTransportKeepsFailing() async {
+        StubResponder.shared.install { _ in .failure(URLError(.networkConnectionLost)) }
+        let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
+
+        await assertThrows(
+            try await client.pair(
+                pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+            )
+        ) { error in
+            guard case .transport = error else {
+                return XCTFail("expected transport failure, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(StubResponder.shared.recorded.count, 2)
+        let header = "x-openpaw-idempotency-key"
+        XCTAssertEqual(
+            StubResponder.shared.recorded.first?.value(forHTTPHeaderField: header),
+            StubResponder.shared.recorded.last?.value(forHTTPHeaderField: header)
+        )
+    }
+
+    func testPairDoesNotRetryCancelledTransport() async {
+        StubResponder.shared.install { _ in .failure(URLError(.cancelled)) }
+        let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
+
+        do {
+            _ = try await client.pair(
+                pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+            )
+            XCTFail("expected cancellation")
+        } catch let error as HostClientError {
+            guard case .transport(let underlying) = error,
+                  (underlying as? URLError)?.code == .cancelled
+            else {
+                return XCTFail("expected cancelled transport error, got \(error)")
+            }
+        } catch {
+            XCTFail("expected HostClientError, got \(error)")
+        }
+
+        XCTAssertEqual(StubResponder.shared.recorded.count, 1)
+        XCTAssertNotNil(
+            StubResponder.shared.recorded.first?.value(
+                forHTTPHeaderField: "x-openpaw-idempotency-key"
+            )
+        )
+    }
+
+    func testPairDoesNotRetryWhenTheCallingTaskIsCancelled() async {
+        StubResponder.shared.install { _ in .pending }
+        let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
+        let task = Task {
+            try await client.pair(
+                pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+            )
+        }
+
+        for _ in 0..<100 where StubResponder.shared.recorded.isEmpty {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(StubResponder.shared.recorded.count, 1)
+
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("expected cancellation")
+        } catch let error as HostClientError {
+            guard case .transport(let underlying) = error else {
+                return XCTFail("expected cancelled transport error, got \(error)")
+            }
+            XCTAssertTrue(
+                underlying is CancellationError
+                    || (underlying as? URLError)?.code == .cancelled
+            )
+        } catch is CancellationError {
+            // Actor or URLSession cancellation may surface directly before `send` wraps it.
+        } catch {
+            XCTFail("expected cancellation, got \(error)")
+        }
+
+        XCTAssertEqual(StubResponder.shared.recorded.count, 1)
+    }
+
+    func testPairDoesNotRetryForbiddenResponse() async {
+        respond(status: 403, body: #"{"capability":"pair"}"#)
+        let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
+
+        await assertThrows(
+            try await client.pair(
+                pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+            )
+        ) { error in
+            guard case .forbidden(let capability) = error else {
+                return XCTFail("expected forbidden, got \(error)")
+            }
+            XCTAssertEqual(capability, "pair")
+        }
+
+        XCTAssertEqual(StubResponder.shared.recorded.count, 1)
+        XCTAssertNotNil(
+            StubResponder.shared.recorded.first?.value(
+                forHTTPHeaderField: "x-openpaw-idempotency-key"
+            )
+        )
+    }
+
+    func testPairDoesNotRetryServerError() async {
+        respond(status: 500, body: "pairing unavailable")
+        let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
+
+        await assertThrows(
+            try await client.pair(
+                pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+            )
+        ) { error in
+            guard case .server(let status, _) = error else {
+                return XCTFail("expected server error, got \(error)")
+            }
+            XCTAssertEqual(status, 500)
+        }
+
+        XCTAssertEqual(StubResponder.shared.recorded.count, 1)
+    }
+
+    func testPairDoesNotRetryMalformedSuccessResponse() async {
+        respond(status: 200, body: #"{"unexpected":true}"#)
+        let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
+
+        await assertThrows(
+            try await client.pair(
+                pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+            )
+        ) { error in
+            guard case .decoding = error else {
+                return XCTFail("expected decoding error, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(StubResponder.shared.recorded.count, 1)
+    }
+
+    func testSeparatePairCallsUseDifferentIdempotencyKeys() async throws {
+        respond(status: 200, body: successfulPairingBody)
+        let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
+
+        _ = try await client.pair(
+            pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+        )
+        _ = try await client.pair(
+            pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+        )
+
+        let requests = StubResponder.shared.recorded
+        XCTAssertEqual(requests.count, 2)
+        let headerName = "x-openpaw-idempotency-key"
+        let firstKey = try XCTUnwrap(requests.first?.value(forHTTPHeaderField: headerName))
+        let secondKey = try XCTUnwrap(requests.last?.value(forHTTPHeaderField: headerName))
+        XCTAssertNotEqual(firstKey, secondKey)
     }
 
     func testSignedRequestSignsExactlyThePathAndQueryTheHostSees() async throws {

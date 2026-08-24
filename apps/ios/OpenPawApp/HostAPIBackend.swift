@@ -113,11 +113,18 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
     /// replayed request is rejected on the nonce.
     @discardableResult
     func pair(pairingCode: String, deviceName: String) async throws -> PairingResult {
-        let client = try await state.beginPairing()
+        guard let hostID = activeHostID.get() else {
+            throw HostClientError.transport(URLError(.notConnectedToInternet))
+        }
+        let epoch = lifecycleEpoch.get()
+        let pairing = try await state.beginPairing(
+            hostID: hostID,
+            lifecycleEpoch: epoch,
+            pairingCode: pairingCode,
+            deviceName: deviceName
+        )
+        let client = pairing.client
         do {
-            guard let hostID = activeHostID.get() else { throw HostClientError.transport(URLError(.notConnectedToInternet)) }
-            let epoch = lifecycleEpoch.get()
-
             // The simulator can drop the first URLSession request made over a freshly opened loopback tunnel. A pairing
             // code is single-use, so it must never be that sacrificial request. Health is unauthenticated and idempotent;
             // its result is deliberately ignored, then ownership is revalidated before the code leaves this device.
@@ -129,7 +136,8 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
             let result = try await client.pair(
                 pairingCode: pairingCode,
                 deviceName: deviceName,
-                platform: "ios"
+                platform: "ios",
+                idempotencyKey: pairing.idempotencyKey
             )
             guard let signer = result.signer else {
                 throw HostClientError.decoding(
@@ -143,7 +151,7 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
             }
             try credentials.save(result, hostID: hostID)
             await client.setSigner(signer)
-            await state.endPairing(client: client)
+            await state.endPairing(client: client, clearIdempotencyKey: true)
             return result
         } catch {
             await state.endPairing(client: client)
@@ -300,12 +308,37 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
 
     /// The client, replaced whenever the tunnel is rebuilt on a new local port.
     private actor State {
+        private struct RetainedPairing {
+            let client: HostClient
+            let hostID: HostRecord.ID
+            let lifecycleEpoch: Int
+            let pairingCode: String
+            let deviceName: String
+            let idempotencyKey: String
+
+            func matches(
+                client: HostClient,
+                hostID: HostRecord.ID,
+                lifecycleEpoch: Int,
+                pairingCode: String,
+                deviceName: String
+            ) -> Bool {
+                self.client === client
+                    && self.hostID == hostID
+                    && self.lifecycleEpoch == lifecycleEpoch
+                    && self.pairingCode == pairingCode
+                    && self.deviceName == deviceName
+            }
+        }
+
         var client: HostClient?
         private var pairingClient: HostClient?
+        private var retainedPairing: RetainedPairing?
 
         func install(client: HostClient?) {
             self.client = client
             pairingClient = nil
+            retainedPairing = nil
         }
 
         func requireClient() throws -> HostClient {
@@ -313,18 +346,44 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
             return client
         }
 
-        func beginPairing() throws -> HostClient {
+        func beginPairing(
+            hostID: HostRecord.ID,
+            lifecycleEpoch: Int,
+            pairingCode: String,
+            deviceName: String
+        ) throws -> (client: HostClient, idempotencyKey: String) {
             guard let client else { throw HostClientError.transport(URLError(.networkConnectionLost)) }
             guard pairingClient == nil else {
                 throw HostClientError.badRequest("Pairing is already in progress")
             }
             pairingClient = client
-            return client
+            if let retainedPairing,
+                retainedPairing.matches(
+                    client: client,
+                    hostID: hostID,
+                    lifecycleEpoch: lifecycleEpoch,
+                    pairingCode: pairingCode,
+                    deviceName: deviceName
+                )
+            {
+                return (client, retainedPairing.idempotencyKey)
+            }
+            let idempotencyKey = HostClient.makePairingIdempotencyKey()
+            retainedPairing = RetainedPairing(
+                client: client,
+                hostID: hostID,
+                lifecycleEpoch: lifecycleEpoch,
+                pairingCode: pairingCode,
+                deviceName: deviceName,
+                idempotencyKey: idempotencyKey
+            )
+            return (client, idempotencyKey)
         }
 
-        func endPairing(client: HostClient) {
+        func endPairing(client: HostClient, clearIdempotencyKey: Bool = false) {
             guard pairingClient === client else { return }
             pairingClient = nil
+            if clearIdempotencyKey { retainedPairing = nil }
         }
     }
 }

@@ -76,6 +76,71 @@ final class HostAPIBackendTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.recordedRequestPaths, ["/v1/health", "/v1/pair"])
     }
 
+    func testPairReusesIdempotencyKeyAfterCredentialSaveFailure() async throws {
+        let hostID = HostRecord.ID()
+        let credentials = FakeCredentialStore(saveFailuresRemaining: 1)
+        let backend = HostAPIBackend(
+            forwarder: FakeForwarder(port: 49_329),
+            credentials: credentials,
+            urlSession: Self.stubSession())
+        let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
+        StubURLProtocol.response = (
+            200,
+            Data(#"{"device_id":"dev_retry","token":"tok_retry","hmac_key_b64":"\#(key)","capabilities":[]}"#.utf8)
+        )
+
+        try await backend.connect(hostID: hostID)
+        do {
+            _ = try await backend.pair(pairingCode: "123456", deviceName: "iPhone")
+            XCTFail("the first credential save should fail")
+        } catch FakeCredentialStore.Error.saveFailed {
+            // The host already redeemed the code, so the retry must recover with the same key.
+        }
+
+        _ = try await backend.pair(pairingCode: "123456", deviceName: "iPhone")
+
+        let pairRequests = StubURLProtocol.recordedRequests.filter { $0.url?.path == "/v1/pair" }
+        XCTAssertEqual(pairRequests.count, 2)
+        let header = "x-openpaw-idempotency-key"
+        let firstKey = try XCTUnwrap(pairRequests.first?.value(forHTTPHeaderField: header))
+        let secondKey = try XCTUnwrap(pairRequests.last?.value(forHTTPHeaderField: header))
+        XCTAssertEqual(firstKey, secondKey)
+        XCTAssertEqual(credentials.savedHostIDs, [hostID])
+    }
+
+    func testPairChangesIdempotencyKeyWhenCodeOrHostChanges() async throws {
+        let hostA = HostRecord.ID()
+        let hostB = HostRecord.ID()
+        let credentials = FakeCredentialStore(saveFailuresRemaining: 1)
+        let backend = HostAPIBackend(
+            forwarder: FakeForwarder(port: 49_330),
+            credentials: credentials,
+            urlSession: Self.stubSession())
+        let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
+        StubURLProtocol.response = (
+            200,
+            Data(#"{"device_id":"dev_context","token":"tok_context","hmac_key_b64":"\#(key)","capabilities":[]}"#.utf8)
+        )
+
+        try await backend.connect(hostID: hostA)
+        do {
+            _ = try await backend.pair(pairingCode: "111111", deviceName: "iPhone")
+            XCTFail("the first credential save should fail")
+        } catch FakeCredentialStore.Error.saveFailed {}
+        _ = try await backend.pair(pairingCode: "222222", deviceName: "iPhone")
+        await backend.disconnect()
+        try await backend.connect(hostID: hostB)
+        _ = try await backend.pair(pairingCode: "222222", deviceName: "iPhone")
+
+        let header = "x-openpaw-idempotency-key"
+        let pairKeys = try StubURLProtocol.recordedRequests
+            .filter { $0.url?.path == "/v1/pair" }
+            .map { try XCTUnwrap($0.value(forHTTPHeaderField: header)) }
+        XCTAssertEqual(pairKeys.count, 3)
+        XCTAssertNotEqual(pairKeys[0], pairKeys[1])
+        XCTAssertNotEqual(pairKeys[1], pairKeys[2])
+    }
+
     func testPairCancellationDuringHealthWarmupNeverSendsTheSingleUseCode() async throws {
         let hostID = HostRecord.ID()
         let gate = DispatchSemaphore(value: 0)
@@ -254,17 +319,33 @@ private actor FakeForwarder: LoopbackForwarder {
 }
 
 private final class FakeCredentialStore: DeviceCredentialStoring, @unchecked Sendable {
+    enum Error: Swift.Error {
+        case saveFailed
+    }
+
     private let lock = NSLock()
     var signers: [HostRecord.ID: RequestSigner]
     var capabilities: [HostRecord.ID: Set<String>] = [:]
     private(set) var loadedHostIDs: [HostRecord.ID] = []
     private(set) var savedHostIDs: [HostRecord.ID] = []
     private(set) var clearedHostIDs: [HostRecord.ID] = []
+    private var saveFailuresRemaining: Int
 
-    init(signers: [HostRecord.ID: RequestSigner] = [:]) { self.signers = signers }
+    init(
+        signers: [HostRecord.ID: RequestSigner] = [:],
+        saveFailuresRemaining: Int = 0
+    ) {
+        self.signers = signers
+        self.saveFailuresRemaining = saveFailuresRemaining
+    }
 
     func save(_ result: PairingResult, hostID: HostRecord.ID) throws {
         lock.lock()
+        if saveFailuresRemaining > 0 {
+            saveFailuresRemaining -= 1
+            lock.unlock()
+            throw Error.saveFailed
+        }
         savedHostIDs.append(hostID)
         if let signer = result.signer {
             signers[hostID] = signer
@@ -306,6 +387,7 @@ private final class StubURLProtocol: URLProtocol {
     static var response: (status: Int, body: Data) = (200, Data())
     static var outcomes: [Outcome] = []
     static var requestPaths: [String] = []
+    static var requests: [URLRequest] = []
     static var requestStartSignals: [DispatchSemaphore] = []
 
     static var recordedRequestPaths: [String] {
@@ -314,11 +396,18 @@ private final class StubURLProtocol: URLProtocol {
         return requestPaths
     }
 
+    static var recordedRequests: [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
+    }
+
     static func reset() {
         lock.lock()
         response = (200, Data())
         outcomes = []
         requestPaths = []
+        requests = []
         requestStartSignals = []
         lock.unlock()
     }
@@ -329,6 +418,7 @@ private final class StubURLProtocol: URLProtocol {
     override func startLoading() {
         Self.lock.lock()
         Self.requestPaths.append(request.url?.path ?? "")
+        Self.requests.append(request)
         let requestStartSignal = Self.requestStartSignals.isEmpty ? nil : Self.requestStartSignals.removeFirst()
         let outcome = Self.outcomes.isEmpty
             ? Outcome.response(Self.response.status, Self.response.body)
