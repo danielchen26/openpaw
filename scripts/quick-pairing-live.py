@@ -440,7 +440,7 @@ def start_sshd(
     child = cleanup.register(
         subprocess.Popen(
             [locate_sshd(), "-D", "-e", "-f", str(layout.sshd_config)],
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
             text=True,
         )
@@ -530,7 +530,7 @@ def start_host(
         subprocess.Popen(
             [str(binary), "serve"],
             env=environment,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
             text=True,
         )

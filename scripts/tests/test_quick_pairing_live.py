@@ -62,6 +62,25 @@ class QuickPairingLiveContractTests(unittest.TestCase):
                 Path(directory).resolve(),
             )
 
+    def test_long_lived_daemons_do_not_write_to_undrained_pipes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layout = self.harness.ScratchLayout.create(Path(directory) / "run")
+            cleanup = self.harness.CleanupRegistry(layout.root)
+            child = mock.Mock()
+            child.poll.return_value = None
+
+            with mock.patch.object(self.harness, "locate_sshd", return_value="/usr/sbin/sshd"), \
+                 mock.patch.object(self.harness, "wait_for_port"), \
+                 mock.patch.object(self.harness, "wait_for_health"), \
+                 mock.patch.object(self.harness.subprocess, "Popen", return_value=child) as popen:
+                self.harness.start_sshd(layout, 49_152, "tester", cleanup)
+                self.harness.start_host(Path("/fake/openpaw-host"), layout, 49_153, cleanup)
+
+        self.assertEqual(popen.call_count, 2)
+        for call in popen.call_args_list:
+            self.assertIs(call.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertIs(call.kwargs["stderr"], subprocess.STDOUT)
+
     def test_redacts_all_secret_classes_and_the_secret_bearing_url(self) -> None:
         secrets = self.harness.SecretSet(
             private_key="PRIVATE-KEY-MATERIAL",
