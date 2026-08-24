@@ -112,6 +112,43 @@ enum TCPProbe {
         }
     }
 
+    static func twoRoundTripsOnOneConnection(
+        port: Int,
+        firstPayload: String,
+        secondPayload: String,
+        timeout: Duration = .seconds(5)
+    ) async throws -> [String] {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let promise = group.next().makePromise(of: [String].self)
+        let bootstrap = ClientBootstrap(group: group)
+            .channelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.addHandler(
+                        SequentialRoundTripHandler(
+                            payloads: [firstPayload, secondPayload],
+                            promise: promise))
+                }
+            }
+
+        do {
+            let channel = try await bootstrap.connect(host: "127.0.0.1", port: port).get()
+            let deadline = channel.eventLoop.scheduleTask(in: timeout.asTimeAmount) {
+                channel.close(promise: nil)
+            }
+            defer { deadline.cancel() }
+
+            let responses = try await promise.futureResult.get()
+            try? await channel.close().get()
+            try? await group.shutdownGracefully()
+            return responses
+        } catch {
+            promise.fail(error)
+            _ = try? await promise.futureResult.get()
+            try? await group.shutdownGracefully()
+            throw error
+        }
+    }
+
     final class CollectHandler: ChannelInboundHandler {
         typealias InboundIn = ByteBuffer
 
@@ -145,6 +182,74 @@ enum TCPProbe {
             guard let promise = self.promise else { return }
             self.promise = nil
             promise.succeed(String(decoding: self.accumulated, as: UTF8.self))
+        }
+
+        private func fail(_ error: any Error) {
+            guard let promise = self.promise else { return }
+            self.promise = nil
+            promise.fail(error)
+        }
+    }
+
+    final class SequentialRoundTripHandler: ChannelInboundHandler {
+        typealias InboundIn = ByteBuffer
+        typealias OutboundOut = ByteBuffer
+
+        private let payloads: [String]
+        private let expectedLengths: [Int]
+        private var promise: EventLoopPromise<[String]>?
+        private var responses = [String]()
+        private var accumulated = [UInt8]()
+
+        init(payloads: [String], promise: EventLoopPromise<[String]>) {
+            self.payloads = payloads
+            self.expectedLengths = payloads.map { $0.utf8.count }
+            self.promise = promise
+        }
+
+        func channelActive(context: ChannelHandlerContext) {
+            self.writePayload(at: 0, context: context)
+            context.fireChannelActive()
+        }
+
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+            self.accumulated.append(contentsOf: self.unwrapInboundIn(data).readableBytesView)
+            let index = self.responses.count
+            guard index < self.expectedLengths.count else { return }
+
+            if self.accumulated.count >= self.expectedLengths[index] {
+                let responseBytes = self.accumulated.prefix(self.expectedLengths[index])
+                self.accumulated.removeFirst(self.expectedLengths[index])
+                self.responses.append(String(decoding: responseBytes, as: UTF8.self))
+
+                if self.responses.count == self.payloads.count {
+                    self.complete()
+                } else {
+                    self.writePayload(at: self.responses.count, context: context)
+                }
+            }
+        }
+
+        func channelInactive(context: ChannelHandlerContext) {
+            self.fail(TransportError.channelClosed(reason: "closed before both replies were complete"))
+            context.fireChannelInactive()
+        }
+
+        func errorCaught(context: ChannelHandlerContext, error: any Error) {
+            self.fail(error)
+            context.close(promise: nil)
+        }
+
+        private func writePayload(at index: Int, context: ChannelHandlerContext) {
+            var buffer = context.channel.allocator.buffer(capacity: self.payloads[index].utf8.count)
+            buffer.writeString(self.payloads[index])
+            context.writeAndFlush(self.wrapOutboundOut(buffer), promise: nil)
+        }
+
+        private func complete() {
+            guard let promise = self.promise else { return }
+            self.promise = nil
+            promise.succeed(self.responses)
         }
 
         private func fail(_ error: any Error) {
@@ -200,6 +305,35 @@ struct PortForwarderTests {
         let target = try #require(stack.ssh.observations.directTCPIPTargets.first)
         #expect(target.host == "127.0.0.1")
         #expect(target.port == stack.echo.port)
+
+        await forwarder.stop()
+        await stack.transport.disconnect()
+        await stack.ssh.stop()
+        await stack.echo.stop()
+    }
+
+    @Test("two sequential round trips reuse one forwarded TCP connection")
+    func twoSequentialRoundTripsOnOneConnection() async throws {
+        let stack = try await self.makeStack()
+        let forwarder = PortForwarder(connection: stack.connection)
+
+        let localPort = try await forwarder.start(
+            remoteHost: "127.0.0.1",
+            remotePort: UInt16(stack.echo.port)
+        )
+
+        let replies = try await TCPProbe.twoRoundTripsOnOneConnection(
+            port: Int(localPort),
+            firstPayload: "health",
+            secondPayload: "postit"
+        )
+        #expect(replies == ["HEALTH", "POSTIT"])
+
+        #expect(await forwarder.acceptedConnectionCount == 1)
+        #expect(
+            await stack.ssh.observations.wait(upTo: .seconds(2)) {
+                $0.directTCPIPTargets.count == 1
+            })
 
         await forwarder.stop()
         await stack.transport.disconnect()
