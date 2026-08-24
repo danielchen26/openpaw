@@ -76,69 +76,141 @@ final class HostAPIBackendTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.recordedRequestPaths, ["/v1/health", "/v1/pair"])
     }
 
-    func testPairReusesIdempotencyKeyAfterCredentialSaveFailure() async throws {
+    func testPairReusesIdempotencyKeyAfterCredentialSaveFailureInSameContext() async throws {
         let hostID = HostRecord.ID()
         let credentials = FakeCredentialStore(saveFailuresRemaining: 1)
-        let backend = HostAPIBackend(
-            forwarder: FakeForwarder(port: 49_329),
-            credentials: credentials,
-            urlSession: Self.stubSession())
-        let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
-        StubURLProtocol.response = (
-            200,
-            Data(#"{"device_id":"dev_retry","token":"tok_retry","hmac_key_b64":"\#(key)","capabilities":[]}"#.utf8)
-        )
+        let backend = makeBackend(credentials: credentials, port: 49_329)
+        installPairingResponse()
 
         try await backend.connect(hostID: hostID)
-        do {
-            _ = try await backend.pair(pairingCode: "123456", deviceName: "iPhone")
-            XCTFail("the first credential save should fail")
-        } catch FakeCredentialStore.Error.saveFailed {
-            // The host already redeemed the code, so the retry must recover with the same key.
-        }
-
+        await assertCredentialSaveFails(
+            backend, pairingCode: "123456", deviceName: "iPhone"
+        )
         _ = try await backend.pair(pairingCode: "123456", deviceName: "iPhone")
 
-        let pairRequests = StubURLProtocol.recordedRequests.filter { $0.url?.path == "/v1/pair" }
-        XCTAssertEqual(pairRequests.count, 2)
-        let header = "x-openpaw-idempotency-key"
-        let firstKey = try XCTUnwrap(pairRequests.first?.value(forHTTPHeaderField: header))
-        let secondKey = try XCTUnwrap(pairRequests.last?.value(forHTTPHeaderField: header))
-        XCTAssertEqual(firstKey, secondKey)
+        XCTAssertEqual(credentials.failedSaveHostIDs, [hostID])
         XCTAssertEqual(credentials.savedHostIDs, [hostID])
+        let keys = try assertPairRequests([
+            (pairingCode: "123456", deviceName: "iPhone"),
+            (pairingCode: "123456", deviceName: "iPhone"),
+        ])
+        XCTAssertEqual(keys[0], keys[1])
     }
 
-    func testPairChangesIdempotencyKeyWhenCodeOrHostChanges() async throws {
-        let hostA = HostRecord.ID()
-        let hostB = HostRecord.ID()
-        let credentials = FakeCredentialStore(saveFailuresRemaining: 1)
-        let backend = HostAPIBackend(
-            forwarder: FakeForwarder(port: 49_330),
-            credentials: credentials,
-            urlSession: Self.stubSession())
-        let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
-        StubURLProtocol.response = (
-            200,
-            Data(#"{"device_id":"dev_context","token":"tok_context","hmac_key_b64":"\#(key)","capabilities":[]}"#.utf8)
+    func testPairUsesNewIdempotencyKeyAfterSuccessfulSaveWithSameParameters() async throws {
+        let hostID = HostRecord.ID()
+        let credentials = FakeCredentialStore()
+        let backend = makeBackend(credentials: credentials, port: 49_330)
+        installPairingResponse()
+
+        try await backend.connect(hostID: hostID)
+        _ = try await backend.pair(pairingCode: "123456", deviceName: "iPhone")
+        _ = try await backend.pair(pairingCode: "123456", deviceName: "iPhone")
+
+        XCTAssertTrue(credentials.failedSaveHostIDs.isEmpty)
+        XCTAssertEqual(credentials.savedHostIDs, [hostID, hostID])
+        let keys = try assertPairRequests([
+            (pairingCode: "123456", deviceName: "iPhone"),
+            (pairingCode: "123456", deviceName: "iPhone"),
+        ])
+        XCTAssertNotEqual(keys[0], keys[1])
+    }
+
+    func testPairUsesNewIdempotencyKeyWhenDeviceNameChangesAfterSaveFailure() async throws {
+        let hostID = HostRecord.ID()
+        let credentials = FakeCredentialStore(saveFailuresRemaining: 2)
+        let backend = makeBackend(credentials: credentials, port: 49_331)
+        installPairingResponse()
+
+        try await backend.connect(hostID: hostID)
+        await assertCredentialSaveFails(
+            backend, pairingCode: "123456", deviceName: "First iPhone"
+        )
+        await assertCredentialSaveFails(
+            backend, pairingCode: "123456", deviceName: "Second iPhone"
         )
 
+        XCTAssertEqual(credentials.failedSaveHostIDs, [hostID, hostID])
+        XCTAssertTrue(credentials.savedHostIDs.isEmpty)
+        let keys = try assertPairRequests([
+            (pairingCode: "123456", deviceName: "First iPhone"),
+            (pairingCode: "123456", deviceName: "Second iPhone"),
+        ])
+        XCTAssertNotEqual(keys[0], keys[1])
+    }
+
+    func testPairUsesNewIdempotencyKeyWhenPairingCodeChangesAfterSaveFailure() async throws {
+        let hostID = HostRecord.ID()
+        let credentials = FakeCredentialStore(saveFailuresRemaining: 2)
+        let backend = makeBackend(credentials: credentials, port: 49_332)
+        installPairingResponse()
+
+        try await backend.connect(hostID: hostID)
+        await assertCredentialSaveFails(
+            backend, pairingCode: "111111", deviceName: "iPhone"
+        )
+        await assertCredentialSaveFails(
+            backend, pairingCode: "222222", deviceName: "iPhone"
+        )
+
+        XCTAssertEqual(credentials.failedSaveHostIDs, [hostID, hostID])
+        XCTAssertTrue(credentials.savedHostIDs.isEmpty)
+        let keys = try assertPairRequests([
+            (pairingCode: "111111", deviceName: "iPhone"),
+            (pairingCode: "222222", deviceName: "iPhone"),
+        ])
+        XCTAssertNotEqual(keys[0], keys[1])
+    }
+
+    func testPairUsesNewIdempotencyKeyAfterReconnectToSameHostFollowingSaveFailure() async throws {
+        let hostID = HostRecord.ID()
+        let credentials = FakeCredentialStore(saveFailuresRemaining: 2)
+        let backend = makeBackend(credentials: credentials, port: 49_333)
+        installPairingResponse()
+
+        try await backend.connect(hostID: hostID)
+        await assertCredentialSaveFails(
+            backend, pairingCode: "123456", deviceName: "iPhone"
+        )
+        await backend.disconnect()
+        try await backend.connect(hostID: hostID)
+        await assertCredentialSaveFails(
+            backend, pairingCode: "123456", deviceName: "iPhone"
+        )
+
+        XCTAssertEqual(credentials.failedSaveHostIDs, [hostID, hostID])
+        XCTAssertTrue(credentials.savedHostIDs.isEmpty)
+        let keys = try assertPairRequests([
+            (pairingCode: "123456", deviceName: "iPhone"),
+            (pairingCode: "123456", deviceName: "iPhone"),
+        ])
+        XCTAssertNotEqual(keys[0], keys[1])
+    }
+
+    func testPairUsesNewIdempotencyKeyAfterHostSwitchFollowingSaveFailure() async throws {
+        let hostA = HostRecord.ID()
+        let hostB = HostRecord.ID()
+        let credentials = FakeCredentialStore(saveFailuresRemaining: 2)
+        let backend = makeBackend(credentials: credentials, port: 49_334)
+        installPairingResponse()
+
         try await backend.connect(hostID: hostA)
-        do {
-            _ = try await backend.pair(pairingCode: "111111", deviceName: "iPhone")
-            XCTFail("the first credential save should fail")
-        } catch FakeCredentialStore.Error.saveFailed {}
-        _ = try await backend.pair(pairingCode: "222222", deviceName: "iPhone")
+        await assertCredentialSaveFails(
+            backend, pairingCode: "123456", deviceName: "iPhone"
+        )
         await backend.disconnect()
         try await backend.connect(hostID: hostB)
-        _ = try await backend.pair(pairingCode: "222222", deviceName: "iPhone")
+        await assertCredentialSaveFails(
+            backend, pairingCode: "123456", deviceName: "iPhone"
+        )
 
-        let header = "x-openpaw-idempotency-key"
-        let pairKeys = try StubURLProtocol.recordedRequests
-            .filter { $0.url?.path == "/v1/pair" }
-            .map { try XCTUnwrap($0.value(forHTTPHeaderField: header)) }
-        XCTAssertEqual(pairKeys.count, 3)
-        XCTAssertNotEqual(pairKeys[0], pairKeys[1])
-        XCTAssertNotEqual(pairKeys[1], pairKeys[2])
+        XCTAssertEqual(credentials.failedSaveHostIDs, [hostA, hostB])
+        XCTAssertTrue(credentials.savedHostIDs.isEmpty)
+        let keys = try assertPairRequests([
+            (pairingCode: "123456", deviceName: "iPhone"),
+            (pairingCode: "123456", deviceName: "iPhone"),
+        ])
+        XCTAssertNotEqual(keys[0], keys[1])
     }
 
     func testPairCancellationDuringHealthWarmupNeverSendsTheSingleUseCode() async throws {
@@ -295,6 +367,73 @@ final class HostAPIBackendTests: XCTestCase {
         let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
         return RequestSigner(deviceID: deviceID, token: "tok_\(deviceID)", hmacKeyBase64: key)!
     }
+
+    private func makeBackend(
+        credentials: FakeCredentialStore,
+        port: UInt16
+    ) -> HostAPIBackend {
+        HostAPIBackend(
+            forwarder: FakeForwarder(port: port),
+            credentials: credentials,
+            urlSession: Self.stubSession()
+        )
+    }
+
+    private func installPairingResponse() {
+        let key = Data((1...32).map { UInt8($0) }).base64EncodedString()
+        StubURLProtocol.response = (
+            200,
+            Data(
+                #"{"device_id":"dev_retry","token":"tok_retry","hmac_key_b64":"\#(key)","capabilities":[]}"#.utf8
+            )
+        )
+    }
+
+    private func assertCredentialSaveFails(
+        _ backend: HostAPIBackend,
+        pairingCode: String,
+        deviceName: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await backend.pair(pairingCode: pairingCode, deviceName: deviceName)
+            XCTFail("credential save unexpectedly succeeded", file: file, line: line)
+        } catch FakeCredentialStore.Error.saveFailed {
+            // Expected only after the server has returned a successful pairing response.
+        } catch {
+            XCTFail("expected credential save failure, got \(error)", file: file, line: line)
+        }
+    }
+
+    private func assertPairRequests(
+        _ expected: [(pairingCode: String, deviceName: String)],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> [String] {
+        let pairRequests = StubURLProtocol.recordedRequests.filter { $0.path == "/v1/pair" }
+        XCTAssertEqual(pairRequests.count, expected.count, file: file, line: line)
+        XCTAssertEqual(
+            StubURLProtocol.recordedRequestPaths,
+            expected.flatMap { _ in ["/v1/health", "/v1/pair"] },
+            file: file,
+            line: line
+        )
+
+        return try zip(pairRequests, expected).map { request, expected in
+            XCTAssertEqual(request.method, "POST", file: file, line: line)
+            let body = try XCTUnwrap(request.body, file: file, line: line)
+            let json = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: body) as? [String: Any],
+                file: file,
+                line: line
+            )
+            XCTAssertEqual(json["pairing_code"] as? String, expected.pairingCode, file: file, line: line)
+            XCTAssertEqual(json["device_name"] as? String, expected.deviceName, file: file, line: line)
+            XCTAssertEqual(json["platform"] as? String, "ios", file: file, line: line)
+            return try XCTUnwrap(request.idempotencyKey, file: file, line: line)
+        }
+    }
 }
 
 private actor FakeForwarder: LoopbackForwarder {
@@ -328,6 +467,7 @@ private final class FakeCredentialStore: DeviceCredentialStoring, @unchecked Sen
     var capabilities: [HostRecord.ID: Set<String>] = [:]
     private(set) var loadedHostIDs: [HostRecord.ID] = []
     private(set) var savedHostIDs: [HostRecord.ID] = []
+    private(set) var failedSaveHostIDs: [HostRecord.ID] = []
     private(set) var clearedHostIDs: [HostRecord.ID] = []
     private var saveFailuresRemaining: Int
 
@@ -343,6 +483,7 @@ private final class FakeCredentialStore: DeviceCredentialStoring, @unchecked Sen
         lock.lock()
         if saveFailuresRemaining > 0 {
             saveFailuresRemaining -= 1
+            failedSaveHostIDs.append(hostID)
             lock.unlock()
             throw Error.saveFailed
         }
@@ -377,6 +518,13 @@ private final class FakeCredentialStore: DeviceCredentialStoring, @unchecked Sen
 }
 
 private final class StubURLProtocol: URLProtocol {
+    struct RecordedRequest: Sendable {
+        let path: String
+        let method: String?
+        let body: Data?
+        let idempotencyKey: String?
+    }
+
     enum Outcome {
         case response(Int, Data)
         case responseAfter(DispatchSemaphore, Int, Data)
@@ -387,7 +535,7 @@ private final class StubURLProtocol: URLProtocol {
     static var response: (status: Int, body: Data) = (200, Data())
     static var outcomes: [Outcome] = []
     static var requestPaths: [String] = []
-    static var requests: [URLRequest] = []
+    static var requests: [RecordedRequest] = []
     static var requestStartSignals: [DispatchSemaphore] = []
 
     static var recordedRequestPaths: [String] {
@@ -396,7 +544,7 @@ private final class StubURLProtocol: URLProtocol {
         return requestPaths
     }
 
-    static var recordedRequests: [URLRequest] {
+    static var recordedRequests: [RecordedRequest] {
         lock.lock()
         defer { lock.unlock() }
         return requests
@@ -416,9 +564,15 @@ private final class StubURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        let recordedRequest = RecordedRequest(
+            path: request.url?.path ?? "",
+            method: request.httpMethod,
+            body: Self.bodyData(from: request),
+            idempotencyKey: request.value(forHTTPHeaderField: "x-openpaw-idempotency-key")
+        )
         Self.lock.lock()
-        Self.requestPaths.append(request.url?.path ?? "")
-        Self.requests.append(request)
+        Self.requestPaths.append(recordedRequest.path)
+        Self.requests.append(recordedRequest)
         let requestStartSignal = Self.requestStartSignals.isEmpty ? nil : Self.requestStartSignals.removeFirst()
         let outcome = Self.outcomes.isEmpty
             ? Outcome.response(Self.response.status, Self.response.body)
@@ -443,6 +597,21 @@ private final class StubURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    private static func bodyData(from request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count <= 0 { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
 }
 
 #if DEBUG && targetEnvironment(simulator)
