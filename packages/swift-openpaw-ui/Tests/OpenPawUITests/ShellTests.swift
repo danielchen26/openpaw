@@ -249,6 +249,53 @@ struct RootNavigationTests {
         #expect(coordinator.stage == .reviewing)
     }
 
+    @MainActor
+    @Test("Accepting Quick Connect host trust persists its pin without duplicate SSH")
+    func acceptedQuickConnectHostTrustIsPersistedWithoutDuplicateSSH() async {
+        let terminal = RecordingTerminalBackend()
+        let model = OpenPawModel(hostStore: HostStore(), terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: ShellExistingCredentialInstaller())
+        let persistence = ShellHostStorePersistenceRecorder()
+        let root = RootView(
+            model: model,
+            terminalSurface: { AnyView(EmptyView()) },
+            quickConnectCoordinator: coordinator,
+            persistHostStore: {
+                #expect(model.hostKeyPrompt != nil)
+                #expect(coordinator.stage == .awaitingHostTrust)
+                persistence.record($0)
+            })
+        let prompt = HostKeyPrompt(
+            host: "workshop:22",
+            verdict: .unknown(fingerprint: "SHA256:durable-pin"))
+        model.hostKeyPrompt = prompt
+        coordinator.begin(.from(
+            candidate: AddDeviceCandidate(
+                id: "node",
+                nickname: "workshop",
+                hostname: "10.0.0.4"),
+            now: Date(timeIntervalSince1970: 1_800_000_000)))
+        coordinator.confirm(.existing(.agentForwarding), username: "chet")
+        for _ in 0..<1_000 where coordinator.stage != .awaitingHostTrust {
+            await Task.yield()
+        }
+        #expect(coordinator.stage == .awaitingHostTrust)
+
+        root.trust(prompt)
+        for _ in 0..<1_000 where coordinator.stage != .connected {
+            await Task.yield()
+        }
+
+        #expect(model.hostKeyPrompt == nil)
+        #expect(coordinator.stage == .connected)
+        #expect(terminal.connectedHosts.count == 1)
+        #expect(model.hostStore.hosts.first?.knownHosts.map(\.fingerprint) == ["SHA256:durable-pin"])
+        #expect(persistence.stores.count == 1)
+        #expect(persistence.stores.first?.hosts.first?.knownHosts.map(\.fingerprint) == ["SHA256:durable-pin"])
+    }
+
     @Test("Only an owned Quick Connect terminal lease routes the root to Terminal")
     func quickConnectSuccessRoutesOwnedTerminal() {
         #expect(RootQuickConnectRouting.destination(for: .connected, ownsTerminalLease: true) == .terminal)
@@ -1152,6 +1199,15 @@ struct RootNavigationTests {
 
         #expect(!sent)
         #expect(model.lastError == nil)
+    }
+}
+
+@MainActor
+private final class ShellHostStorePersistenceRecorder {
+    private(set) var stores: [HostStore] = []
+
+    func record(_ store: HostStore) {
+        stores.append(store)
     }
 }
 

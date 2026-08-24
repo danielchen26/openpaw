@@ -284,6 +284,7 @@ final class AppWiring {
 
     func rootView() -> RootView {
         if let cachedRoot { return cachedRoot }
+        let hostStoreFile = hosts
         let created = RootView(
             model: model,
             terminalSurface: { [weak self] in
@@ -304,6 +305,7 @@ final class AppWiring {
             sessionSpaceProvider: LiveMultiplexerSessionSpaceProvider(runner: sessionCommandRunner, restorationStore: restorationStore),
             sessionCommandExecutor: TerminalSessionCommandExecutor(terminal: terminal, runner: sessionCommandRunner),
             restorationStore: restorationStore,
+            persistHostStore: { store in hostStoreFile.save(store) },
             onOpenPawURL: { [weak self] url in self?.receiveOpenPawURL(url) }
         )
         cachedRoot = created

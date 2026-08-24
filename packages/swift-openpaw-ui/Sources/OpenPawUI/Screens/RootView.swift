@@ -410,6 +410,7 @@ public struct RootView: View {
     private let sessionCommandExecutor: any SessionSpaceCommandExecuting
     private let restorationStore: (any SessionRestorationStoring)?
     private let quickConnectCoordinator: QuickConnectCoordinator
+    private let persistHostStore: @MainActor @Sendable (HostStore) -> Void
     private let onOpenPawURL: (URL) -> Void
     @State private var sessionSpace = SessionSpaceSnapshot()
     /// Hold-anywhere dictation. Owned here so the gesture and its ring exist on every destination rather than
@@ -439,6 +440,7 @@ public struct RootView: View {
         sessionSpaceProvider: any SessionSpaceProviding = EmptySessionSpaceProvider(),
         sessionCommandExecutor: any SessionSpaceCommandExecuting = EmptySessionSpaceCommandExecutor(),
         restorationStore: (any SessionRestorationStoring)? = nil,
+        persistHostStore: @escaping @MainActor @Sendable (HostStore) -> Void = { _ in },
         onOpenPawURL: @escaping (URL) -> Void = { _ in }
     ) {
         self.model = model
@@ -447,6 +449,7 @@ public struct RootView: View {
         self.sessionSpaceProvider = sessionSpaceProvider
         self.sessionCommandExecutor = sessionCommandExecutor
         self.restorationStore = restorationStore
+        self.persistHostStore = persistHostStore
         self.onOpenPawURL = onOpenPawURL
         self.quickConnectCoordinator = quickConnectCoordinator ?? QuickConnectCoordinator(
             model: model,
@@ -1505,7 +1508,7 @@ public struct RootView: View {
         }
     }
 
-    private func trust(_ prompt: HostKeyPrompt) {
+    func trust(_ prompt: HostKeyPrompt) {
         // Only `.unknown` reaches here: the sheet has no trust control for a changed key.
         guard prompt.allowsTrust, case .unknown(let fingerprint) = prompt.verdict,
             let host = model.selectedHost
@@ -1516,6 +1519,7 @@ public struct RootView: View {
         do {
             let entry = KnownHostEntry(keyType: "ssh-ed25519", fingerprint: fingerprint, addedAt: Date())
             try model.hostStore.trust(entry, for: host.id)
+            persistHostStore(model.hostStore)
             model.hostKeyPrompt = nil
             if case .awaitingHostTrust = quickConnectCoordinator.stage {
                 quickConnectCoordinator.resumeAfterHostTrust()
