@@ -232,6 +232,7 @@ public final class QuickConnectCoordinator {
         guard model.ownsSelection(pending.selection) else { throw HostPairingError.staleConnection }
         stage = .connectingSSH
         let lease = await model.connectSelectedHost(purpose: pending.proposal.pairingCode == nil ? .normal : .awaitingPairing)
+        try ensureCurrent(generation, proposal: pending.proposal)
         var updatedPending = pending
         updatedPending.operationSnapshot = model.currentHostOperationSnapshot
         pendingConfirmation = updatedPending

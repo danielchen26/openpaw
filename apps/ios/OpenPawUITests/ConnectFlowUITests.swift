@@ -108,6 +108,7 @@ final class ConnectFlowUITests: XCTestCase {
         while Date() < deadline {
             if app.staticTexts[label].exists { return }
             if issue.exists { issue.buttons["Dismiss"].tap() }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         XCTFail("Timed out waiting for \(label). \(app.debugDescription)")
     }

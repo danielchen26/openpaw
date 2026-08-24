@@ -636,6 +636,41 @@ struct QuickConnectTests {
     }
 
     @MainActor
+    @Test("a newer proposal rejects a late cancellation-ignoring SSH completion before ownership mutation")
+    func newerProposalRejectsLateSSHCompletion() async {
+        let gate = QuickConnectGate()
+        let terminal = QuickConnectRecordingTerminal()
+        terminal.connectGate = gate
+        let model = OpenPawModel(hostStore: HostStore(), terminal: terminal)
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectCountingInstaller(),
+            now: { self.issuedAt })
+        let old = QuickConnectProposal.from(candidate: AddDeviceCandidate(
+            id: "old-ssh", nickname: "Old SSH", hostname: "old-ssh.example", dnsName: nil,
+            tailscaleIPs: [], os: nil, online: true), now: issuedAt)
+        let new = QuickConnectProposal.from(candidate: AddDeviceCandidate(
+            id: "new-ssh", nickname: "New SSH", hostname: "new-ssh.example", dnsName: nil,
+            tailscaleIPs: [], os: nil, online: true), now: issuedAt)
+
+        coordinator.begin(old)
+        coordinator.confirm(.existing(.agentForwarding), username: "dev")
+        await gate.waitUntilStarted()
+
+        coordinator.begin(new)
+        model.hostKeyPrompt = HostKeyPrompt(
+            host: "old-ssh.example",
+            verdict: .unknown(fingerprint: "SHA256:LATE-OLD-CONNECTION"))
+        await gate.release()
+        for _ in 0..<20 { await Task.yield() }
+
+        #expect(coordinator.stage == .reviewing)
+        #expect(coordinator.proposal?.id == new.id)
+        #expect(coordinator.currentLease == nil)
+        #expect(coordinator.terminalRouteIntent == nil)
+    }
+
+    @MainActor
     @Test("cancel makes a suspended credential completion stale")
     func cancelSuppressesCredentialCompletion() async {
         let gate = QuickConnectGate()
@@ -1298,6 +1333,7 @@ private final class QuickConnectRecordingTerminal: TerminalBackend, @unchecked S
     let outputStream = AsyncStream<Data> { $0.finish() }
     private(set) var connectedRecords: [HostRecord] = []
     var connectedHosts: [HostRecord.ID] { connectedRecords.map(\.id) }
+    var connectGate: QuickConnectGate?
     var disconnectGate: QuickConnectGate?
     var onConnect: (@Sendable () -> Void)?
     private var disconnectCount = 0
@@ -1309,6 +1345,7 @@ private final class QuickConnectRecordingTerminal: TerminalBackend, @unchecked S
     func connect(host: HostRecord) async throws {
         connectedRecords.append(host)
         onConnect?()
+        if let connectGate { await connectGate.suspend() }
         continuation.yield(.connected(.ssh))
     }
     func disconnect() async {
