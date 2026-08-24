@@ -117,7 +117,7 @@ public final class QuickConnectCoordinator {
         guard model.ownsConnection(lease) else {
             currentLease = nil
             terminalRouteIntent = nil
-            stage = .failed(.pairing, String(describing: HostPairingError.staleConnection))
+            stage = .failed(.pairing, safeFailureMessage(for: HostPairingError.staleConnection, at: .pairing))
             return
         }
         generation += 1
@@ -153,7 +153,10 @@ public final class QuickConnectCoordinator {
         } catch is CancellationError {
             if self.generation == generation { stage = .cancelled }
         } catch {
-            if self.generation == generation { stage = .failed(failurePoint, String(describing: error)) }
+            if self.generation == generation {
+                let point = failurePoint
+                stage = .failed(point, safeFailureMessage(for: error, at: point))
+            }
         }
     }
 
@@ -268,7 +271,8 @@ public final class QuickConnectCoordinator {
             currentLease = nil
             terminalRouteIntent = nil
         }
-        stage = .failed(failurePoint, String(describing: error))
+        let point = failurePoint
+        stage = .failed(point, safeFailureMessage(for: error, at: point))
     }
 
     private func installCredential(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod {
@@ -277,12 +281,46 @@ public final class QuickConnectCoordinator {
 
     private var failurePoint: FailurePoint {
         switch stage {
+        case .installingCredential: .installingCredential
         case .savingHost: .savingHost
         case .connectingSSH, .awaitingHostTrust: .connectingSSH
         case .openingHostAPI: .openingHostAPI
         case .pairing: .pairing
         case .loadingWorkspace, .connected: .loadingWorkspace
         default: .reviewing
+        }
+    }
+
+    private func safeFailureMessage(for error: any Error, at point: FailurePoint) -> String {
+        if let validationError = error as? ValidationError {
+            switch validationError {
+            case .unreviewedTarget: "The confirmed SSH target is not part of this proposal."
+            case .conflictingHostKeyPin: "The saved host key conflicts with the reviewed Quick Connect fingerprint."
+            case .changedHostKey: "The SSH host key changed and cannot be trusted through Quick Connect."
+            }
+        } else if let credentialError = error as? QuickConnectCredentialInstallError {
+            switch credentialError {
+            case .invalidLabel: "Enter a valid credential label and try again."
+            case .emptySecret: "Enter the SSH credential and try again."
+            case .storageFailed: "The SSH credential could not be saved. Check Keychain access and try again."
+            }
+        } else if let linkError = error as? QuickConnectLinkError, linkError == .expired {
+            "This Quick Connect link has expired. Scan a new code and try again."
+        } else if let pairingError = error as? HostPairingError {
+            switch pairingError {
+            case .unavailable: "Host pairing is unavailable. Check the host and try again."
+            case .staleConnection: "The host connection changed before Quick Connect finished. Start Quick Connect again."
+            }
+        } else {
+            switch point {
+            case .reviewing: "The Quick Connect proposal could not be validated. Review the details and try again."
+            case .installingCredential: "The SSH credential could not be installed. Try again."
+            case .savingHost: "The SSH host could not be saved. Try again."
+            case .connectingSSH: "Could not connect to the SSH host. Check the address and network, then try again."
+            case .openingHostAPI: "The host API could not be opened. Check the host connection and try again."
+            case .pairing: "The host could not be paired. Check the pairing code and try again."
+            case .loadingWorkspace: "The workspace could not be loaded. Try reconnecting."
+            }
         }
     }
 
