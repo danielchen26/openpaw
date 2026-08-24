@@ -57,6 +57,9 @@ public final class QuickConnectCoordinator {
     private var task: Task<Void, Never>?
     private var pendingConfirmation: PendingConfirmation?
 
+    /// Internal synchronization seam for deterministic race tests. The task itself remains outside the public API.
+    var operationTask: Task<Void, Never>? { task }
+
     public init(
         model: OpenPawModel,
         installer: any QuickConnectCredentialInstalling,

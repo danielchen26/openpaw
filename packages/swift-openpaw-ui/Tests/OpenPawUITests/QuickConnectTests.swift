@@ -639,10 +639,8 @@ struct QuickConnectTests {
     @Test("a newer proposal rejects a late cancellation-ignoring SSH completion before ownership mutation")
     func newerProposalRejectsLateSSHCompletion() async {
         let gate = QuickConnectGate()
-        let completion = QuickConnectSignal()
         let terminal = QuickConnectRecordingTerminal()
         terminal.connectGate = gate
-        terminal.connectCompletion = completion
         terminal.emitsConnectedBeforeGate = true
         let model = OpenPawModel(hostStore: HostStore(), terminal: terminal)
         let coordinator = QuickConnectCoordinator(
@@ -662,14 +660,14 @@ struct QuickConnectTests {
         await waitForConnection(model)
         let ownedHostID = model.selectedHostID
         let ownedOperation = model.currentHostOperationSnapshot
+        let lateOperation = coordinator.operationTask
 
         coordinator.begin(new)
         model.hostKeyPrompt = HostKeyPrompt(
             host: "old-ssh.example",
             verdict: .unknown(fingerprint: "SHA256:LATE-OLD-CONNECTION"))
         await gate.release()
-        await completion.wait()
-        for _ in 0..<20 { await Task.yield() }
+        await lateOperation?.value
 
         #expect(coordinator.stage == .reviewing)
         #expect(coordinator.proposal?.id == new.id)
@@ -684,10 +682,8 @@ struct QuickConnectTests {
     @Test("cancel rejects a late cancellation-ignoring SSH completion")
     func cancelRejectsLateSSHCompletion() async {
         let gate = QuickConnectGate()
-        let completion = QuickConnectSignal()
         let terminal = QuickConnectRecordingTerminal()
         terminal.connectGate = gate
-        terminal.connectCompletion = completion
         terminal.emitsConnectedBeforeGate = true
         let model = OpenPawModel(hostStore: HostStore(), terminal: terminal)
         let coordinator = QuickConnectCoordinator(
@@ -704,13 +700,14 @@ struct QuickConnectTests {
         await waitForConnection(model)
         let ownedHostID = model.selectedHostID
         let ownedOperation = model.currentHostOperationSnapshot
+        let lateOperation = coordinator.operationTask
 
         coordinator.cancel()
         model.hostKeyPrompt = HostKeyPrompt(
             host: "cancelled-ssh.example",
             verdict: .unknown(fingerprint: "SHA256:LATE-CANCELLED-CONNECTION"))
         await gate.release()
-        await completion.wait()
+        await lateOperation?.value
 
         #expect(coordinator.stage == .cancelled)
         #expect(coordinator.proposal == nil)
@@ -729,10 +726,8 @@ struct QuickConnectTests {
         let second = HostRecord(
             nickname: "Second", hostname: "second.example", username: "dev", auth: .agentForwarding)
         let gate = QuickConnectGate()
-        let completion = QuickConnectSignal()
         let terminal = QuickConnectRecordingTerminal()
         terminal.connectGate = gate
-        terminal.connectCompletion = completion
         terminal.emitsConnectedBeforeGate = true
         let model = OpenPawModel(hostStore: HostStore(hosts: [first, second]), terminal: terminal)
         let coordinator = QuickConnectCoordinator(
@@ -748,6 +743,7 @@ struct QuickConnectTests {
         await gate.waitUntilStarted()
         await waitForConnection(model)
         let operationBeforeABA = model.currentHostOperationSnapshot
+        let lateOperation = coordinator.operationTask
 
         _ = try #require(await model.selectHost(second.id))
         _ = try #require(await model.selectHost(first.id))
@@ -755,8 +751,7 @@ struct QuickConnectTests {
             host: "first.example",
             verdict: .unknown(fingerprint: "SHA256:LATE-ABA-CONNECTION"))
         await gate.release()
-        await completion.wait()
-        await waitForCoordinatorToSettle(coordinator)
+        await lateOperation?.value
 
         #expect(model.selectedHostID == first.id)
         #expect(model.currentHostOperationSnapshot.hostSelectionToken != operationBeforeABA.hostSelectionToken)
@@ -1425,23 +1420,6 @@ private actor QuickConnectGate {
     }
 }
 
-private actor QuickConnectSignal {
-    private var signaled = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func signal() {
-        signaled = true
-        let pending = waiters
-        waiters.removeAll()
-        pending.forEach { $0.resume() }
-    }
-
-    func wait() async {
-        guard !signaled else { return }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-}
-
 private final class QuickConnectSuspendedInstaller: QuickConnectCredentialInstalling, @unchecked Sendable {
     private let gate: QuickConnectGate
     init(gate: QuickConnectGate) { self.gate = gate }
@@ -1459,7 +1437,6 @@ private final class QuickConnectRecordingTerminal: TerminalBackend, @unchecked S
     private(set) var connectedRecords: [HostRecord] = []
     var connectedHosts: [HostRecord.ID] { connectedRecords.map(\.id) }
     var connectGate: QuickConnectGate?
-    var connectCompletion: QuickConnectSignal?
     var emitsConnectedBeforeGate = false
     var disconnectGate: QuickConnectGate?
     var onConnect: (@Sendable () -> Void)?
@@ -1475,7 +1452,6 @@ private final class QuickConnectRecordingTerminal: TerminalBackend, @unchecked S
         if emitsConnectedBeforeGate { continuation.yield(.connected(.ssh)) }
         if let connectGate { await connectGate.suspend() }
         if !emitsConnectedBeforeGate { continuation.yield(.connected(.ssh)) }
-        await connectCompletion?.signal()
     }
     func disconnect() async {
         disconnectCount += 1
