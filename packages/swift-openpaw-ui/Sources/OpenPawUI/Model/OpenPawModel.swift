@@ -1303,6 +1303,7 @@ public final class OpenPawModel {
     @discardableResult
     public func connectSelectedHost(purpose: HostConnectPurpose = .normal) async -> HostConnectionLease? {
         guard !isSwitchingHost, let terminal, let host = selectedHost else { return nil }
+        let hostSelectionToken = hostSelectionGeneration
         connectionRequestID += 1
         let requestID = connectionRequestID
         stopFollowing()
@@ -1322,7 +1323,8 @@ public final class OpenPawModel {
         do {
             try await terminal.connect(host: host)
             guard connectionRequestID == requestID,
-                  selectedHostID == targetHostID else { return nil }
+                  selectedHostID == targetHostID,
+                  hostSelectionGeneration == hostSelectionToken else { return nil }
             if !connection.isConnected {
                 await withCheckedContinuation { continuation in
                     if connection.isConnected {
@@ -1334,6 +1336,7 @@ public final class OpenPawModel {
             }
             guard connectionRequestID == requestID,
                   selectedHostID == targetHostID,
+                  hostSelectionGeneration == hostSelectionToken,
                   connection.isConnected else { return nil }
             if let lifecycle = backend as? any StructuredBackendLifecycle {
                 do {
@@ -1342,6 +1345,7 @@ public final class OpenPawModel {
                     updateProviderCapabilityState()
                     guard connectionRequestID == requestID,
                           selectedHostID == targetHostID,
+                          hostSelectionGeneration == hostSelectionToken,
                           connection.isConnected,
                           structuredBackendReady else { return nil }
                     if purpose == .normal {
@@ -1367,7 +1371,10 @@ public final class OpenPawModel {
             present(error, while: "connecting to \(host.nickname)")
             return nil
         }
-        return connectionLease(hostID: targetHostID, requestID: requestID)
+        return connectionLease(
+            hostID: targetHostID,
+            requestID: requestID,
+            hostSelectionToken: hostSelectionToken)
     }
 
     public var currentConnectionLease: HostConnectionLease? {
@@ -1425,14 +1432,20 @@ public final class OpenPawModel {
         return result
     }
 
-    private func connectionLease(hostID: HostRecord.ID, requestID: Int) -> HostConnectionLease? {
+    private func connectionLease(
+        hostID: HostRecord.ID,
+        requestID: Int,
+        hostSelectionToken expectedHostSelectionToken: Int? = nil
+    ) -> HostConnectionLease? {
+        let hostSelectionToken = expectedHostSelectionToken ?? hostSelectionGeneration
         guard connectionRequestID == requestID,
               selectedHostID == hostID,
+              hostSelectionGeneration == hostSelectionToken,
               connection.isConnected else { return nil }
         return HostConnectionLease(
             hostID: hostID,
             connectionGeneration: connectionGeneration,
-            hostSelectionToken: hostSelectionGeneration,
+            hostSelectionToken: hostSelectionToken,
             requestID: requestID)
     }
 
@@ -1448,6 +1461,7 @@ public final class OpenPawModel {
         host: HostRecord
     ) async throws -> Bool {
         let hostID = host.id
+        let hostSelectionToken = hostSelectionGeneration
         structuredConnectRequestID += 1
         let requestID = structuredConnectRequestID
         let previousOperation = structuredConnectOperation
@@ -1455,11 +1469,13 @@ public final class OpenPawModel {
             if let previousOperation { _ = try? await previousOperation.value }
             guard structuredConnectRequestID == requestID,
                 selectedHostID == hostID,
+                hostSelectionGeneration == hostSelectionToken,
                 connection.isConnected
             else { throw StructuredConnectSuperseded() }
             await lifecycle.disconnect()
             guard structuredConnectRequestID == requestID,
                 selectedHostID == hostID,
+                hostSelectionGeneration == hostSelectionToken,
                 connection.isConnected
             else {
                 if structuredConnectRequestID == requestID { await lifecycle.disconnect() }
@@ -1470,6 +1486,7 @@ public final class OpenPawModel {
             } catch {
                 guard structuredConnectRequestID == requestID,
                     selectedHostID == hostID,
+                    hostSelectionGeneration == hostSelectionToken,
                     connection.isConnected
                 else {
                     if structuredConnectRequestID == requestID { await lifecycle.disconnect() }
@@ -1480,6 +1497,7 @@ public final class OpenPawModel {
             }
             guard structuredConnectRequestID == requestID,
                 selectedHostID == hostID,
+                hostSelectionGeneration == hostSelectionToken,
                 connection.isConnected
             else {
                 if structuredConnectRequestID == requestID { await lifecycle.disconnect() }
@@ -1488,6 +1506,7 @@ public final class OpenPawModel {
             let ready = await lifecycle.isReady
             guard structuredConnectRequestID == requestID,
                 selectedHostID == hostID,
+                hostSelectionGeneration == hostSelectionToken,
                 connection.isConnected,
                 ready
             else {
@@ -1508,6 +1527,7 @@ public final class OpenPawModel {
         } catch {
             guard structuredConnectRequestID == requestID,
                 selectedHostID == hostID,
+                hostSelectionGeneration == hostSelectionToken,
                 connection.isConnected
             else { return false }
             throw error
