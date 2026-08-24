@@ -461,11 +461,19 @@ class QuickPairingLiveContractTests(unittest.TestCase):
             self.harness.append_live_xcuitest(test_file)
             source = test_file.read_text(encoding="utf-8")
 
-        self.assertIn('if (pager.value as? String) != "Terminal" {', source)
-        conditional_resume = source.index('if (pager.value as? String) != "Terminal" {')
-        resume_wait = source.index('XCTAssertTrue(resume.waitForExistence(timeout: 60)', conditional_resume)
-        resume_tap = source.index("resume.tap()", resume_wait)
-        terminal_wait = source.index('predicate: NSPredicate(format: "value == %@", "Terminal")', resume_tap)
+        self.assertNotIn('if (pager.value as? String) != "Terminal" {', source)
+        reconnect_deadline = source.index("let reconnectDeadline = Date().addingTimeInterval(60)")
+        reconnect_loop = source.index(
+            'while Date() < reconnectDeadline, (pager.value as? String) != "Terminal" {',
+            reconnect_deadline,
+        )
+        resume = source.index('let resume = app.buttons["Resume Debug daemon"]', reconnect_loop)
+        resume_exists = source.index("if resume.exists {", resume)
+        resume_tap = source.index("resume.tap()", resume_exists)
+        resume_break = source.index("break", resume_tap)
+        terminal_wait = source.index(
+            'predicate: NSPredicate(format: "value == %@", "Terminal")', resume_break
+        )
         terminal_surface = source.index(
             'XCTAssertTrue(app.textViews.firstMatch.waitForExistence(timeout: 15)', terminal_wait
         )
@@ -480,14 +488,18 @@ class QuickPairingLiveContractTests(unittest.TestCase):
         )
         persisted = source.index('notify("/persisted")', workspace)
 
-        self.assertLess(conditional_resume, resume_wait)
-        self.assertLess(resume_wait, resume_tap)
-        self.assertLess(resume_tap, terminal_wait)
+        self.assertLess(reconnect_deadline, reconnect_loop)
+        self.assertLess(reconnect_loop, resume)
+        self.assertLess(resume, resume_exists)
+        self.assertLess(resume_exists, resume_tap)
+        self.assertLess(resume_tap, resume_break)
+        self.assertLess(resume_break, terminal_wait)
         self.assertLess(terminal_wait, terminal_surface)
         self.assertLess(terminal_surface, home_fling)
         self.assertLess(home_fling, home_wait)
         self.assertLess(home_wait, workspace)
         self.assertLess(workspace, persisted)
+        self.assertNotIn("resume.waitForExistence", source)
         self.assertNotIn('app.buttons["root.destination.terminal"].tap()', source)
         self.assertNotIn('app.buttons["root.destination.home"]', source)
 

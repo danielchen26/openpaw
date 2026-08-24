@@ -678,10 +678,14 @@ def append_live_xcuitest(test_file: Path) -> None:
         app.launch()
         let connect = app.buttons["Connect to Debug daemon"]
         if connect.waitForExistence(timeout: 10) { connect.tap() }
-        if (pager.value as? String) != "Terminal" {
+        let reconnectDeadline = Date().addingTimeInterval(60)
+        while Date() < reconnectDeadline, (pager.value as? String) != "Terminal" {
             let resume = app.buttons["Resume Debug daemon"]
-            XCTAssertTrue(resume.waitForExistence(timeout: 60), app.debugDescription)
-            resume.tap()
+            if resume.exists {
+                resume.tap()
+                break
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         let reselected = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "Terminal"), object: pager)
