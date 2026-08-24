@@ -507,10 +507,19 @@ final class AppWiring {
         self.hostAPI = hostAPI
         self.model = model
         self.settings = settings
+        #if DEBUG && targetEnvironment(simulator)
+            let holdsQuickConnectWorkspaceStage = debugScenario == .quickPairing
+        #else
+            let holdsQuickConnectWorkspaceStage = false
+        #endif
         self.quickConnectCoordinator = QuickConnectCoordinator(
             model: model,
             installer: quickConnectCredentialInstaller,
-            persistHostStore: { store in hosts.save(store) })
+            persistHostStore: { store in hosts.save(store) },
+            prepareWorkspace: {
+                guard holdsQuickConnectWorkspaceStage else { return }
+                try? await Task.sleep(for: .milliseconds(1_500))
+            })
         gate = GateController(settings: settings)
 
         #if DEBUG && targetEnvironment(simulator)

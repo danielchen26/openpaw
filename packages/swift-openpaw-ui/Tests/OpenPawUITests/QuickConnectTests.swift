@@ -435,6 +435,41 @@ struct QuickConnectTests {
     }
 
     @MainActor
+    @Test("workspace preparation keeps loading observable before automatic Terminal routing")
+    func workspacePreparationKeepsLoadingObservable() async {
+        let proposal = QuickConnectProposal.from(
+            candidate: AddDeviceCandidate(
+                id: "node",
+                nickname: "Studio",
+                hostname: "studio.local",
+                dnsName: nil,
+                tailscaleIPs: [],
+                os: nil,
+                online: true),
+            now: issuedAt)
+        let gate = QuickConnectWorkspacePreparationGate()
+        let model = OpenPawModel(hostStore: HostStore(), terminal: QuickConnectRecordingTerminal())
+        let coordinator = QuickConnectCoordinator(
+            model: model,
+            installer: QuickConnectCountingInstaller(),
+            now: { self.issuedAt },
+            prepareWorkspace: { await gate.wait() })
+
+        coordinator.begin(proposal)
+        coordinator.confirm(.existing(.agentForwarding), username: "daniel")
+        await waitForStage(.loadingWorkspace, coordinator: coordinator)
+
+        #expect(gate.isWaiting)
+        #expect(coordinator.stage == .loadingWorkspace)
+        #expect(coordinator.terminalRouteIntent == coordinator.currentLease)
+
+        gate.release()
+        await waitForCoordinatorToSettle(coordinator)
+
+        #expect(coordinator.stage == .connected)
+    }
+
+    @MainActor
     @Test("canonical existing host preserves metadata and SSH uses the exact confirmed target and username")
     func canonicalExistingHostPreservesMetadataAndUsesReviewedEndpoint() async throws {
         let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(
@@ -1129,6 +1164,23 @@ struct QuickConnectTests {
             }
         }
         Issue.record("coordinator did not settle")
+    }
+
+    @MainActor
+    private final class QuickConnectWorkspacePreparationGate {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private(set) var isWaiting = false
+
+        func wait() async {
+            isWaiting = true
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        func release() {
+            continuation?.resume()
+            continuation = nil
+            isWaiting = false
+        }
     }
 
     @MainActor

@@ -52,15 +52,23 @@ public final class QuickConnectCoordinator {
     private let installer: any QuickConnectCredentialInstalling
     private let now: @Sendable () -> Date
     private let persistHostStore: @MainActor @Sendable (HostStore) -> Void
+    private let prepareWorkspace: @MainActor @Sendable () async -> Void
     private var generation = 0
     private var task: Task<Void, Never>?
     private var pendingConfirmation: PendingConfirmation?
 
-    public init(model: OpenPawModel, installer: any QuickConnectCredentialInstalling, now: @escaping @Sendable () -> Date = Date.init, persistHostStore: @escaping @MainActor @Sendable (HostStore) -> Void = { _ in }) {
+    public init(
+        model: OpenPawModel,
+        installer: any QuickConnectCredentialInstalling,
+        now: @escaping @Sendable () -> Date = Date.init,
+        persistHostStore: @escaping @MainActor @Sendable (HostStore) -> Void = { _ in },
+        prepareWorkspace: @escaping @MainActor @Sendable () async -> Void = {}
+    ) {
         self.model = model
         self.installer = installer
         self.now = now
         self.persistHostStore = persistHostStore
+        self.prepareWorkspace = prepareWorkspace
     }
 
     public func begin(_ proposal: QuickConnectProposal) {
@@ -257,6 +265,7 @@ public final class QuickConnectCoordinator {
         try ensureCurrent(generation, proposal: pending.proposal)
         guard model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
         stage = .loadingWorkspace
+        await prepareWorkspace()
         try ensureCurrent(generation, proposal: pending.proposal)
         guard model.ownsConnection(lease) else { throw HostPairingError.staleConnection }
         stage = .connected

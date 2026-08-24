@@ -1473,6 +1473,7 @@ public struct RootView: View {
                 case .hostKey:
                     model.hostKeyPrompt = nil
                 case .quickConnect:
+                    routeQuickConnectIfOwned(quickConnectCoordinator.stage)
                     quickConnectCoordinator.cancel()
                 case .approval:
                     router.approvalItemID = nil
@@ -1500,6 +1501,7 @@ public struct RootView: View {
             for: stage,
             ownsTerminalLease: ownsTerminalLease) {
             router.destination = destination
+            quickConnectCoordinator.cancel()
         }
     }
 
@@ -1553,7 +1555,9 @@ public struct RootView: View {
     }
 
     private var errorBinding: Binding<Bool> {
-        Binding(get: { model.lastError != nil }, set: { if !$0 { model.lastError = nil } })
+        Binding(
+            get: { model.lastError != nil && currentSheet == nil },
+            set: { if !$0 { model.lastError = nil } })
     }
 
     private func selectSession(_ session: SessionSummary) {
