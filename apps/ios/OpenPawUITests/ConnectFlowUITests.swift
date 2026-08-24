@@ -13,6 +13,11 @@ import XCTest
 ///     OPENPAW_LIVE_NICKNAME=home
 final class ConnectFlowUITests: XCTestCase {
 
+    private let quickPairingTarget = "macbook-pro.tailnet.example"
+    private let quickPairingUsername = "openpaw"
+    private let quickPairingCredentialLabel = "MacBook Pro credential · Saved private key"
+    private let quickPairingFingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
     override func setUp() {
         super.setUp()
         continueAfterFailure = false
@@ -41,6 +46,172 @@ final class ConnectFlowUITests: XCTestCase {
         return app
     }
 
+    private func pairingURL(
+        nickname: String,
+        target: String,
+        sessionID: String,
+        pairingCode: String
+    ) throws -> URL {
+        let issuedAt = Date()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let envelope: [String: Any] = [
+            "v": 1,
+            "issued_at": formatter.string(from: issuedAt),
+            "expires_at": formatter.string(from: issuedAt.addingTimeInterval(240)),
+            "session_id": sessionID,
+            "host_api_port": 8765,
+            "profile": "operator",
+            "pairing_code": pairingCode,
+            "nickname": nickname,
+            "username": quickPairingUsername,
+            "targets": [["hostname": target, "port": 22, "source": "magic_dns"]],
+            "host_keys": [["algorithm": "ssh-ed25519", "fingerprint": quickPairingFingerprint]],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+        let fragment = data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return try XCTUnwrap(URL(string: "openpaw://pair#v1.\(fragment)"))
+    }
+
+    private func openPairingURL(_ url: URL, app: XCUIApplication) {
+        app.open(url)
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10), app.debugDescription)
+    }
+
+    private func assertQuickConnectReview(
+        in app: XCUIApplication,
+        nickname: String,
+        target: String,
+        fingerprint: String,
+        profile: String
+    ) {
+        XCTAssertTrue(app.staticTexts["Quick Connect to \(nickname)"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.buttons["quick-connect.target"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", target)).firstMatch.exists)
+        XCTAssertEqual(app.textFields["quick-connect.username"].value as? String, quickPairingUsername)
+        XCTAssertTrue(app.staticTexts[quickPairingCredentialLabel].exists)
+        XCTAssertTrue(app.staticTexts[fingerprint].exists)
+        XCTAssertTrue(app.staticTexts[profile].exists)
+        XCTAssertTrue(app.buttons["quick-connect.confirm"].exists)
+        XCTAssertEqual(app.buttons["quick-connect.confirm"].label, "Confirm SSH credential and connect")
+        XCTAssertFalse(app.staticTexts["Add a device"].exists)
+        XCTAssertFalse(app.buttons["Tailscale devices"].exists)
+        XCTAssertFalse(app.buttons["Authorize with Tailnet administrator credentials"].exists)
+    }
+
+    private func waitForProgress(_ label: String, in app: XCUIApplication, timeout: TimeInterval = 10) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if app.staticTexts[label].exists { return }
+            dismissSessionDiscoveryIssueIfPresent(in: app)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        XCTFail("Timed out waiting for \(label). \(app.debugDescription)")
+    }
+
+    private func dismissSessionDiscoveryIssueIfPresent(in app: XCUIApplication) {
+        let alert = app.alerts["Session discovery issue"]
+        if alert.exists { alert.buttons["Dismiss"].tap() }
+    }
+
+    private func assertTerminalDestination(in app: XCUIApplication) {
+        dismissSessionDiscoveryIssueIfPresent(in: app)
+        let pager = app.otherElements["root.destination.pager"]
+        let automaticallySelected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Terminal"),
+            object: pager)
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [automaticallySelected], timeout: 10),
+            .completed,
+            app.debugDescription)
+        XCTAssertTrue(app.textViews.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
+    }
+
+    func testMacBookProCandidateQuickConnectsToTerminal() {
+        let app = scenarioApp("quickPairing")
+
+        let candidate = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "MacBook Pro,")).firstMatch
+        XCTAssertTrue(candidate.waitForExistence(timeout: 15), app.debugDescription)
+        candidate.tap()
+
+        assertQuickConnectReview(
+            in: app,
+            nickname: "MacBook Pro",
+            target: quickPairingTarget,
+            fingerprint: "Verify on first connection",
+            profile: "SSH only")
+
+        app.buttons["quick-connect.confirm"].tap()
+        waitForProgress("Connecting SSH", in: app)
+        waitForProgress("Loading workspace", in: app)
+
+        assertTerminalDestination(in: app)
+    }
+
+    func testPairingURLUsesDispatcherAndPairsBeforeOpeningTerminal() throws {
+        let app = scenarioApp("quickPairing")
+        let url = try pairingURL(
+            nickname: "MacBook Pro",
+            target: quickPairingTarget,
+            sessionID: "ses_0123456789abcdef01234567",
+            pairingCode: "ABCD-EFGH-IJKL-MNOP-QRST-UVWX")
+
+        openPairingURL(url, app: app)
+        assertQuickConnectReview(
+            in: app,
+            nickname: "MacBook Pro",
+            target: quickPairingTarget,
+            fingerprint: quickPairingFingerprint,
+            profile: "Operator")
+
+        app.buttons["quick-connect.confirm"].tap()
+        waitForProgress("Connecting SSH", in: app)
+        waitForProgress("Pairing device", in: app)
+        waitForProgress("Loading workspace", in: app)
+
+        assertTerminalDestination(in: app)
+    }
+
+    func testDelayedFirstPairingURLCannotRouteOrOverwriteSecondProposal() throws {
+        let app = scenarioApp("quickPairing")
+        let first = try pairingURL(
+            nickname: "Delayed Mac",
+            target: quickPairingTarget,
+            sessionID: "ses_111111111111111111111111",
+            pairingCode: "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF")
+        let second = try pairingURL(
+            nickname: "MacBook Pro",
+            target: quickPairingTarget,
+            sessionID: "ses_222222222222222222222222",
+            pairingCode: "GGGG-HHHH-IIII-JJJJ-KKKK-LLLL")
+
+        openPairingURL(first, app: app)
+        XCTAssertTrue(app.staticTexts["Quick Connect to Delayed Mac"].waitForExistence(timeout: 10))
+        app.buttons["quick-connect.confirm"].tap()
+        waitForProgress("Connecting SSH", in: app)
+
+        openPairingURL(second, app: app)
+        assertQuickConnectReview(
+            in: app,
+            nickname: "MacBook Pro",
+            target: quickPairingTarget,
+            fingerprint: quickPairingFingerprint,
+            profile: "Operator")
+
+        Thread.sleep(forTimeInterval: 7)
+        XCTAssertTrue(app.staticTexts["Quick Connect to MacBook Pro"].exists, app.debugDescription)
+        XCTAssertNotEqual(app.otherElements["root.destination.pager"].value as? String, "Terminal")
+
+        app.buttons["quick-connect.confirm"].tap()
+        waitForProgress("Connecting SSH", in: app)
+        waitForProgress("Pairing device", in: app)
+        waitForProgress("Loading workspace", in: app)
+        assertTerminalDestination(in: app)
+    }
+
     func testAddDeviceAutomaticallyLoadsPairedHostCandidatesWithTruthfulProvenance() {
         let app = scenarioApp("connectedWorkspace")
 
@@ -56,8 +227,13 @@ final class ConnectFlowUITests: XCTestCase {
         app.buttons["Tailscale devices"].tap()
         XCTAssertTrue(app.staticTexts["A VPN route compatible with Tailscale was detected. This is a connectivity hint, not account access."].waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)["addDevice.tailscale.provenance"].waitForExistence(timeout: 5))
-        let candidate = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "not trusted or saved")).firstMatch
+        let candidates = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "not trusted or saved"))
+        let candidate = candidates.element(boundBy: max(0, candidates.count - 1))
         XCTAssertTrue(candidate.waitForExistence(timeout: 5), app.debugDescription)
+        let scrollViews = app.scrollViews
+        let sheetScrollView = scrollViews.element(boundBy: max(0, scrollViews.count - 1))
+        for _ in 0..<8 where !candidate.isHittable { sheetScrollView.swipeUp() }
+        XCTAssertTrue(candidate.isHittable, app.debugDescription)
         candidate.tap()
         XCTAssertTrue(app.staticTexts["Review before this becomes a host"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Confirm candidate and review SSH details"].exists)

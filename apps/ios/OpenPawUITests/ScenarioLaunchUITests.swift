@@ -29,7 +29,8 @@ final class ScenarioLaunchUITests: XCTestCase {
     func testConnectedWorkspaceSeedsTheRealHomeSurface() {
         let app = launch(scenario: "connectedWorkspace")
 
-        XCTAssertTrue(app.staticTexts["Scenario host"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["1 saved device"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Selected connection is connected.")).firstMatch.exists)
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Open agent session '")).firstMatch.exists)
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Open pending approval '")).firstMatch.exists)
         XCTAssertTrue(app.buttons["Open repository openpaw"].exists)
@@ -44,6 +45,17 @@ final class ScenarioLaunchUITests: XCTestCase {
         let app = launch()
 
         XCTAssertFalse(app.staticTexts["Scenario host"].waitForExistence(timeout: 3))
+    }
+
+    func testQuickPairingSeedsMacBookProWithoutLeakingIntoAddDevice() {
+        let app = launch(scenario: "quickPairing")
+
+        let candidate = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "MacBook Pro,")).firstMatch
+        XCTAssertTrue(candidate.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Online"].exists)
+        XCTAssertFalse(app.staticTexts["Add a device"].exists)
+        XCTAssertFalse(app.buttons["Tailscale devices"].exists)
+        XCTAssertFalse(app.buttons["Authorize with Tailnet administrator credentials"].exists)
     }
 
     func testGatedApprovalAppearsOnlyAfterTheFullCommandIsRevealed() {
