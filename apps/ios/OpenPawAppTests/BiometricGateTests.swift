@@ -19,10 +19,14 @@ final class BiometricGateTests: XCTestCase {
         GatePolicy(requiresBiometrics: enabled, graceInterval: grace, unavailableReason: unavailable)
     }
 
-    private func pairingURL(nickname: String, issuedAt: Date = Date()) -> URL {
+    private func pairingURL(
+        nickname: String,
+        issuedAt: Date = Date(),
+        expiresAfter: TimeInterval = 240
+    ) -> URL {
         let envelope = QuickConnectEnvelopeV1(
             issuedAt: issuedAt,
-            expiresAt: issuedAt.addingTimeInterval(240),
+            expiresAt: issuedAt.addingTimeInterval(expiresAfter),
             sessionID: "ses_0123456789abcdef01234567",
             hostAPIPort: 8765,
             profile: .operator,
@@ -296,6 +300,35 @@ final class BiometricGateTests: XCTestCase {
 
         XCTAssertEqual(wiring.quickConnectCoordinator.proposal?.nickname, "Newest Mac")
         XCTAssertNil(wiring.pendingQuickConnectProposal)
+    }
+
+    @MainActor
+    func testPendingPairingLinkThatExpiresBeforeUnlockIsDiscardedAndCannotReplay() {
+        let wiring = AppWiring()
+        wiring.gate.policy = policy()
+        let receivedAt = Date()
+        let inbox = InboxRoute(
+            hostID: UUID(uuidString: "00000000-0000-0000-0000-000000000005")!,
+            itemID: InboxID(rawValue: "inb_333333333333333333333333")
+        )
+        wiring.pendingInboxRoute = inbox
+
+        wiring.receiveOpenPawURL(
+            pairingURL(nickname: "Expired While Locked", issuedAt: receivedAt, expiresAfter: 1)
+        )
+
+        XCTAssertEqual(wiring.pendingQuickConnectProposal?.nickname, "Expired While Locked")
+        XCTAssertNil(wiring.quickConnectCoordinator.proposal)
+
+        wiring.gate.policy = policy(enabled: false)
+        wiring.openPendingQuickConnectIfUnlocked(now: receivedAt.addingTimeInterval(2))
+
+        XCTAssertNil(wiring.pendingQuickConnectProposal)
+        XCTAssertNil(wiring.quickConnectCoordinator.proposal)
+        XCTAssertEqual(wiring.pendingInboxRoute, inbox)
+
+        wiring.openPendingQuickConnectIfUnlocked(now: receivedAt.addingTimeInterval(3))
+        XCTAssertNil(wiring.quickConnectCoordinator.proposal)
     }
 
     func testScannerRejectsNonOpenPawTextAndOrdinaryWebLinksInPlace() {

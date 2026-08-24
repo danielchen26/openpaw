@@ -341,12 +341,16 @@ final class AppWiring {
         cachedRoot?.cancelInboxRouteRequest()
     }
 
-    func openPendingQuickConnectIfUnlocked() {
+    func openPendingQuickConnectIfUnlocked(now: Date = Date()) {
         guard case .unlocked = gate.decision,
               let proposal = pendingQuickConnectProposal
         else { return }
         pendingQuickConnectProposal = nil
-        rootView().openQuickConnect(proposal)
+        guard let envelope = proposal.envelope,
+              let url = try? QuickConnectLinkCodec().encodeWithoutValidation(envelope),
+              let validatedProposal = try? QuickConnectLinkCodec(now: { now }).decode(url)
+        else { return }
+        rootView().openQuickConnect(validatedProposal)
     }
 
     func cancelPendingQuickConnect() {
