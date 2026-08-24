@@ -30,13 +30,13 @@ public struct QuickConnectEnvelopeV1: Sendable, Hashable, Codable {
     public var sessionID: String
     public var hostAPIPort: Int
     public var profile: QuickConnectProfile
-    public var pairingCode: String?
+    public var pairingCode: String
     public var nickname: String
     public var username: String
     public var targets: [QuickConnectTarget]
     public var hostKeys: [QuickConnectHostKey]
 
-    public init(version: Int = 1, issuedAt: Date, expiresAt: Date, sessionID: String = "test-session", hostAPIPort: Int = 4317, profile: QuickConnectProfile = .operator, pairingCode: String?, nickname: String, username: String, targets: [QuickConnectTarget], hostKeys: [QuickConnectHostKey] = []) {
+    public init(version: Int = 1, issuedAt: Date, expiresAt: Date, sessionID: String, hostAPIPort: Int, profile: QuickConnectProfile, pairingCode: String, nickname: String, username: String, targets: [QuickConnectTarget], hostKeys: [QuickConnectHostKey] = []) {
         self.version = version; self.issuedAt = issuedAt; self.expiresAt = expiresAt; self.sessionID = sessionID; self.hostAPIPort = hostAPIPort; self.profile = profile; self.pairingCode = pairingCode; self.nickname = nickname; self.username = username; self.targets = targets; self.hostKeys = hostKeys
     }
     private enum CodingKeys: String, CodingKey { case version = "v", issuedAt = "issued_at", expiresAt = "expires_at", sessionID = "session_id", hostAPIPort = "host_api_port", profile, pairingCode = "pairing_code", nickname, username, targets, hostKeys = "host_keys" }
@@ -206,8 +206,8 @@ public struct QuickConnectLinkCodec: Sendable {
     public init(now: @escaping @Sendable () -> Date = Date.init) { self.now = now }
 
     public func encode(_ envelope: QuickConnectEnvelopeV1) throws -> URL {
-        try validate(envelope, at: envelope.issuedAt, checkExpiry: false)
-        return try encodeWithoutValidation(envelope)
+        let canonical = try canonicalEnvelope(envelope, at: envelope.issuedAt, checkExpiry: false)
+        return try encodeWithoutValidation(canonical)
     }
 
     public func encodeWithoutValidation(_ envelope: QuickConnectEnvelopeV1) throws -> URL {
@@ -238,7 +238,7 @@ public struct QuickConnectLinkCodec: Sendable {
         let envelope: QuickConnectEnvelopeV1
         do { envelope = try decoder.decode(QuickConnectEnvelopeV1.self, from: data) } catch { throw QuickConnectLinkError.invalidFragment }
         let canonical = try canonicalEnvelope(envelope, at: now(), checkExpiry: true)
-        return QuickConnectProposal(id: UUID().uuidString, version: canonical.version, issuedAt: canonical.issuedAt, expiresAt: canonical.expiresAt, sessionID: canonical.sessionID, hostAPIPort: canonical.hostAPIPort, profile: canonical.profile, pairingCode: canonical.pairingCode.map(Self.normalizePairingCode), nickname: canonical.nickname, username: canonical.username, dnsName: canonical.targets.first(where: { $0.source == .magicDNS })?.hostname, tailscaleIPs: canonical.targets.filter { $0.source == .tailnet }.map(\.hostname), online: false, targets: canonical.targets, hostKeys: canonical.hostKeys, envelope: canonical)
+        return QuickConnectProposal(id: UUID().uuidString, version: canonical.version, issuedAt: canonical.issuedAt, expiresAt: canonical.expiresAt, sessionID: canonical.sessionID, hostAPIPort: canonical.hostAPIPort, profile: canonical.profile, pairingCode: canonical.pairingCode, nickname: canonical.nickname, username: canonical.username, dnsName: canonical.targets.first(where: { $0.source == .magicDNS })?.hostname, tailscaleIPs: canonical.targets.filter { $0.source == .tailnet }.map(\.hostname), online: false, targets: canonical.targets, hostKeys: canonical.hostKeys, envelope: canonical)
     }
 
     private func validate(_ envelope: QuickConnectEnvelopeV1, at now: Date, checkExpiry: Bool) throws {
@@ -255,7 +255,7 @@ public struct QuickConnectLinkCodec: Sendable {
         guard Self.validSessionID(sessionID) else { throw QuickConnectLinkError.invalidFragment }
         guard (1...65535).contains(hostAPIPort) else { throw QuickConnectLinkError.invalidPort }
         guard Self.validPrintable(envelope.nickname, max: 80), Self.validUsername(envelope.username) else { throw QuickConnectLinkError.invalidFragment }
-        guard let code = envelope.pairingCode, !Self.normalizePairingCode(code).isEmpty else { throw QuickConnectLinkError.emptyPairingCode }
+        let pairingCode = try Self.canonicalPairingCode(envelope.pairingCode)
         guard (1...8).contains(envelope.targets.count) else { throw QuickConnectLinkError.invalidTarget }
         guard envelope.hostKeys.count <= 4 else { throw QuickConnectLinkError.unsupportedFingerprintAlgorithm(envelope.hostKeys.first?.algorithm ?? "") }
         var seen = Set<String>()
@@ -275,10 +275,17 @@ public struct QuickConnectLinkCodec: Sendable {
             guard ["ssh-ed25519", "ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"].contains(key.algorithm) else { throw QuickConnectLinkError.unsupportedFingerprintAlgorithm(key.algorithm) }
             guard Self.validSHA256Fingerprint(key.fingerprint) else { throw QuickConnectLinkError.unsupportedFingerprintAlgorithm(key.algorithm) }
         }
-        return QuickConnectEnvelopeV1(version: envelope.version, issuedAt: envelope.issuedAt, expiresAt: envelope.expiresAt, sessionID: sessionID, hostAPIPort: hostAPIPort, profile: envelope.profile, pairingCode: envelope.pairingCode, nickname: envelope.nickname, username: envelope.username, targets: canonicalTargets, hostKeys: envelope.hostKeys)
+        return QuickConnectEnvelopeV1(version: envelope.version, issuedAt: envelope.issuedAt, expiresAt: envelope.expiresAt, sessionID: sessionID, hostAPIPort: hostAPIPort, profile: envelope.profile, pairingCode: pairingCode, nickname: envelope.nickname, username: envelope.username, targets: canonicalTargets, hostKeys: envelope.hostKeys)
     }
 
-    private static func normalizePairingCode(_ code: String) -> String { code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
+    private static func canonicalPairingCode(_ code: String) throws -> String {
+        let canonical = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard canonical.range(of: #"^[A-Z2-7]{4}(-[A-Z2-7]{4}){5}$"#, options: .regularExpression) != nil else {
+            if canonical.isEmpty { throw QuickConnectLinkError.emptyPairingCode }
+            throw QuickConnectLinkError.invalidFragment
+        }
+        return canonical
+    }
     private static func sourceRank(_ source: QuickConnectTarget.Source) -> Int {
         switch source { case .magicDNS: 0; case .tailnet: 1; case .explicit: 2 }
     }
@@ -288,7 +295,7 @@ public struct QuickConnectLinkCodec: Sendable {
     }
 
     private static func validPrintable(_ value: String, max: Int) -> Bool {
-        !value.isEmpty && value.count <= max && value.rangeOfCharacter(from: .controlCharacters) == nil
+        value == value.trimmingCharacters(in: .whitespacesAndNewlines) && !value.isEmpty && value.count <= max && value.rangeOfCharacter(from: .controlCharacters) == nil
     }
 
     private static func validUsername(_ value: String) -> Bool {
@@ -310,12 +317,13 @@ public struct QuickConnectLinkCodec: Sendable {
     }
 
     private static func canonicalDNS(_ host: String) -> String? {
-        let lower = host.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+        guard !host.hasPrefix(".") else { return nil }
+        let lower = host.hasSuffix(".") ? String(host.dropLast()).lowercased() : host.lowercased()
         guard !lower.isEmpty, lower.count <= 253 else { return nil }
         let labels = lower.split(separator: ".", omittingEmptySubsequences: false)
         guard labels.allSatisfy({ label in
-            guard (1...63).contains(label.count), label.first?.isLetter == true || label.first?.isNumber == true, label.last?.isLetter == true || label.last?.isNumber == true else { return false }
-            return label.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" }
+            guard (1...63).contains(label.count), let first = label.first, let last = label.last, first.isASCII, last.isASCII, (first.isLetter || first.isNumber), (last.isLetter || last.isNumber) else { return false }
+            return label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
         }) else { return nil }
         return lower
     }

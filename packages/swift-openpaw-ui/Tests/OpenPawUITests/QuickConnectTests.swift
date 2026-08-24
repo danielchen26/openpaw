@@ -63,7 +63,7 @@ struct QuickConnectTests {
             "v": 1,
             "issued_at": iso(issuedAt),
             "expires_at": iso(expiresAt),
-            "pairing_code": "ABCD",
+            "pairing_code": "ABCD-EFGH-IJKL-MNOP-QRST-UVWX",
             "nickname": "Studio",
             "username": "daniel",
             "targets": [["hostname": "studio.local", "port": 22, "source": "explicit"]],
@@ -96,7 +96,7 @@ struct QuickConnectTests {
             sessionID: "ses_canonical",
             hostAPIPort: 4317,
             profile: .operator,
-            pairingCode: "ABCD",
+            pairingCode: "ABCD-EFGH-IJKL-MNOP-QRST-UVWX",
             nickname: "Studio",
             username: "daniel",
             targets: [
@@ -113,10 +113,44 @@ struct QuickConnectTests {
 
         let valid = knownEnvelope()
         for host in ["studio.local/path", "studio.local:22", "fd7a:115c:a1e0::7::8", "[fd7a:115c:a1e0::7]"] {
-            try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: host, port: 22, source: .explicit)], hostKeys: []))
+            try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: host, port: 22, source: .explicit)], hostKeys: []))
         }
-        try expectDecodeError(.duplicateTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: "fd7a:115c:a1e0::7", source: .tailnet), QuickConnectTarget(hostname: "FD7A:115C:A1E0:0:0:0:0:7", source: .tailnet)], hostKeys: []))
-        try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: "100.64.0.7", source: .tailnet), QuickConnectTarget(hostname: "studio.tailnet.ts.net", source: .magicDNS)], hostKeys: []))
+        try expectDecodeError(.duplicateTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: "fd7a:115c:a1e0::7", source: .tailnet), QuickConnectTarget(hostname: "FD7A:115C:A1E0:0:0:0:0:7", source: .tailnet)], hostKeys: []))
+        try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: "100.64.0.7", source: .tailnet), QuickConnectTarget(hostname: "studio.tailnet.ts.net", source: .magicDNS)], hostKeys: []))
+    }
+
+    @Test("encode serializes canonical envelope values")
+    func encodeSerializesCanonicalEnvelopeValues() throws {
+        let codec = QuickConnectLinkCodec(now: { issuedAt })
+        let input = QuickConnectEnvelopeV1(
+            issuedAt: issuedAt,
+            expiresAt: expiresAt,
+            sessionID: "ses_encode",
+            hostAPIPort: 4317,
+            profile: .observer,
+            pairingCode: "abcd-efgh-ijkl-mnop-qrst-uvwx",
+            nickname: "Studio",
+            username: "daniel",
+            targets: [QuickConnectTarget(hostname: "STUDIO.tailnet.ts.net.", source: .magicDNS)],
+            hostKeys: []
+        )
+
+        let proposal = try codec.decode(try codec.encode(input))
+
+        #expect(proposal.envelope?.pairingCode == "ABCD-EFGH-IJKL-MNOP-QRST-UVWX")
+        #expect(proposal.targets.map(\.hostname) == ["studio.tailnet.ts.net"])
+    }
+
+    @Test("decoder rejects non daemon-shaped pairing codes, non ASCII DNS, leading dots, and untrimmed nicknames")
+    func decoderRejectsFinalEnvelopeValidationEdges() throws {
+        let valid = knownEnvelope()
+        for code in ["ABCD", "ABCD-EFGH-IJKL-MNOP-QRST-UVW1", "ABCD-EFGH-IJKL-MNOP-QRST-UVW8"] {
+            try expectDecodeError(.invalidFragment, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: code, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: []))
+        }
+        try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: "stüdio.local", source: .explicit)], hostKeys: []))
+        try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: ".studio.local", source: .explicit)], hostKeys: []))
+        try expectDecodeError(.invalidFragment, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: " Studio", username: valid.username, targets: valid.targets, hostKeys: []))
+        try expectDecodeError(.invalidFragment, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: "", username: valid.username, targets: valid.targets, hostKeys: []))
     }
 
     @Test("ordered targets prefer MagicDNS, Tailnet IPs, then explicit hostname")
@@ -150,22 +184,22 @@ struct QuickConnectTests {
         let valid = knownEnvelope()
 
         try expectDecodeError(.expired, codec: codec, envelope: valid)
-        try expectDecodeError(.expiryTooLong, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: issuedAt.addingTimeInterval(301), pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
-        try expectDecodeError(.expiryTooLong, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: issuedAt, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
-        try expectDecodeError(.invalidPort, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: "studio", port: 0, source: .explicit)], hostKeys: valid.hostKeys))
-        try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: "bad host", port: 22, source: .explicit)], hostKeys: valid.hostKeys))
-        try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: "user@studio.local", port: 22, source: .explicit)], hostKeys: valid.hostKeys))
-        try expectDecodeError(.duplicateTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: [valid.targets[0], valid.targets[0]], hostKeys: valid.hostKeys))
-        try expectDecodeError(.unsupportedFingerprintAlgorithm("md5"), codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: [QuickConnectHostKey(algorithm: "md5", fingerprint: "MD5:aa")]))
-        try expectDecodeError(.unsupportedFingerprintAlgorithm("ssh-ed25519"), codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: [QuickConnectHostKey(algorithm: "ssh-ed25519", fingerprint: "SHA256:AAAA=")]))
-        try expectDecodeError(.unsupportedFingerprintAlgorithm("ssh-ed25519"), codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: [QuickConnectHostKey(algorithm: "ssh-ed25519", fingerprint: "SHA256:")]))
-        try expectDecodeError(.emptyPairingCode, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, pairingCode: "", nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
-        try expectDecodeError(.invalidFragment, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: "bad session", hostAPIPort: 4317, profile: .observer, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
-        try expectDecodeError(.invalidPort, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: 0, profile: .observer, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
-        try expectDecodeError(.invalidFragment, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: .observer, pairingCode: valid.pairingCode!, nickname: "Bad\nName", username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
-        try expectDecodeError(.invalidFragment, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: .observer, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: "bad user", targets: valid.targets, hostKeys: valid.hostKeys))
-        try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: .observer, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: Array(repeating: valid.targets[0], count: 9), hostKeys: []))
-        try expectDecodeError(.unsupportedFingerprintAlgorithm("ssh-ed25519"), codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: .observer, pairingCode: valid.pairingCode!, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: Array(repeating: valid.hostKeys[0], count: 5)))
+        try expectDecodeError(.expiryTooLong, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: issuedAt.addingTimeInterval(301), sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
+        try expectDecodeError(.expiryTooLong, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: issuedAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
+        try expectDecodeError(.invalidPort, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: "studio", port: 0, source: .explicit)], hostKeys: valid.hostKeys))
+        try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: "bad host", port: 22, source: .explicit)], hostKeys: valid.hostKeys))
+        try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: [QuickConnectTarget(hostname: "user@studio.local", port: 22, source: .explicit)], hostKeys: valid.hostKeys))
+        try expectDecodeError(.duplicateTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: [valid.targets[0], valid.targets[0]], hostKeys: valid.hostKeys))
+        try expectDecodeError(.unsupportedFingerprintAlgorithm("md5"), codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: [QuickConnectHostKey(algorithm: "md5", fingerprint: "MD5:aa")]))
+        try expectDecodeError(.unsupportedFingerprintAlgorithm("ssh-ed25519"), codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: [QuickConnectHostKey(algorithm: "ssh-ed25519", fingerprint: "SHA256:AAAA=")]))
+        try expectDecodeError(.unsupportedFingerprintAlgorithm("ssh-ed25519"), codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: [QuickConnectHostKey(algorithm: "ssh-ed25519", fingerprint: "SHA256:")]))
+        try expectDecodeError(.emptyPairingCode, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: valid.profile, pairingCode: "", nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
+        try expectDecodeError(.invalidFragment, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: "bad session", hostAPIPort: 4317, profile: .observer, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
+        try expectDecodeError(.invalidPort, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: 0, profile: .observer, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
+        try expectDecodeError(.invalidFragment, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: .observer, pairingCode: valid.pairingCode, nickname: "Bad\nName", username: valid.username, targets: valid.targets, hostKeys: valid.hostKeys))
+        try expectDecodeError(.invalidFragment, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: .observer, pairingCode: valid.pairingCode, nickname: valid.nickname, username: "bad user", targets: valid.targets, hostKeys: valid.hostKeys))
+        try expectDecodeError(.invalidTarget, codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: .observer, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: Array(repeating: valid.targets[0], count: 9), hostKeys: []))
+        try expectDecodeError(.unsupportedFingerprintAlgorithm("ssh-ed25519"), codec: QuickConnectLinkCodec(now: { issuedAt }), envelope: QuickConnectEnvelopeV1(issuedAt: issuedAt, expiresAt: expiresAt, sessionID: valid.sessionID, hostAPIPort: valid.hostAPIPort, profile: .observer, pairingCode: valid.pairingCode, nickname: valid.nickname, username: valid.username, targets: valid.targets, hostKeys: Array(repeating: valid.hostKeys[0], count: 5)))
 
         #expect(throws: QuickConnectLinkError.invalidScheme) { try codec.decode(URL(string: "https://pair#v1.abc")!) }
         #expect(throws: QuickConnectLinkError.invalidHost) { try codec.decode(URL(string: "openpaw://connect#v1.abc")!) }
