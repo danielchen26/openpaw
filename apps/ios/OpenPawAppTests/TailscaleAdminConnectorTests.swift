@@ -77,6 +77,17 @@ final class TailscaleAdminConnectorTests: XCTestCase {
         }
     }
 
+    func testLiveQuad100IdentityOnSignedInPhysicalDevice() async throws {
+        guard ProcessInfo.processInfo.environment["OPENPAW_LIVE_TAILSCALE"] == "1" else {
+            throw XCTSkip("Set OPENPAW_LIVE_TAILSCALE=1 on a signed-in physical Tailscale device")
+        }
+
+        let identity = try await Quad100TailscaleLocalIdentityConnector().localIdentity()
+
+        XCTAssertFalse(identity.tailnetName?.isEmpty ?? true)
+        XCTAssertFalse(identity.deviceName?.isEmpty ?? true)
+    }
+
     func testRefreshesShortLivedInMemoryTokenOnExpiry() async throws {
         let clock = ManualClock(Date(timeIntervalSince1970: 100))
         let now: @Sendable () -> Date = { clock.now() }
