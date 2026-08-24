@@ -48,6 +48,8 @@ public actor HostClient {
     /// Header the host may use to name the capability a 403 was missing.
     public static let requiredCapabilityHeader = "X-OpenPaw-Required-Capability"
     private static let pairingIdempotencyHeader = "x-openpaw-idempotency-key"
+    /// Two maximum-duration attempts must finish before the host's 60-second recovery entry expires.
+    private static let pairingRequestTimeout: TimeInterval = 15
 
     public let baseURL: URL
     private let session: URLSession
@@ -82,7 +84,7 @@ public actor HostClient {
         let body = try encode(
             PairRequest(pairingCode: pairingCode, deviceName: deviceName, platform: platform)
         )
-        let request = try makeRequest(
+        var request = try makeRequest(
             method: "POST",
             path: "/v1/pair",
             body: body,
@@ -92,6 +94,7 @@ public actor HostClient {
             ],
             signed: false
         )
+        request.timeoutInterval = Self.pairingRequestTimeout
         return try decode(PairingResult.self, from: try await sendPairingRequest(request))
     }
 

@@ -401,6 +401,19 @@ final class HostClientTests: XCTestCase {
         XCTAssertEqual(Data(base64Encoded: paddedBase64)?.count, 32)
     }
 
+    func testPairUsesExplicitTimeoutInsideServerRecoveryWindow() async throws {
+        respond(status: 200, body: successfulPairingBody)
+        let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
+
+        _ = try await client.pair(
+            pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+        )
+
+        let request = try XCTUnwrap(StubResponder.shared.recorded.first)
+        XCTAssertEqual(request.timeoutInterval, 15)
+        XCTAssertLessThan(request.timeoutInterval, 60)
+    }
+
     func testPairRetriesNetworkConnectionLostOnceWithTheIdenticalRequest() async throws {
         let responseBody = successfulPairingBody
         StubResponder.shared.install { request in
@@ -427,11 +440,42 @@ final class HostClientTests: XCTestCase {
         XCTAssertEqual(second.httpMethod, first.httpMethod)
         XCTAssertEqual(second.httpBodyData, first.httpBodyData)
         XCTAssertEqual(second.allHTTPHeaderFields, first.allHTTPHeaderFields)
+        XCTAssertEqual(first.timeoutInterval, 15)
+        XCTAssertEqual(second.timeoutInterval, first.timeoutInterval)
+        XCTAssertLessThan(second.timeoutInterval, 60)
         let headerName = "x-openpaw-idempotency-key"
         XCTAssertEqual(
             second.value(forHTTPHeaderField: headerName),
             try XCTUnwrap(first.value(forHTTPHeaderField: headerName))
         )
+    }
+
+    func testPairRetriesTimedOutTransportOnceWithTheIdenticalRequest() async throws {
+        let responseBody = successfulPairingBody
+        StubResponder.shared.install { request in
+            if StubResponder.shared.recorded.count == 1 {
+                return .failure(URLError(.timedOut))
+            }
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: [:]
+            )!
+            return .success(response, Data(responseBody.utf8))
+        }
+
+        let client = HostClient(baseURL: baseURL, signer: nil, session: makeSession())
+        _ = try await client.pair(
+            pairingCode: "123456", deviceName: "iPhone", platform: "ios"
+        )
+
+        let requests = StubResponder.shared.recorded
+        XCTAssertEqual(requests.count, 2)
+        let first = try XCTUnwrap(requests.first)
+        let second = try XCTUnwrap(requests.last)
+        XCTAssertEqual(second.url, first.url)
+        XCTAssertEqual(second.httpBodyData, first.httpBodyData)
+        XCTAssertEqual(second.allHTTPHeaderFields, first.allHTTPHeaderFields)
+        XCTAssertEqual(second.timeoutInterval, first.timeoutInterval)
     }
 
     func testPairStopsAfterOneRetryWhenTransportKeepsFailing() async {
