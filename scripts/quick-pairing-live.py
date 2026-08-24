@@ -481,9 +481,6 @@ def host_binary(layout: ScratchLayout, explicit: str | None) -> Path:
         if not binary.is_file():
             raise HarnessError(f"openpaw-host binary does not exist: {binary}")
         return binary
-    existing = REPO / "host" / "target" / "debug" / "openpaw-host"
-    if existing.is_file():
-        return existing
     run_checked(
         ["cargo", "build", "-p", "openpaw-host"],
         cwd=REPO / "host",

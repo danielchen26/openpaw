@@ -104,6 +104,68 @@ class QuickPairingLiveContractTests(unittest.TestCase):
             self.assertIn("PermitRootLogin no", config)
             self.assertNotIn(str(REPO_ROOT), config)
 
+    def test_default_host_binary_builds_current_source_into_scratch_even_if_repo_binary_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            repo = root / "repo"
+            host = repo / "host"
+            stale = host / "target" / "debug" / "openpaw-host"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("stale", encoding="utf-8")
+            layout = self.harness.ScratchLayout.create(root / "run")
+
+            def build(command, *, cwd, env, description):
+                self.assertEqual(command, ["cargo", "build", "-p", "openpaw-host"])
+                self.assertEqual(cwd, host)
+                self.assertEqual(env["CARGO_TARGET_DIR"], str(layout.build_target))
+                self.assertEqual(description, "openpaw-host build")
+                binary = layout.build_target / "debug" / "openpaw-host"
+                binary.parent.mkdir(parents=True, exist_ok=True)
+                binary.write_text("current", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.object(self.harness, "REPO", repo), mock.patch.object(
+                self.harness, "run_checked", side_effect=build
+            ) as run_checked:
+                binary = self.harness.host_binary(layout, None)
+
+            self.assertEqual(binary, layout.build_target / "debug" / "openpaw-host")
+            self.assertNotEqual(binary, stale)
+            run_checked.assert_called_once()
+
+    def test_explicit_host_binary_is_reused_without_building(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            layout = self.harness.ScratchLayout.create(root / "run")
+            binary = root / "prebuilt-openpaw-host"
+            binary.write_text("explicit", encoding="utf-8")
+
+            with mock.patch.object(self.harness, "run_checked") as run_checked:
+                selected = self.harness.host_binary(layout, str(binary))
+
+            self.assertEqual(selected, binary)
+            run_checked.assert_not_called()
+
+    def test_host_build_failure_is_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            repo = root / "repo"
+            (repo / "host").mkdir(parents=True)
+            layout = self.harness.ScratchLayout.create(root / "run")
+            failed = subprocess.CompletedProcess(
+                ["cargo"], 101, "", "pairing_code=BUILD-SECRET"
+            )
+
+            with mock.patch.object(self.harness, "REPO", repo), mock.patch.object(
+                self.harness.subprocess, "run", return_value=failed
+            ):
+                with self.assertRaises(self.harness.HarnessError) as raised:
+                    self.harness.host_binary(layout, None)
+
+            message = str(raised.exception)
+            self.assertIn("pairing_code=<redacted>", message)
+            self.assertNotIn("BUILD-SECRET", message)
+
     def test_xcuitest_command_uses_dynamic_simulator_and_scratch_derived_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
