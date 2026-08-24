@@ -64,7 +64,7 @@ pub struct AppState {
     pub nonces: Arc<auth::NonceCache>,
     /// Outstanding pairing codes.
     pub pairing: Arc<auth::PairingCodes>,
-    /// Short-lived recovery for successful pairing responses.
+    /// Short-lived pairing response recovery with per-entry timed cleanup.
     pub pair_recovery: Arc<api::pair::PairRecovery>,
     /// Loopback preview proxy.
     pub proxy: Arc<openpaw_preview::Proxy>,

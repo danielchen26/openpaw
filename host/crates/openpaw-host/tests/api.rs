@@ -192,11 +192,15 @@ impl Harness {
     }
 
     async fn issue_pairing_code(&self) -> String {
+        self.issue_pairing_code_with_name(None).await
+    }
+
+    async fn issue_pairing_code_with_name(&self, device_name: Option<&str>) -> String {
         let response = self
             .client
             .post(format!("{}/v1/pairing-code", self.base))
             .header(auth::HOOK_TOKEN_HEADER, self.app.store.hook_token())
-            .json(&json!({}))
+            .json(&json!({ "device_name": device_name }))
             .send()
             .await
             .expect("issue pairing code");
@@ -2545,6 +2549,52 @@ async fn pairing_idempotency_replays_identical_credentials_without_side_effects(
 }
 
 #[tokio::test]
+async fn pairing_idempotency_uses_the_effective_declared_name_for_replay_semantics() {
+    let harness = Harness::boot().await;
+
+    let code = harness.issue_pairing_code_with_name(Some("Mac")).await;
+    let key = pairing_idempotency_key(8);
+    let first = harness
+        .pair_request(&code.to_lowercase(), "", " ios ", Some(&key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200);
+    let first: Value = first.json().await.unwrap();
+
+    let equivalent = harness
+        .pair_request(&code.replace('-', ""), "Mac", "ios", Some(&key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(equivalent.status(), 200);
+    assert_eq!(equivalent.json::<Value>().await.unwrap(), first);
+
+    let conflict = harness
+        .pair_request(&code, "device", "ios", Some(&key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), 409);
+
+    let reverse_code = harness.issue_pairing_code_with_name(Some("Mac")).await;
+    let reverse_key = pairing_idempotency_key(9);
+    let first = harness
+        .pair_request(&reverse_code, "device", "ios", Some(&reverse_key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200);
+
+    let reverse_conflict = harness
+        .pair_request(&reverse_code, "", "ios", Some(&reverse_key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reverse_conflict.status(), 409);
+}
+
+#[tokio::test]
 async fn pairing_idempotency_rejects_a_key_reused_for_another_fingerprint() {
     let harness = Harness::boot().await;
     let code = harness.issue_pairing_code().await;
@@ -2618,12 +2668,15 @@ async fn pairing_idempotency_serializes_concurrent_retries() {
         right.json::<Value>().await.unwrap()
     );
     assert_eq!(harness.app.store.devices().len(), devices_before + 1);
-    assert!(
-        harness
-            .audit_entries()
-            .await
-            .iter()
-            .all(|entry| !entry.result.starts_with("rejected:"))
+    let successful_pair_audits = harness
+        .audit_entries()
+        .await
+        .into_iter()
+        .filter(|entry| entry.action == "device.pair" && entry.result.starts_with("paired with"))
+        .count();
+    assert_eq!(
+        successful_pair_audits, 1,
+        "concurrent retries must produce exactly one successful device.pair audit"
     );
 }
 

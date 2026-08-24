@@ -14,7 +14,8 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
@@ -24,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use crate::AppState;
 use crate::api::ApiError;
@@ -42,7 +44,7 @@ const RECOVERY_CAPACITY: usize = 64;
 /// The inner entries intentionally implement no `Debug`: they hold the one-time
 /// bearer token and HMAC key. The outer implementation reports policy only.
 pub struct PairRecovery {
-    inner: Mutex<PairRecoveryState>,
+    inner: Arc<Mutex<PairRecoveryState>>,
     ttl: Duration,
     capacity: usize,
 }
@@ -50,23 +52,48 @@ pub struct PairRecovery {
 #[derive(Default)]
 struct PairRecoveryState {
     entries: VecDeque<PairRecoveryEntry>,
+    next_id: u64,
 }
 
 struct PairRecoveryEntry {
-    key: String,
-    fingerprint: [u8; 32],
+    id: u64,
+    key_digest: [u8; 32],
+    fingerprint: PairingFingerprint,
+    declared_name_digest: [u8; 32],
     response: PairResponse,
     inserted_at: Instant,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct PairingFingerprint {
+    code: [u8; 32],
+    name: [u8; 32],
+    platform: [u8; 32],
 }
 
 impl PairRecovery {
     /// Create the standard 60-second, 64-entry in-memory recovery cache.
     pub fn new() -> PairRecovery {
         PairRecovery {
-            inner: Mutex::new(PairRecoveryState::default()),
+            inner: Arc::new(Mutex::new(PairRecoveryState::default())),
             ttl: RECOVERY_TTL,
             capacity: RECOVERY_CAPACITY,
         }
+    }
+
+    fn schedule_cleanup(&self, entry_id: u64, expires_at: Instant) {
+        let inner = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            tokio::time::sleep_until(expires_at).await;
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            inner
+                .lock()
+                .await
+                .entries
+                .retain(|entry| entry.id != entry_id);
+        });
     }
 }
 
@@ -92,25 +119,35 @@ impl PairRecoveryState {
     }
 
     fn find(&self, key: &str) -> Option<&PairRecoveryEntry> {
-        self.entries.iter().find(|entry| entry.key == key)
+        let key_digest = digest_field(key);
+        self.entries
+            .iter()
+            .find(|entry| entry.key_digest == key_digest)
     }
 
     fn insert(
         &mut self,
-        key: String,
-        fingerprint: [u8; 32],
+        key: &str,
+        fingerprint: PairingFingerprint,
+        declared_name_digest: [u8; 32],
         response: PairResponse,
         capacity: usize,
-    ) {
+    ) -> (u64, Instant) {
         while self.entries.len() >= capacity {
             self.entries.pop_front();
         }
+        let id = self.next_id;
+        self.next_id += 1;
+        let inserted_at = Instant::now();
         self.entries.push_back(PairRecoveryEntry {
-            key,
+            id,
+            key_digest: digest_field(key),
             fingerprint,
+            declared_name_digest,
             response,
-            inserted_at: Instant::now(),
+            inserted_at,
         });
+        (id, inserted_at)
     }
 }
 
@@ -233,17 +270,15 @@ pub async fn pair(
     Json(request): Json<PairRequest>,
 ) -> Result<Json<PairResponse>, ApiError> {
     let idempotency_key = parse_idempotency_key(&headers)?;
-    let fingerprint = idempotency_key
-        .as_ref()
-        .map(|_| pairing_fingerprint(&request));
 
     // Pairing is globally low-frequency. Holding one transaction lock through
     // code consumption, durable writes and recovery publication makes concurrent
     // retries observe either the completed result or the in-flight transaction.
     let mut recovery = app.pair_recovery.inner.lock().await;
     recovery.remove_expired(app.pair_recovery.ttl);
-    if let (Some(key), Some(fingerprint)) = (&idempotency_key, fingerprint) {
+    if let Some(key) = &idempotency_key {
         if let Some(entry) = recovery.find(key) {
+            let fingerprint = pairing_fingerprint(&request, entry.declared_name_digest);
             if entry.fingerprint == fingerprint {
                 return Ok(Json(entry.response.clone()));
             }
@@ -307,13 +342,23 @@ pub async fn pair(
 
     // Ordering is deliberate: persistent device insert, durable audit, then the
     // process-local recovery entry, and only then the HTTP response.
-    if let (Some(key), Some(fingerprint)) = (idempotency_key, fingerprint) {
-        recovery.insert(
-            key,
+    if let Some(key) = idempotency_key {
+        let declared_name = pick_name("", pending.device_name.as_deref());
+        let declared_name_digest = digest_field(&declared_name);
+        let fingerprint = PairingFingerprint {
+            code: digest_field(&auth::normalize_pairing_code(&request.pairing_code)),
+            name: digest_field(&name),
+            platform: digest_field(&sanitize_label(&request.platform, "unknown")),
+        };
+        let (entry_id, inserted_at) = recovery.insert(
+            &key,
             fingerprint,
+            declared_name_digest,
             response.clone(),
             app.pair_recovery.capacity,
         );
+        app.pair_recovery
+            .schedule_cleanup(entry_id, inserted_at + app.pair_recovery.ttl);
     }
 
     tracing::info!(device = %device_id, name = %name, profile = ?pending.profile, "device paired");
@@ -350,17 +395,26 @@ fn parse_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiError
     Ok(Some(value.to_owned()))
 }
 
-fn pairing_fingerprint(request: &PairRequest) -> [u8; 32] {
-    let fields = [
-        auth::normalize_pairing_code(&request.pairing_code),
-        sanitize_label(&request.device_name, "device"),
-        sanitize_label(&request.platform, "unknown"),
-    ];
-    let mut digest = Sha256::new();
-    for field in fields {
-        digest.update((field.len() as u64).to_be_bytes());
-        digest.update(field.as_bytes());
+fn pairing_fingerprint(
+    request: &PairRequest,
+    declared_name_digest: [u8; 32],
+) -> PairingFingerprint {
+    let name = if request.device_name.trim().is_empty() {
+        declared_name_digest
+    } else {
+        digest_field(&sanitize_label(&request.device_name, "device"))
+    };
+    PairingFingerprint {
+        code: digest_field(&auth::normalize_pairing_code(&request.pairing_code)),
+        name,
+        platform: digest_field(&sanitize_label(&request.platform, "unknown")),
     }
+}
+
+fn digest_field(field: &str) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update((field.len() as u64).to_be_bytes());
+    digest.update(field.as_bytes());
     digest.finalize().into()
 }
 
@@ -456,8 +510,13 @@ mod tests {
     fn expired_pairing_recovery_entries_are_removed_without_sleeping() {
         let mut state = PairRecoveryState::default();
         let key = "test-key".to_owned();
-        state.insert(
-            key.clone(),
+        let _ = state.insert(
+            &key,
+            PairingFingerprint {
+                code: [7; 32],
+                name: [7; 32],
+                platform: [7; 32],
+            },
             [7; 32],
             PairResponse {
                 device_id: "dev_expired".to_owned(),
@@ -477,8 +536,13 @@ mod tests {
     #[tokio::test]
     async fn pairing_recovery_debug_never_exposes_cached_credentials() {
         let recovery = PairRecovery::new();
-        recovery.inner.lock().await.insert(
-            "secret-idempotency-key".to_owned(),
+        let _ = recovery.inner.lock().await.insert(
+            "secret-idempotency-key",
+            PairingFingerprint {
+                code: [9; 32],
+                name: [9; 32],
+                platform: [9; 32],
+            },
             [9; 32],
             PairResponse {
                 device_id: "dev_cached".to_owned(),
@@ -493,5 +557,44 @@ mod tests {
         assert!(!debug.contains("secret-idempotency-key"), "{debug}");
         assert!(!debug.contains("SECRET-CACHED-TOKEN"), "{debug}");
         assert!(!debug.contains("SECRET-CACHED-HMAC"), "{debug}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_pairing_recovery_is_removed_without_another_request() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state_dir = temp.path().join("state");
+        let store = crate::state::Store::open(&state_dir).expect("state dir");
+        let roots = openpaw_files::Roots::new(Vec::new()).expect("roots");
+        let app = AppState::new(
+            crate::Config::default(),
+            store,
+            roots,
+            temp.path().to_path_buf(),
+        );
+        let pending = app.pairing.issue(Some("Mac".to_owned()), Profile::Operator);
+        let key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([11_u8; 32]);
+        let mut headers = HeaderMap::new();
+        headers.insert(IDEMPOTENCY_HEADER, key.parse().unwrap());
+
+        let response = pair(
+            State(app.clone()),
+            headers,
+            Json(PairRequest {
+                pairing_code: pending.code,
+                device_name: String::new(),
+                platform: "ios".to_owned(),
+            }),
+        )
+        .await;
+        assert!(response.is_ok());
+        assert_eq!(app.pair_recovery.inner.lock().await.entries.len(), 1);
+
+        tokio::time::advance(RECOVERY_TTL).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            app.pair_recovery.inner.lock().await.entries.is_empty(),
+            "the timer task must remove the raw response and idempotency key without another request"
+        );
     }
 }

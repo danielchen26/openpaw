@@ -69,10 +69,19 @@ X-OpenPaw-Idempotency-Key: <unpadded base64url of 32 random bytes>
 
 Without the optional idempotency header, the code is consumed on first use and the token and key are returned only by
 that request. The header value must be the canonical unpadded base64url encoding of exactly 32 bytes. With it, the host
-keeps up to 64 successful responses in memory for 60 seconds. Retrying the same normalized pairing code, device name and
-platform under the same key returns the identical response without creating another device or rejected audit entry.
-Reusing a key for a different request returns `409`; replaying a consumed code under a different key returns `403`.
-Recovery entries never reach disk and disappear on host restart. Store the returned token and key in the Keychain.
+keeps up to 64 successful responses in memory for 60 seconds. Replay matching uses the normalized pairing code, the
+sanitized platform, and the effective device name chosen by the original pairing: the reported name when usable,
+otherwise the name pre-declared with the pairing code, otherwise `device`. Thus an initially empty reported name under a
+code pre-declared as `Mac` is equivalent to a retry reporting `Mac`, but not one reporting the literal `device`; the
+reverse case is also distinct. A matching retry under the same key returns the identical response without creating
+another device or audit entry. Reusing a key for different semantics returns `409`; replaying a consumed code under a
+different key returns `403`.
+
+Each successful insertion schedules its own timer, which removes the recovery entry at 60 seconds even if no later HTTP
+request arrives; the cache remains capped at 64 entries. Recovery matching retains only digests of the code, effective
+and pre-declared names, platform, and idempotency key. It does not log or persist those inputs or the returned token and
+HMAC key. The raw response exists only in process memory until timer cleanup, capacity eviction, or host restart. Store
+the returned token and key in the Keychain.
 
 ## Routes
 
