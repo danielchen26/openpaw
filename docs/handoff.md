@@ -54,10 +54,12 @@ mutable artifact beneath `JCODE_SCRATCH_DIR`, including generated SSH keys, a us
 The per-run directory and child processes are removed on success, failure, SIGINT, and SIGTERM. The live run is not
 part of `scripts/check.sh`; only `scripts/tests/test_quick_pairing_live.py`'s hermetic contracts run there.
 
-Acceptance is local and real: `openpaw-host pair --qr` issues the exact five-minute envelope, `simctl openurl` sends
-that exact link to the app, XCUITest confirms the preselected credential and unknown host key, the app establishes
-real SSH and redeems real `/v1/pair` exactly once, a relaunch proves the signer is available for the selected host,
-Terminal is selected, and a direct replay receives a rejection. No camera injection or cloud service is used.
+Acceptance is local and real: after XCUITest signals `/ready`, `openpaw-host pair --qr` issues the exact five-minute
+envelope and `simctl openurl` is invoked immediately. The localhost `/ready` response also lets XCTest perform its
+automation-safe `app.open` without putting the secret URL in arguments, environment variables, or logs. XCUITest
+confirms the preselected credential and unknown host key, the app establishes real SSH and redeems real `/v1/pair`
+exactly once, a relaunch proves the signer is available for the selected host, Terminal is selected, and a direct
+replay receives a rejection. No camera injection or cloud service is used.
 
 Credential boundary: the generated private key remains outside the repository and is supplied only to the existing
 DEBUG+simulator `-openpaw-debug-seed-key` launch hook. The hook imports it through OpenPaw's own
@@ -71,17 +73,18 @@ Attempted on 2026-08-24 with:
 python3 scripts/quick-pairing-live.py
 ```
 
-The machine had working Xcode first-launch content and 15 available iPhone simulators. The harness generated both
-real SSH keys, proved the disposable high-port SSH login, started the real daemon, issued the real QR/link, launched
-the focused XCUITest, and reached the `/ready` coordination checkpoint. `xcrun simctl openurl <udid> <redacted-url>`
-returned success, but the iOS 26.5 simulator kept Home visible and never presented the Quick Connect review, so the
-test correctly failed before `/connected`. Earlier attempts also caught an obsolete Add Device identifier and an
-iOS 26.5 UI-test-runner exit while editing the numeric Port field; the harness now avoids both by using the existing
-app-owned DEBUG host/key seeding boundary. Every attempt printed
-`cleanup verified: child processes stopped and scratch run removed`. No simulator-only fake was substituted. The
-remaining blocker is delivery/routing of the exact custom-scheme URL into the XCUITest-controlled app on this runtime;
-the real SSH, one-time redemption, signer persistence, Terminal, and replay evidence lines must not be claimed until
-that route presents the confirmation screen and the run exits zero.
+The just-in-time issuance blocker is fixed and covered by contracts: server construction and Xcode startup do not mint
+a link; the first `/ready` request mints and opens it once; duplicate `/ready` requests reuse the same result; factory
+failure is stable and redacted. Clean dedicated-simulator runs then presented `Quick Connect to 127` with four to five
+minutes remaining, connected real SSH, accepted the unknown host key, and persisted exactly one device in the real
+host state. The latest run failed before `/connected`: the app changed from `Pairing device` to `Quick Connect failed`
+with “The host could not be paired,” even though the harness observed `persisted host device count: 1`. This localizes
+the remaining blocker after successful `/v1/pair` persistence but before Terminal selection, most likely while the app
+accepts or persists the returned pairing credentials. A separate real SSH-forwarded diagnostic received HTTP 200 and
+one persisted device from the same host binary. Every run printed
+`cleanup verified: child processes stopped and scratch run removed`. No simulator-only fake was substituted. Signer
+persistence, Terminal selection, replay rejection, and the five success evidence lines must not be claimed until the
+focused live run exits zero.
 
 ## Simulator acceptance completed on 2026-08-21
 

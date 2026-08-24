@@ -130,10 +130,12 @@ JCODE_SCRATCH_DIR="$HOME/.cache/jcode" python3 scripts/quick-pairing-live.py
 
 That harness dynamically chooses an installed phone simulator, creates a fresh SSH client key and host key under
 `JCODE_SCRATCH_DIR`, starts disposable high-port `sshd` and `openpaw-host` processes, issues the daemon's exact real
-QR/link envelope, and opens that link with `simctl openurl`. A scratch-copy XCUITest taps **Confirm SSH credential
-and connect**, explicitly trusts the unknown host key, verifies Terminal, relaunches to prove the selected host's
-signer persisted, and confirms the consumed pairing code is rejected on replay. It has no cloud dependency and
-removes its processes and per-run directory on success, failure, SIGINT, and SIGTERM.
+QR/link envelope only when the scratch-copy XCUITest signals `/ready`, and immediately opens that link with
+`simctl openurl`. The same localhost response lets XCTest complete custom-scheme delivery without putting the secret
+URL in arguments, environment variables, or logs. XCUITest taps **Confirm SSH credential and connect**, explicitly
+trusts the unknown host key, verifies Terminal, relaunches to prove the selected host's signer persisted, and confirms
+the consumed pairing code is rejected on replay. It has no cloud dependency and removes its processes and per-run
+directory on success, failure, SIGINT, and SIGTERM.
 
 The fresh private key enters the simulator only through the existing DEBUG+simulator
 `-openpaw-debug-seed-key` launch hook. That hook calls the app-owned Keychain credential code. The harness does not

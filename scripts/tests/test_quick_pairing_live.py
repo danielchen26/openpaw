@@ -4,8 +4,12 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -137,6 +141,80 @@ class QuickPairingLiveContractTests(unittest.TestCase):
         serialized = json.dumps(environment)
         self.assertNotIn("OPENPAW_QUICK_PAIRING_URL", serialized)
         self.assertNotIn("PAIRING_CODE", serialized)
+        self.assertEqual(self.harness.LIVE_NICKNAME, "127")
+
+    def test_coordination_issues_and_opens_the_link_only_when_ready_after_build_start(self) -> None:
+        events = []
+        secrets = self.harness.SecretSet()
+        secret_url = "openpaw://pair#v1.secret-envelope"
+
+        def issue_link():
+            events.append("link-issued")
+            secrets.pairing_url = secret_url
+            secrets.pairing_code = "SECRET-PAIRING-CODE"
+            return secret_url
+
+        server = self.harness.CoordinationServer(0, "SIM-UDID", issue_link, secrets)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        events.append("xcodebuild-started")
+        self.assertEqual(events, ["xcodebuild-started"])
+
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(self.harness.subprocess, "run", return_value=completed) as run:
+            response = urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/ready", timeout=5
+            )
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read().decode(), secret_url)
+            duplicate = urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/ready", timeout=5
+            )
+            self.assertEqual(duplicate.status, 200)
+            self.assertEqual(duplicate.read().decode(), secret_url)
+
+        self.assertEqual(events, ["xcodebuild-started", "link-issued"])
+        run.assert_called_once_with(
+            ["xcrun", "simctl", "openurl", "SIM-UDID", secret_url],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertIn("/ready", server.events)
+
+    def test_coordination_factory_failure_is_redacted_stable_and_not_retried(self) -> None:
+        secret_url = "openpaw://pair#v1.secret-envelope"
+        attempts = 0
+
+        def fail_to_issue():
+            nonlocal attempts
+            attempts += 1
+            raise self.harness.HarnessError(f"issuer leaked {secret_url}")
+
+        server = self.harness.CoordinationServer(
+            0, "SIM-UDID", fail_to_issue, self.harness.SecretSet()
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        for _ in range(2):
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_port}/ready", timeout=5
+                )
+            self.assertEqual(raised.exception.code, 500)
+
+        self.assertEqual(attempts, 1)
+        self.assertNotIn(secret_url, server.failure or "")
+        self.assertIn("<redacted>", server.failure or "")
+        self.assertNotIn("/ready", server.events)
 
     def test_cleanup_terminates_registered_children_and_removes_the_run_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -194,11 +272,19 @@ class QuickPairingLiveContractTests(unittest.TestCase):
         self.assertNotIn('app.textFields["Port"]', source)
         self.assertNotIn('app.buttons["Enter SSH details manually"]', source)
 
+    def test_generated_live_test_opens_the_ready_link_through_xctest_without_printing_it(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('func pairingURL() -> URL', source)
+        self.assertIn('app.open(pairingURL())', source)
+        self.assertNotIn('XCUIApplication(bundleIdentifier: "com.apple.springboard")', source)
+
     def test_xcodebuild_is_registered_for_signal_cleanup_and_failures_report_checkpoints(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
 
         self.assertIn("xcodebuild = cleanup.register(", source)
         self.assertIn("coordination checkpoints reached", source)
+        self.assertIn("persisted host device count", source)
         self.assertIn("if coordinator is not None:", source)
 
 

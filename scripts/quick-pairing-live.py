@@ -33,7 +33,7 @@ import urllib.request
 from dataclasses import dataclass, fields
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -48,6 +48,8 @@ EVIDENCE = (
     "Terminal selected",
     "pairing-code replay rejected",
 )
+PAIRING_DEVICE_NAME = "Quick Connect live acceptance"
+LIVE_NICKNAME = "127"
 PAIR_URL_PATTERN = re.compile(r"openpaw://pair#v1\.[A-Za-z0-9_-]+")
 RUNTIME_PATTERN = re.compile(r"(?:^|\.)iOS-(\d+)-(\d+)(?:-(\d+))?$")
 
@@ -550,7 +552,7 @@ def issue_pairing_link(
             str(binary),
             "pair",
             "--name",
-            "Quick Connect live acceptance",
+            PAIRING_DEVICE_NAME,
             "--qr",
             "--ssh-host",
             "127.0.0.1",
@@ -603,6 +605,20 @@ def append_live_xcuitest(test_file: Path) -> None:
             wait(for: [expectation], timeout: 15)
         }
 
+        func pairingURL() -> URL {
+            let expectation = expectation(description: "/ready")
+            let ready = URL(string: "http://127.0.0.1:\(coordinationPort)/ready")!
+            var value: URL?
+            URLSession.shared.dataTask(with: ready) { data, response, error in
+                XCTAssertNil(error)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+                if let data { value = URL(dataRepresentation: data, relativeTo: nil) }
+                expectation.fulfill()
+            }.resume()
+            wait(for: [expectation], timeout: 15)
+            return value!
+        }
+
         let seedApp = XCUIApplication()
         seedApp.launchArguments = [
             "-openpaw-debug-seed-key", keyPath,
@@ -623,7 +639,7 @@ def append_live_xcuitest(test_file: Path) -> None:
         app.launch()
         XCTAssertTrue(app.buttons["Connect to Debug daemon"].waitForExistence(timeout: 15), app.debugDescription)
 
-        notify("/ready")
+        app.open(pairingURL())
         XCTAssertTrue(app.staticTexts["Quick Connect to \(nickname)"].waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertEqual(app.buttons["quick-connect.confirm"].label, "Confirm SSH credential and connect")
         XCTAssertTrue(app.staticTexts["Verify on first connection"].exists)
@@ -668,13 +684,49 @@ def prepare_scratch_project(layout: ScratchLayout) -> Path:
 class CoordinationServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, port: int, simulator: str, pairing_url: str, secrets: SecretSet) -> None:
+    def __init__(
+        self,
+        port: int,
+        simulator: str,
+        link_factory: Callable[[], str],
+        secrets: SecretSet,
+    ) -> None:
         super().__init__(("127.0.0.1", port), CoordinationHandler)
         self.simulator = simulator
-        self.pairing_url = pairing_url
+        self.pairing_url = ""
         self.secrets = secrets
         self.events: set[str] = set()
         self.failure: str | None = None
+        self._link_factory: Callable[[], str] | None = link_factory
+        self._ready_lock = threading.Lock()
+
+    def open_pairing_link_once(self) -> bool:
+        with self._ready_lock:
+            if "/ready" in self.events:
+                return True
+            if self.failure is not None:
+                return False
+
+            factory, self._link_factory = self._link_factory, None
+            if factory is None:
+                self.failure = "pairing link factory was already consumed"
+                return False
+            try:
+                self.pairing_url = factory()
+                result = subprocess.run(
+                    ["xcrun", "simctl", "openurl", self.simulator, self.pairing_url],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except Exception as error:  # Keep the HTTP worker alive and the one-shot state stable.
+                self.failure = redact(str(error), self.secrets).strip() or type(error).__name__
+                return False
+            if result.returncode != 0:
+                self.failure = redact(result.stdout + result.stderr, self.secrets).strip()
+                return False
+            self.events.add("/ready")
+            return True
 
 
 class CoordinationHandler(BaseHTTPRequestHandler):
@@ -682,18 +734,18 @@ class CoordinationHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/ready":
-            result = subprocess.run(
-                ["xcrun", "simctl", "openurl", self.server.simulator, self.server.pairing_url],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                self.server.failure = redact(result.stdout + result.stderr, self.server.secrets).strip()
+            if not self.server.open_pairing_link_once():
                 self.send_response(500)
                 self.end_headers()
                 return
-        if self.path in {"/ready", "/connected", "/persisted"}:
+            body = self.server.pairing_url.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path in {"/connected", "/persisted"}:
             self.server.events.add(self.path)
             self.send_response(204)
             self.end_headers()
@@ -757,12 +809,16 @@ def main() -> int:
 
         binary = host_binary(layout, args.binary)
         _, host_environment = start_host(binary, layout, host_port, cleanup)
-        pairing_url = issue_pairing_link(binary, host_environment, ssh_port, username, secrets)
         if state_device_count(layout.host_state) != 0:
             raise HarnessError("fresh openpaw-host state unexpectedly contains a paired device")
 
         project_dir = prepare_scratch_project(layout)
-        coordinator = CoordinationServer(coordination_port, simulator.udid, pairing_url, secrets)
+        coordinator = CoordinationServer(
+            coordination_port,
+            simulator.udid,
+            lambda: issue_pairing_link(binary, host_environment, ssh_port, username, secrets),
+            secrets,
+        )
         coordinator_thread = threading.Thread(target=coordinator.serve_forever, daemon=True)
         coordinator_thread.start()
 
@@ -773,7 +829,7 @@ def main() -> int:
             port=ssh_port,
             host_api_port=host_port,
             username=username,
-            nickname=decode_pairing_envelope(pairing_url)["nickname"],
+            nickname=LIVE_NICKNAME,
             private_key_path=layout.client_key,
             coordination_port=coordination_port,
         )
@@ -801,7 +857,9 @@ def main() -> int:
             )[-4000:]
             raise HarnessError(
                 f"live Quick Connect XCUITest failed with exit {xcodebuild.returncode}; "
-                f"coordination checkpoints reached: {checkpoints}\n{errors}\n{xcode_output[-5000:]}"
+                f"coordination checkpoints reached: {checkpoints}; "
+                f"persisted host device count: {state_device_count(layout.host_state)}\n"
+                f"{errors}\n{xcode_output[-5000:]}"
             )
         if not {"/ready", "/connected", "/persisted"}.issubset(coordinator.events):
             raise HarnessError(f"live XCUITest missed coordination checkpoints: {sorted(coordinator.events)}")
