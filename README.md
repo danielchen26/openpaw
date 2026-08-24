@@ -92,9 +92,11 @@ Install the agent hooks so approvals reach your phone instead of only your termi
 
 Add the host in the app, then paste the code or scan the QR. Quick Connect links
 contain only local SSH target metadata, optional host-key fingerprints, and the
-same five-minute single-use pairing code. They never include passwords, private
-keys, hook tokens, bearer tokens, HMAC keys, or commands. The app still asks you
-to confirm the SSH credential. It forwards `127.0.0.1:8787` over its own SSH
+same five-minute single-use pairing code. Each envelope also includes a bounded
+opaque `session_id`, the local `host_api_port`, and the issued `profile` so the
+app can present the exact proposal. Links never include passwords, private keys,
+hook tokens, bearer tokens, HMAC keys, or commands. The app still asks you to
+confirm the SSH credential. It forwards `127.0.0.1:8787` over its own SSH
 connection; nothing is published to a network interface, and no cloud service is
 involved.
 

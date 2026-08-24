@@ -361,13 +361,18 @@ async fn request_code(
             .await
             .ok();
         let hostname = pairing_link::probe_hostname().await.ok();
+        let issued_at =
+            issued.expires_at - time::Duration::seconds(issued.expires_in_seconds as i64);
         let link = pairing_link::build_pairing_link(
             &issued.code,
             &link_options,
             tailscale.as_deref(),
             hostname.as_deref(),
             pairing_link::current_username().as_deref(),
-            time::OffsetDateTime::now_utc(),
+            issued_at,
+            issued.expires_at,
+            config.port,
+            issued.profile,
         )?;
 
         eprintln!();
@@ -387,7 +392,7 @@ async fn request_code(
             issued.expires_at
         );
         eprintln!();
-        eprintln!("{}", pairing_link::render_terminal_qr(&link.url));
+        eprintln!("{}", pairing_link::render_terminal_qr(&link.url)?);
         println!("{}", link.url);
         return Ok(());
     }

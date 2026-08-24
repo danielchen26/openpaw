@@ -5,6 +5,7 @@
 //! credentials, private keys, passwords, commands, or provider tokens.
 
 use std::collections::HashSet;
+use std::io::Read as _;
 use std::net::IpAddr;
 use std::path::Path;
 
@@ -13,11 +14,24 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
+use uuid::Uuid;
 
 use crate::api::tailscale;
+use crate::auth::Profile;
 
 const MAX_HOSTNAME_BYTES: usize = 255;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_HOSTNAME_OUTPUT_BYTES: usize = 512;
+const MAX_PUBLIC_KEY_FILE_BYTES: u64 = 16 * 1024;
+const MAX_PUBLIC_KEY_BLOB_BYTES: usize = 16 * 1024;
+const MAX_PAIRING_CODE_BYTES: usize = 64;
+const MAX_NICKNAME_BYTES: usize = 80;
+const MAX_USERNAME_BYTES: usize = 64;
+const MAX_SESSION_ID_BYTES: usize = 64;
+const MAX_TARGETS: usize = 8;
+const MAX_HOST_KEYS: usize = 4;
+const MAX_PAYLOAD_BYTES: usize = 3072;
+const MAX_FRAGMENT_BYTES: usize = 4096;
 const DEFAULT_SSH_PORT: u16 = 22;
 
 /// Options controlling pairing-link metadata discovery.
@@ -54,6 +68,14 @@ pub struct PairingEnvelopeV1 {
     /// RFC3339 expiration timestamp.
     #[serde(rename = "expires_at", with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
+    /// Opaque bounded session/link identifier.
+    #[serde(rename = "session_id")]
+    pub session_id: String,
+    /// Host API loopback port the SSH tunnel should forward.
+    #[serde(rename = "host_api_port")]
+    pub host_api_port: u16,
+    /// Issued device capability profile.
+    pub profile: Profile,
     /// Existing daemon-issued single-use code.
     #[serde(rename = "pairing_code")]
     pub pairing_code: String,
@@ -137,6 +159,27 @@ pub enum PairingLinkError {
     /// JSON/link encoding failed.
     #[error("failed to encode pairing link")]
     Encoding,
+    /// Encoded JSON payload exceeded the Swift decoder cap.
+    #[error("pairing link payload is too large")]
+    OversizedPayload,
+    /// Encoded URL fragment exceeded the Swift decoder cap.
+    #[error("pairing link fragment is too large")]
+    OversizedFragment,
+    /// QR rendering failed.
+    #[error("failed to render pairing QR")]
+    Qr,
+    /// Pairing code is empty or unsafe.
+    #[error("invalid pairing code")]
+    InvalidPairingCode,
+    /// Nickname is empty or unsafe.
+    #[error("invalid host nickname")]
+    InvalidNickname,
+    /// Session id is empty or unsafe.
+    #[error("invalid pairing session id")]
+    InvalidSessionId,
+    /// Too many targets or host keys.
+    #[error("too many pairing link entries")]
+    TooManyEntries,
 }
 
 /// Build a pairing link from an existing daemon-issued code.
@@ -146,7 +189,10 @@ pub fn build_pairing_link(
     tailscale_status_json: Option<&[u8]>,
     hostname_output: Option<&[u8]>,
     local_username: Option<&str>,
-    now: OffsetDateTime,
+    issued_at: OffsetDateTime,
+    expires_at: OffsetDateTime,
+    host_api_port: u16,
+    profile: Profile,
 ) -> Result<PairingLink, PairingLinkError> {
     let port = opts.ssh_port.unwrap_or(DEFAULT_SSH_PORT);
     validate_port(port)?;
@@ -157,15 +203,19 @@ pub fn build_pairing_link(
     } else {
         Vec::new()
     };
+    let session_id = Uuid::new_v4().to_string();
     let envelope = PairingEnvelopeV1 {
         version: 1,
-        issued_at: now,
-        expires_at: now + Duration::minutes(5),
-        pairing_code: code.trim().to_ascii_uppercase(),
-        nickname: metadata.nickname,
+        issued_at,
+        expires_at,
+        session_id: validate_session_id(&session_id)?,
+        host_api_port,
+        profile,
+        pairing_code: validate_pairing_code(code)?,
+        nickname: validate_nickname(&metadata.nickname)?,
         username,
-        targets: metadata.targets,
-        host_keys,
+        targets: validate_targets(metadata.targets)?,
+        host_keys: validate_host_keys(host_keys)?,
     };
     let url = encode_envelope_url(&envelope)?;
     Ok(PairingLink { url, envelope })
@@ -220,7 +270,7 @@ pub fn discover_local_targets(
         }
     }
     if let Some(bytes) = hostname_output {
-        if bytes.len() > MAX_COMMAND_OUTPUT_BYTES {
+        if bytes.len() > MAX_HOSTNAME_OUTPUT_BYTES {
             return Err(PairingLinkError::OutputLimit);
         }
         let raw = std::str::from_utf8(bytes).map_err(|_| PairingLinkError::InvalidHost)?;
@@ -250,20 +300,26 @@ pub fn discover_username(
 
 /// Encode an envelope as `openpaw://pair#v1.<base64url-json>`.
 pub fn encode_envelope_url(envelope: &PairingEnvelopeV1) -> Result<String, PairingLinkError> {
-    let json = serde_json::to_vec(envelope).map_err(|_| PairingLinkError::Encoding)?;
+    validate_envelope(envelope)?;
+    let value = serde_json::to_value(envelope).map_err(|_| PairingLinkError::Encoding)?;
+    let json = serde_json::to_vec(&value).map_err(|_| PairingLinkError::Encoding)?;
+    if json.len() > MAX_PAYLOAD_BYTES {
+        return Err(PairingLinkError::OversizedPayload);
+    }
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+    if payload.len() + "v1.".len() > MAX_FRAGMENT_BYTES {
+        return Err(PairingLinkError::OversizedFragment);
+    }
     Ok(format!("openpaw://pair#v1.{payload}"))
 }
 
 /// Render a terminal QR for the exact pairing-link URL.
-pub fn render_terminal_qr(url: &str) -> String {
-    match qrcode::QrCode::new(url.as_bytes()) {
-        Ok(code) => code
-            .render::<qrcode::render::unicode::Dense1x2>()
-            .quiet_zone(true)
-            .build(),
-        Err(_) => String::new(),
-    }
+pub fn render_terminal_qr(url: &str) -> Result<String, PairingLinkError> {
+    let code = qrcode::QrCode::new(url.as_bytes()).map_err(|_| PairingLinkError::Qr)?;
+    Ok(code
+        .render::<qrcode::render::unicode::Dense1x2>()
+        .quiet_zone(true)
+        .build())
 }
 
 /// Parse an OpenSSH public key and return a safe SHA256 fingerprint record.
@@ -281,6 +337,9 @@ pub fn fingerprint_public_key_bytes(input: &[u8]) -> Result<PairingHostKey, Pair
     let key = base64::engine::general_purpose::STANDARD
         .decode(key_b64)
         .map_err(|_| PairingLinkError::InvalidHostKey)?;
+    if key.len() > MAX_PUBLIC_KEY_BLOB_BYTES || ssh_blob_algorithm(&key)? != algorithm {
+        return Err(PairingLinkError::InvalidHostKey);
+    }
     let digest = Sha256::digest(&key);
     let fingerprint = format!(
         "SHA256:{}",
@@ -293,7 +352,22 @@ pub fn fingerprint_public_key_bytes(input: &[u8]) -> Result<PairingHostKey, Pair
 }
 
 fn fingerprint_public_key_file(path: &Path) -> Result<PairingHostKey, PairingLinkError> {
-    let bytes = std::fs::read(path).map_err(|_| PairingLinkError::InvalidHostKey)?;
+    let file = std::fs::File::open(path).map_err(|_| PairingLinkError::InvalidHostKey)?;
+    if file
+        .metadata()
+        .map_err(|_| PairingLinkError::InvalidHostKey)?
+        .len()
+        > MAX_PUBLIC_KEY_FILE_BYTES
+    {
+        return Err(PairingLinkError::InvalidHostKey);
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PUBLIC_KEY_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| PairingLinkError::InvalidHostKey)?;
+    if bytes.len() as u64 > MAX_PUBLIC_KEY_FILE_BYTES {
+        return Err(PairingLinkError::InvalidHostKey);
+    }
     fingerprint_public_key_bytes(&bytes)
 }
 
@@ -308,7 +382,7 @@ fn validate_port(port: u16) -> Result<(), PairingLinkError> {
 fn validate_username(value: &str) -> Result<String, PairingLinkError> {
     let value = value.trim();
     if value.is_empty()
-        || value.len() > 64
+        || value.len() > MAX_USERNAME_BYTES
         || value.chars().any(char::is_control)
         || value.contains(char::is_whitespace)
         || value.contains(['/', ':', '@'])
@@ -329,10 +403,11 @@ fn validate_host(value: &str) -> Result<String, PairingLinkError> {
     {
         return Err(PairingLinkError::InvalidHost);
     }
-    if value.parse::<IpAddr>().is_ok()
-        || value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        Ok(ip.to_string())
+    } else if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
     {
         Ok(value.to_ascii_lowercase())
     } else {
@@ -342,7 +417,7 @@ fn validate_host(value: &str) -> Result<String, PairingLinkError> {
 
 fn dedupe_targets(targets: &mut Vec<PairingTarget>) {
     let mut seen = HashSet::new();
-    targets.retain(|target| seen.insert((target.hostname.clone(), target.port)));
+    targets.retain(|target| seen.insert((canonical_host_key(&target.hostname), target.port)));
 }
 
 fn nickname_from_host(host: &str) -> String {
@@ -372,18 +447,20 @@ pub async fn probe_hostname() -> Result<Vec<u8>, PairingLinkError> {
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|_| PairingLinkError::MissingTarget)?;
-        let mut stdout = child.stdout.take().ok_or(PairingLinkError::MissingTarget)?;
+        let stdout = child.stdout.take().ok_or(PairingLinkError::MissingTarget)?;
         let mut bytes = Vec::new();
         let read = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            stdout.read_to_end(&mut bytes),
+            stdout
+                .take((MAX_HOSTNAME_OUTPUT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes),
         )
         .await;
         let _ = child.kill().await;
         let _ = child.wait().await;
         read.map_err(|_| PairingLinkError::MissingTarget)?
             .map_err(|_| PairingLinkError::MissingTarget)?;
-        if bytes.len() > MAX_COMMAND_OUTPUT_BYTES {
+        if bytes.len() > MAX_HOSTNAME_OUTPUT_BYTES {
             return Err(PairingLinkError::OutputLimit);
         }
         Ok(bytes)
@@ -394,6 +471,106 @@ pub async fn probe_hostname() -> Result<Vec<u8>, PairingLinkError> {
     }
 }
 
+fn validate_pairing_code(code: &str) -> Result<String, PairingLinkError> {
+    let code = code.trim().to_ascii_uppercase();
+    if code.is_empty()
+        || code.len() > MAX_PAIRING_CODE_BYTES
+        || code.chars().any(char::is_control)
+        || !code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(PairingLinkError::InvalidPairingCode);
+    }
+    Ok(code)
+}
+
+fn validate_nickname(value: &str) -> Result<String, PairingLinkError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > MAX_NICKNAME_BYTES || value.chars().any(char::is_control) {
+        return Err(PairingLinkError::InvalidNickname);
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_session_id(value: &str) -> Result<String, PairingLinkError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > MAX_SESSION_ID_BYTES
+        || value.chars().any(char::is_control)
+        || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(PairingLinkError::InvalidSessionId);
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_targets(targets: Vec<PairingTarget>) -> Result<Vec<PairingTarget>, PairingLinkError> {
+    if targets.is_empty() || targets.len() > MAX_TARGETS {
+        return Err(PairingLinkError::TooManyEntries);
+    }
+    let mut checked = Vec::with_capacity(targets.len());
+    for target in targets {
+        validate_port(target.port)?;
+        checked.push(PairingTarget {
+            hostname: validate_host(&target.hostname)?,
+            port: target.port,
+            source: target.source,
+        });
+    }
+    dedupe_targets(&mut checked);
+    Ok(checked)
+}
+
+fn validate_host_keys(keys: Vec<PairingHostKey>) -> Result<Vec<PairingHostKey>, PairingLinkError> {
+    if keys.len() > MAX_HOST_KEYS {
+        return Err(PairingLinkError::TooManyEntries);
+    }
+    for key in &keys {
+        if !matches!(
+            key.algorithm.as_str(),
+            "ssh-ed25519" | "ecdsa-sha2-nistp256" | "rsa-sha2-512" | "rsa-sha2-256" | "ssh-rsa"
+        ) || !key.fingerprint.starts_with("SHA256:")
+            || key.fingerprint.len() > 64
+            || key.fingerprint.chars().any(char::is_control)
+        {
+            return Err(PairingLinkError::InvalidHostKey);
+        }
+    }
+    Ok(keys)
+}
+
+fn validate_envelope(envelope: &PairingEnvelopeV1) -> Result<(), PairingLinkError> {
+    if envelope.version != 1 || envelope.expires_at - envelope.issued_at > Duration::minutes(5) {
+        return Err(PairingLinkError::Encoding);
+    }
+    validate_session_id(&envelope.session_id)?;
+    validate_port(envelope.host_api_port)?;
+    validate_pairing_code(&envelope.pairing_code)?;
+    validate_nickname(&envelope.nickname)?;
+    validate_username(&envelope.username)?;
+    validate_targets(envelope.targets.clone())?;
+    validate_host_keys(envelope.host_keys.clone())?;
+    Ok(())
+}
+
+fn canonical_host_key(host: &str) -> String {
+    host.parse::<IpAddr>()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|_| host.trim_end_matches('.').to_ascii_lowercase())
+}
+
+fn ssh_blob_algorithm(blob: &[u8]) -> Result<&str, PairingLinkError> {
+    if blob.len() < 4 {
+        return Err(PairingLinkError::InvalidHostKey);
+    }
+    let len = u32::from_be_bytes([blob[0], blob[1], blob[2], blob[3]]) as usize;
+    if len == 0 || len > 64 || blob.len() < 4 + len {
+        return Err(PairingLinkError::InvalidHostKey);
+    }
+    std::str::from_utf8(&blob[4..4 + len]).map_err(|_| PairingLinkError::InvalidHostKey)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +578,10 @@ mod tests {
 
     fn now() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap()
+    }
+
+    fn expires() -> OffsetDateTime {
+        now() + Duration::minutes(5)
     }
     fn status() -> Vec<u8> {
         br#"{"BackendState":"Running","Self":{"ID":"n1","HostName":"my-mac","DNSName":"my-mac.tail.ts.net.","TailscaleIPs":["100.64.1.2","fd7a:115c:a1e0::1"],"Online":true}}"#.to_vec()
@@ -421,6 +602,9 @@ mod tests {
             Some(b"fallback\n"),
             Some("bob"),
             now(),
+            expires(),
+            8787,
+            Profile::Operator,
         )
         .unwrap();
         assert_eq!(link.envelope.username, "alice");
@@ -525,6 +709,9 @@ mod tests {
             None,
             Some("alice"),
             now(),
+            expires(),
+            8787,
+            Profile::Operator,
         )
         .unwrap();
         let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -545,9 +732,12 @@ mod tests {
             None,
             Some("alice"),
             now(),
+            expires(),
+            8787,
+            Profile::Operator,
         )
         .unwrap();
-        let qr = render_terminal_qr(&link.url);
+        let qr = render_terminal_qr(&link.url).unwrap();
         assert!(!qr.is_empty());
         let encoded = encode_envelope_url(&link.envelope).unwrap();
         assert_eq!(encoded, link.url);
@@ -567,6 +757,9 @@ mod tests {
             None,
             Some("alice"),
             now(),
+            expires(),
+            8787,
+            Profile::Operator,
         )
         .unwrap();
         assert!(link.url.starts_with("openpaw://pair#v1."));
@@ -577,8 +770,199 @@ mod tests {
         assert!(value.get("v").is_some());
         assert!(value.get("issued_at").is_some());
         assert!(value.get("expires_at").is_some());
+        assert!(value.get("session_id").is_some());
+        assert_eq!(
+            value.get("host_api_port").and_then(Value::as_u64),
+            Some(8787)
+        );
+        assert_eq!(
+            value.get("profile").and_then(Value::as_str),
+            Some("operator")
+        );
         assert!(value.get("pairing_code").is_some());
         assert!(value.get("host_keys").is_some());
+    }
+
+    #[test]
+    fn envelope_uses_authoritative_issue_window_port_profile_and_sorted_compact_json() {
+        let issued_at = now() - Duration::minutes(1);
+        let expires_at = now() + Duration::minutes(4);
+        let link = build_pairing_link(
+            "PAIR-123",
+            &PairingLinkOptions::default(),
+            Some(&status()),
+            None,
+            Some("alice"),
+            issued_at,
+            expires_at,
+            18787,
+            Profile::Observer,
+        )
+        .unwrap();
+        assert_eq!(link.envelope.issued_at, issued_at);
+        assert_eq!(link.envelope.expires_at, expires_at);
+        assert_eq!(link.envelope.host_api_port, 18787);
+        assert_eq!(link.envelope.profile, Profile::Observer);
+        assert_eq!(
+            Uuid::parse_str(&link.envelope.session_id)
+                .unwrap()
+                .to_string(),
+            link.envelope.session_id
+        );
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(link.url.split("v1.").nth(1).unwrap())
+            .unwrap();
+        let json = String::from_utf8(decoded).unwrap();
+        assert!(!json.contains(' '));
+        assert!(json.find("expires_at").unwrap() < json.find("host_api_port").unwrap());
+        assert!(json.find("host_api_port").unwrap() < json.find("host_keys").unwrap());
+    }
+
+    #[test]
+    fn rejects_oversized_and_unsafe_envelope_fields() {
+        assert_eq!(
+            build_pairing_link(
+                "bad code!",
+                &PairingLinkOptions::default(),
+                Some(&status()),
+                None,
+                Some("alice"),
+                now(),
+                expires(),
+                8787,
+                Profile::Operator
+            ),
+            Err(PairingLinkError::InvalidPairingCode)
+        );
+        assert_eq!(
+            build_pairing_link(
+                "PAIR",
+                &PairingLinkOptions::default(),
+                Some(&status()),
+                None,
+                Some(&"a".repeat(MAX_USERNAME_BYTES + 1)),
+                now(),
+                expires(),
+                8787,
+                Profile::Operator
+            ),
+            Err(PairingLinkError::InvalidUsername)
+        );
+
+        let mut envelope = build_pairing_link(
+            "PAIR",
+            &PairingLinkOptions::default(),
+            Some(&status()),
+            None,
+            Some("alice"),
+            now(),
+            expires(),
+            8787,
+            Profile::Operator,
+        )
+        .unwrap()
+        .envelope;
+        envelope.session_id = "x".repeat(MAX_SESSION_ID_BYTES + 1);
+        assert_eq!(
+            encode_envelope_url(&envelope),
+            Err(PairingLinkError::InvalidSessionId)
+        );
+        envelope.session_id = Uuid::new_v4().to_string();
+        envelope.nickname = "x".repeat(MAX_NICKNAME_BYTES + 1);
+        assert_eq!(
+            encode_envelope_url(&envelope),
+            Err(PairingLinkError::InvalidNickname)
+        );
+        envelope.nickname = "nick".to_owned();
+        envelope.host_keys = (0..=MAX_HOST_KEYS)
+            .map(|_| PairingHostKey {
+                algorithm: "ssh-ed25519".to_owned(),
+                fingerprint: "SHA256:abc".to_owned(),
+            })
+            .collect();
+        assert_eq!(
+            encode_envelope_url(&envelope),
+            Err(PairingLinkError::TooManyEntries)
+        );
+    }
+
+    #[test]
+    fn payload_and_fragment_caps_are_enforced() {
+        let mut envelope = build_pairing_link(
+            "PAIR",
+            &PairingLinkOptions::default(),
+            Some(&status()),
+            None,
+            Some("alice"),
+            now(),
+            expires(),
+            8787,
+            Profile::Operator,
+        )
+        .unwrap()
+        .envelope;
+        envelope.pairing_code = "A".repeat(MAX_PAIRING_CODE_BYTES);
+        envelope.nickname = "n".repeat(MAX_NICKNAME_BYTES);
+        envelope.username = "u".repeat(MAX_USERNAME_BYTES);
+        envelope.targets = (0..MAX_TARGETS)
+            .map(|i| PairingTarget {
+                hostname: format!("{}{}.example.com", "a".repeat(230), i),
+                port: 22,
+                source: PairingTargetSource::Explicit,
+            })
+            .collect();
+        envelope.host_keys = (0..MAX_HOST_KEYS)
+            .map(|_| PairingHostKey {
+                algorithm: "ssh-ed25519".to_owned(),
+                fingerprint: format!("SHA256:{}", "a".repeat(56)),
+            })
+            .collect();
+        assert_eq!(
+            encode_envelope_url(&envelope),
+            Err(PairingLinkError::OversizedPayload)
+        );
+    }
+
+    #[test]
+    fn canonicalizes_ip_addresses_before_dedupe() {
+        let mut targets = vec![
+            PairingTarget {
+                hostname: "fd7a:115c:a1e0:0:0:0:0:1".to_owned(),
+                port: 22,
+                source: PairingTargetSource::Tailnet,
+            },
+            PairingTarget {
+                hostname: "fd7a:115c:a1e0::1".to_owned(),
+                port: 22,
+                source: PairingTargetSource::Tailnet,
+            },
+        ];
+        dedupe_targets(&mut targets);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            validate_host("fd7a:115c:a1e0:0:0:0:0:1").unwrap(),
+            "fd7a:115c:a1e0::1"
+        );
+    }
+
+    #[test]
+    fn public_key_blob_algorithm_must_match_text_algorithm() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&("ssh-ed25519".len() as u32).to_be_bytes());
+        blob.extend_from_slice(b"ssh-ed25519");
+        blob.extend_from_slice(b"key-material");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(blob);
+        let mismatched = format!("ssh-rsa {encoded} host\n");
+        assert_eq!(
+            fingerprint_public_key_bytes(mismatched.as_bytes()),
+            Err(PairingLinkError::InvalidHostKey)
+        );
+    }
+
+    #[test]
+    fn qr_rendering_fails_closed_for_unencodable_input() {
+        let huge = "x".repeat(10_000);
+        assert_eq!(render_terminal_qr(&huge), Err(PairingLinkError::Qr));
     }
 }
 

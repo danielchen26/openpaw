@@ -145,9 +145,11 @@ openpaw-host pairing-code --qr
 
 With `--qr`, the terminal QR and readable target metadata go to stderr and the
 `openpaw://pair#v1...` link goes to stdout for piping. The link uses the same
-daemon-issued in-memory pairing code and carries no hook token, password, private
-key, bearer token, HMAC key, provider credential, or command. Optional overrides
-are `--ssh-host`, `--ssh-user`, `--ssh-port`, and `--host-key-public-file`.
+daemon-issued in-memory pairing code, the local host API port, the issued
+observer/operator profile, and a bounded opaque session id. It carries no hook
+token, password, private key, bearer token, HMAC key, provider credential, or
+command. Optional overrides are `--ssh-host`, `--ssh-user`, `--ssh-port`, and
+`--host-key-public-file`.
 
 `openpaw-host pairing-code` does the same without pre-declaring a device name, and
 `--profile observer` mints a read-only credential: an observer device can watch
