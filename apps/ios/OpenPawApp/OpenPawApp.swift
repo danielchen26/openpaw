@@ -245,6 +245,7 @@ final class AppWiring {
     let hostAPI: HostAPIBackend
     let gate: GateController
     let settings: OpenPawSettings
+    let quickConnectCoordinator: QuickConnectCoordinator
     #if DEBUG && targetEnvironment(simulator)
         let debugScenario: DebugScenario?
     #endif
@@ -293,6 +294,7 @@ final class AppWiring {
                     )
                 )
             },
+            quickConnectCoordinator: quickConnectCoordinator,
             settings: settings,
             sessionSpaceProvider: LiveMultiplexerSessionSpaceProvider(runner: sessionCommandRunner, restorationStore: restorationStore),
             sessionCommandExecutor: TerminalSessionCommandExecutor(terminal: terminal, runner: sessionCommandRunner),
@@ -340,7 +342,6 @@ final class AppWiring {
         let hosts = HostStoreFile()
         let keychain = KeychainStore(service: "dev.openpaw.app.ssh")
         let quickConnectCredentialInstaller = QuickConnectKeychainCredentialInstaller(keychain: keychain)
-        _ = quickConnectCredentialInstaller
         // Handed from `makeConfiguration` to `makeTransport`: the pins belong to the `HostRecord`, and only the
         // configuration reaches the factory. `connect(host:)` builds the configuration immediately before dialling, so
         // the ordering is guaranteed by the backend's own control flow.
@@ -474,6 +475,10 @@ final class AppWiring {
         self.hostAPI = hostAPI
         self.model = model
         self.settings = settings
+        self.quickConnectCoordinator = QuickConnectCoordinator(
+            model: model,
+            installer: quickConnectCredentialInstaller,
+            persistHostStore: { store in hosts.save(store) })
         gate = GateController(settings: settings)
 
         #if DEBUG && targetEnvironment(simulator)

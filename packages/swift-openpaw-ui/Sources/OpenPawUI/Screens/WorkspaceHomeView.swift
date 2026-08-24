@@ -25,6 +25,26 @@ public enum WorkspaceHomeCandidateSelection {
     ) -> [AddDeviceCandidate] {
         merge(explicit: explicit, bootstrap: bootstrap)
     }
+
+    public static func openQuickConnect(
+        _ candidate: AddDeviceCandidate,
+        now: Date = Date(),
+        onQuickConnect: (QuickConnectProposal) -> Void
+    ) {
+        onQuickConnect(.from(candidate: candidate, now: now))
+    }
+
+    public static func openAddDevice(_ onAddDevice: () -> Void) {
+        onAddDevice()
+    }
+}
+
+public enum WorkspaceHomeCandidateAction: Sendable, Hashable {
+    case candidate
+    case addAnother
+    case manual
+
+    public var opensAddDevice: Bool { self != .candidate }
 }
 
 @MainActor
@@ -36,8 +56,8 @@ public struct WorkspaceHomeView: View {
     private let onOpenAgent: (String) -> Void
     private let onOpenApproval: (String) -> Void
     private let onOpenRepository: (String) -> Void
-    @State private var isAdding = false
-    @State private var selectedTailnetCandidateID: AddDeviceCandidate.ID?
+    private let onQuickConnect: (QuickConnectProposal) -> Void
+    private let onAddDevice: () -> Void
     @State private var isShowingProviderImport = false
     @Environment(\.scenePhase) private var scenePhase
 
@@ -48,7 +68,9 @@ public struct WorkspaceHomeView: View {
         onDeviceAction: @escaping (HostRecord, WorkspaceResumeIntent) -> Void = { _, _ in },
         onOpenAgent: @escaping (String) -> Void = { _ in },
         onOpenApproval: @escaping (String) -> Void = { _ in },
-        onOpenRepository: @escaping (String) -> Void = { _ in }
+        onOpenRepository: @escaping (String) -> Void = { _ in },
+        onQuickConnect: @escaping (QuickConnectProposal) -> Void = { _ in },
+        onAddDevice: @escaping () -> Void = {}
     ) {
         self.model = model
         self.settings = settings
@@ -57,6 +79,8 @@ public struct WorkspaceHomeView: View {
         self.onOpenAgent = onOpenAgent
         self.onOpenApproval = onOpenApproval
         self.onOpenRepository = onOpenRepository
+        self.onQuickConnect = onQuickConnect
+        self.onAddDevice = onAddDevice
     }
 
     public var body: some View {
@@ -65,19 +89,6 @@ public struct WorkspaceHomeView: View {
                 emptyFirstRun
             } else {
                 populatedHome
-            }
-        }
-        .sheet(isPresented: $isAdding) {
-            NavigationStack {
-                AddDeviceFlow(
-                    model: model,
-                    settings: settings,
-                    candidates: visibleTailnetCandidates,
-                    initiallySelectedCandidateID: selectedTailnetCandidateID
-                ) {
-                    selectedTailnetCandidateID = nil
-                    isAdding = false
-                }
             }
         }
         .sheet(isPresented: $isShowingProviderImport) {
@@ -176,8 +187,9 @@ public struct WorkspaceHomeView: View {
                     VStack(spacing: OpenPawTheme.Space.small) {
                         ForEach(visibleCandidates) { candidate in
                             Button {
-                                selectedTailnetCandidateID = candidate.id
-                                isAdding = true
+                                WorkspaceHomeCandidateSelection.openQuickConnect(
+                                    candidate,
+                                    onQuickConnect: onQuickConnect)
                             } label: {
                                 tailnetCandidateRow(candidate)
                             }
@@ -187,8 +199,7 @@ public struct WorkspaceHomeView: View {
                     }
                 }
                 Button(visibleCandidates.isEmpty ? "Review candidates" : "Add another device") {
-                    selectedTailnetCandidateID = nil
-                    isAdding = true
+                    WorkspaceHomeCandidateSelection.openAddDevice(onAddDevice)
                 }
                 .disabled(state.phase == .loading)
                 .frame(minHeight: 44)
@@ -392,7 +403,7 @@ public struct WorkspaceHomeView: View {
     }
 
     private var addDeviceButton: some View {
-        Button { isAdding = true } label: {
+        Button { WorkspaceHomeCandidateSelection.openAddDevice(onAddDevice) } label: {
             Label(WorkspaceHomeCopy.emptyPrimaryAction, systemImage: "plus.circle.fill")
                 .font(OpenPawTheme.Machine.headline).foregroundStyle(OpenPawTheme.textPrimary)
                 .padding(.horizontal, OpenPawTheme.Space.large).frame(minHeight: 44)

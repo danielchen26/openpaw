@@ -222,6 +222,40 @@ struct HostKeyPromptTests {
 @Suite("Root navigation")
 struct RootNavigationTests {
 
+    @Test("Host key outranks Quick Connect, which outranks approvals and requested sheets")
+    func quickConnectSheetPriorityIsSafetyOrdered() {
+        #expect(RootSheetPolicy.resolve(hostKey: true, quickConnect: true, approval: true, requested: .addDevice) == .hostKey)
+        #expect(RootSheetPolicy.resolve(hostKey: false, quickConnect: true, approval: true, requested: .manageHosts) == .quickConnect)
+        #expect(RootSheetPolicy.resolve(hostKey: false, quickConnect: false, approval: true, requested: .addDevice) == .approval)
+        #expect(RootSheetPolicy.resolve(hostKey: false, quickConnect: false, approval: false, requested: .manageHosts) == .manageHosts)
+    }
+
+    @MainActor
+    @Test("Root owns the injected Quick Connect coordinator and exposes the Task 6 entry point")
+    func rootOpensQuickConnectOnInjectedCoordinator() {
+        let model = OpenPawModel(hostStore: HostStore())
+        let coordinator = QuickConnectCoordinator(model: model, installer: ShellExistingCredentialInstaller())
+        let root = RootView(
+            model: model,
+            terminalSurface: { AnyView(EmptyView()) },
+            quickConnectCoordinator: coordinator)
+        let proposal = QuickConnectProposal.from(
+            candidate: AddDeviceCandidate(id: "node", nickname: "MacBook Pro", hostname: "macbook-pro.example.ts.net"),
+            now: Date(timeIntervalSince1970: 1_800_000_000))
+
+        root.openQuickConnect(proposal)
+
+        #expect(coordinator.proposal == proposal)
+        #expect(coordinator.stage == .reviewing)
+    }
+
+    @Test("Only an owned Quick Connect terminal lease routes the root to Terminal")
+    func quickConnectSuccessRoutesOwnedTerminal() {
+        #expect(RootQuickConnectRouting.destination(for: .connected, ownsTerminalLease: true) == .terminal)
+        #expect(RootQuickConnectRouting.destination(for: .connected, ownsTerminalLease: false) == nil)
+        #expect(RootQuickConnectRouting.destination(for: .failed(.pairing, "Pairing failed."), ownsTerminalLease: true) == nil)
+    }
+
     @Test("A compact width gets a tab bar")
     func compactUsesTabs() {
         #expect(RootNavigationStyle.style(for: .compact) == .tabs)
@@ -1118,6 +1152,13 @@ struct RootNavigationTests {
 
         #expect(!sent)
         #expect(model.lastError == nil)
+    }
+}
+
+private struct ShellExistingCredentialInstaller: QuickConnectCredentialInstalling {
+    func install(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod {
+        guard case .existing(let auth) = choice else { throw QuickConnectCredentialInstallError.storageFailed }
+        return auth
     }
 }
 

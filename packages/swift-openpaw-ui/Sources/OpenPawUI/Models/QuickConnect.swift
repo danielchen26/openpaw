@@ -70,13 +70,28 @@ public struct QuickConnectProposal: Identifiable, Sendable, Hashable {
 
     public func matches(existing host: HostRecord) -> Bool {
         guard host.username == username else { return false }
+        return matchesEndpoint(of: host)
+    }
+
+    /// Saved hosts at one of the reviewed endpoints, independent of username.
+    ///
+    /// Tailnet candidates intentionally carry a blank username. The UI may prefill one only when this endpoint lookup
+    /// has exactly one answer, preventing an arbitrary account or credential from becoming an implicit default.
+    public func canonicalMatchingHosts(in store: HostStore) -> [HostRecord] {
+        store.hosts.filter(matchesEndpoint(of:))
+    }
+
+    private func matchesEndpoint(of host: HostRecord) -> Bool {
         return targets.contains { target in
             target.port == host.port && QuickConnectLinkCodec.canonicalTargetKey(target.hostname) == QuickConnectLinkCodec.canonicalTargetKey(host.hostname)
         }
     }
 
     public func credentialConfirmationCandidate(in store: HostStore) -> QuickConnectCredentialConfirmation? {
-        guard let host = store.hosts.first(where: { matches(existing: $0) }) else { return nil }
+        let candidates = username.isEmpty
+            ? canonicalMatchingHosts(in: store)
+            : store.hosts.filter { matches(existing: $0) }
+        guard candidates.count == 1, let host = candidates.first else { return nil }
         return QuickConnectCredentialConfirmation(choice: .existing(host.auth), profile: host, requiresExplicitConfirmation: true)
     }
 

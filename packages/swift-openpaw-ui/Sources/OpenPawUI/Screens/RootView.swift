@@ -343,9 +343,52 @@ public enum HomeResumeCoordinator {
     }
 }
 
-private enum ShellRequestedSheet {
+public enum RootRequestedSheet: Sendable, Hashable {
     case addDevice
     case manageHosts
+}
+
+public enum RootSheetKind: Sendable, Hashable {
+    case hostKey
+    case quickConnect
+    case approval
+    case addDevice
+    case manageHosts
+}
+
+public enum RootSheetPolicy {
+    public static func resolve(
+        hostKey: Bool,
+        quickConnect: Bool,
+        approval: Bool,
+        requested: RootRequestedSheet?
+    ) -> RootSheetKind? {
+        if hostKey { return .hostKey }
+        if quickConnect { return .quickConnect }
+        if approval { return .approval }
+        switch requested {
+        case .addDevice: return .addDevice
+        case .manageHosts: return .manageHosts
+        case nil: return nil
+        }
+    }
+}
+
+public enum RootQuickConnectRouting {
+    public static func destination(
+        for stage: QuickConnectCoordinator.Stage,
+        ownsTerminalLease: Bool
+    ) -> ShellDestination? {
+        guard stage == .connected, ownsTerminalLease else { return nil }
+        return .terminal
+    }
+}
+
+private struct ExistingOnlyQuickConnectCredentialInstaller: QuickConnectCredentialInstalling {
+    func install(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod {
+        guard case .existing(let auth) = choice else { throw QuickConnectCredentialInstallError.storageFailed }
+        return auth
+    }
 }
 
 // MARK: - Root
@@ -366,6 +409,7 @@ public struct RootView: View {
     private let sessionSpaceProvider: any SessionSpaceProviding
     private let sessionCommandExecutor: any SessionSpaceCommandExecuting
     private let restorationStore: (any SessionRestorationStoring)?
+    private let quickConnectCoordinator: QuickConnectCoordinator
     @State private var sessionSpace = SessionSpaceSnapshot()
     /// Hold-anywhere dictation. Owned here so the gesture and its ring exist on every destination rather than
     /// being reimplemented per screen.
@@ -377,7 +421,7 @@ public struct RootView: View {
     @State private var latchedModifiers: KeyModifiers = []
     /// Terminal actions the strip's view page triggers on the terminal screen.
     @State private var terminalControls = TerminalControlBus()
-    @State private var requestedSheet: ShellRequestedSheet?
+    @State private var requestedSheet: RootRequestedSheet?
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     #if os(iOS)
@@ -389,6 +433,7 @@ public struct RootView: View {
     public init(
         model: OpenPawModel,
         terminalSurface: @escaping () -> AnyView,
+        quickConnectCoordinator: QuickConnectCoordinator? = nil,
         settings: OpenPawSettings = OpenPawSettings(),
         sessionSpaceProvider: any SessionSpaceProviding = EmptySessionSpaceProvider(),
         sessionCommandExecutor: any SessionSpaceCommandExecuting = EmptySessionSpaceCommandExecutor(),
@@ -400,6 +445,9 @@ public struct RootView: View {
         self.sessionSpaceProvider = sessionSpaceProvider
         self.sessionCommandExecutor = sessionCommandExecutor
         self.restorationStore = restorationStore
+        self.quickConnectCoordinator = quickConnectCoordinator ?? QuickConnectCoordinator(
+            model: model,
+            installer: ExistingOnlyQuickConnectCredentialInstaller())
         self.router = ShellRouter()
         // Roughly 120 bytes a line. The store follows the injected settings owner for this RootView instance.
         self.scrollback = ScrollbackStore(byteBudget: settings.scrollbackLines * 120)
@@ -410,6 +458,11 @@ public struct RootView: View {
     public func openApproval(itemID: String) {
         router.openApproval(itemID: itemID)
         Task { await model.refresh() }
+    }
+
+    /// Public handoff for Home now and pairing links/scanning in Task 6.
+    public func openQuickConnect(_ proposal: QuickConnectProposal) {
+        quickConnectCoordinator.begin(proposal)
     }
 
     /// Host-scoped deep-link entry point. The sheet is not named until the requested host owns a live connection and
@@ -527,6 +580,9 @@ public struct RootView: View {
             invalidateSessionSpace()
             Task { await refreshSessionSpace() }
         }
+        .onChange(of: quickConnectCoordinator.stage) { _, stage in
+            routeQuickConnectIfOwned(stage)
+        }
 #if os(iOS)
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
             Task {
@@ -546,11 +602,24 @@ public struct RootView: View {
             switch sheet {
             case .hostKey(let prompt):
                 HostKeySheet(prompt: prompt, onTrust: { trust(prompt) }, onCancel: { model.hostKeyPrompt = nil })
+            case .quickConnect:
+                QuickConnectView(
+                    coordinator: quickConnectCoordinator,
+                    hostStore: model.hostStore,
+                    onCancel: {},
+                    onConnected: {
+                        router.destination = .terminal
+                        quickConnectCoordinator.cancel()
+                    })
             case .approval(let item):
                 ApprovalSheet(model: model, item: item)
             case .addDevice:
                 NavigationStack {
-                    AddDeviceFlow(model: model, settings: settings) { requestedSheet = nil }
+                    AddDeviceFlow(
+                        model: model,
+                        settings: settings,
+                        candidates: model.homeTailnetBootstrap.candidates
+                    ) { requestedSheet = nil }
                 }
             case .manageHosts:
                 NavigationStack {
@@ -974,7 +1043,9 @@ public struct RootView: View {
                 onDeviceAction: openHomeDevice(_:intent:),
                 onOpenAgent: openHomeAgent(_:),
                 onOpenApproval: { router.openApproval(itemID: $0) },
-                onOpenRepository: openHomeRepository(_:)
+                onOpenRepository: openHomeRepository(_:),
+                onQuickConnect: openQuickConnect(_:),
+                onAddDevice: { requestedSheet = .addDevice }
             )
         case .terminal:
             TerminalScreenView(
@@ -1343,6 +1414,7 @@ public struct RootView: View {
 
     private enum ShellSheet: Identifiable {
         case hostKey(HostKeyPrompt)
+        case quickConnect
         case approval(InboxItem)
         case addDevice
         case manageHosts
@@ -1350,6 +1422,7 @@ public struct RootView: View {
         var id: String {
             switch self {
             case .hostKey(let prompt): "host-key-\(prompt.id)"
+            case .quickConnect: "quick-connect"
             case .approval(let item): "approval-\(item.id.rawValue)"
             case .addDevice: "add-device"
             case .manageHosts: "manage-hosts"
@@ -1360,17 +1433,27 @@ public struct RootView: View {
     /// A host key block always outranks an approval. The key decision is about whether you are talking to your own
     /// machine at all, which makes every other decision on screen meaningless until it is settled.
     private var currentSheet: ShellSheet? {
-        if let prompt = model.hostKeyPrompt { return .hostKey(prompt) }
-        guard let id = router.approvalItemID,
-            let item = model.inbox.first(where: { $0.id.rawValue == id })
-        else {
-            return switch requestedSheet {
-            case .addDevice: .addDevice
-            case .manageHosts: .manageHosts
-            case nil: nil
-            }
+        let approval = router.approvalItemID.flatMap { id in
+            model.inbox.first(where: { $0.id.rawValue == id })
         }
-        return .approval(item)
+        switch RootSheetPolicy.resolve(
+            hostKey: model.hostKeyPrompt != nil,
+            quickConnect: quickConnectIsActive,
+            approval: approval != nil,
+            requested: requestedSheet) {
+        case .hostKey:
+            return model.hostKeyPrompt.map(ShellSheet.hostKey)
+        case .quickConnect:
+            return .quickConnect
+        case .approval:
+            return approval.map(ShellSheet.approval)
+        case .addDevice:
+            return .addDevice
+        case .manageHosts:
+            return .manageHosts
+        case nil:
+            return nil
+        }
     }
 
     private var sheetBinding: Binding<ShellSheet?> {
@@ -1378,12 +1461,38 @@ public struct RootView: View {
             get: { currentSheet },
             set: { newValue in
                 guard newValue == nil else { return }
-                model.hostKeyPrompt = nil
-                router.approvalItemID = nil
-                router.approvalRoute = nil
-                requestedSheet = nil
+                switch currentSheet {
+                case .hostKey:
+                    model.hostKeyPrompt = nil
+                case .quickConnect:
+                    quickConnectCoordinator.cancel()
+                case .approval:
+                    router.approvalItemID = nil
+                    router.approvalRoute = nil
+                case .addDevice, .manageHosts:
+                    requestedSheet = nil
+                case nil:
+                    break
+                }
             }
         )
+    }
+
+    private var quickConnectIsActive: Bool {
+        guard quickConnectCoordinator.proposal != nil else { return false }
+        return switch quickConnectCoordinator.stage {
+        case .idle, .cancelled: false
+        default: true
+        }
+    }
+
+    private func routeQuickConnectIfOwned(_ stage: QuickConnectCoordinator.Stage) {
+        let ownsTerminalLease = quickConnectCoordinator.terminalRouteIntent.map(model.ownsConnection) ?? false
+        if let destination = RootQuickConnectRouting.destination(
+            for: stage,
+            ownsTerminalLease: ownsTerminalLease) {
+            router.destination = destination
+        }
     }
 
     private func trust(_ prompt: HostKeyPrompt) {
@@ -1398,7 +1507,11 @@ public struct RootView: View {
             let entry = KnownHostEntry(keyType: "ssh-ed25519", fingerprint: fingerprint, addedAt: Date())
             try model.hostStore.trust(entry, for: host.id)
             model.hostKeyPrompt = nil
-            Task { await model.connectSelectedHost() }
+            if case .awaitingHostTrust = quickConnectCoordinator.stage {
+                quickConnectCoordinator.resumeAfterHostTrust()
+            } else {
+                Task { await model.connectSelectedHost() }
+            }
         } catch {
             model.present(error, while: "pinning the host key")
         }

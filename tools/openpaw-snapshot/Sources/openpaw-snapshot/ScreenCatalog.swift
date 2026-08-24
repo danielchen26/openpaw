@@ -63,6 +63,54 @@ enum ScreenCatalog {
         model.pendingInbox.first { $0.risk?.requiresDetailExpansion == true } ?? model.pendingInbox.first
     }
 
+    static let quickConnectNow = Date(timeIntervalSince1970: 1_800_000_000)
+
+    static func quickConnectPresentation() -> QuickConnectPresentation {
+        var proposal = QuickConnectProposal.from(
+            candidate: AddDeviceCandidate(
+                id: "snapshot-quick-connect",
+                nickname: "MacBook Pro",
+                hostname: "macbook-pro.example.ts.net",
+                dnsName: "macbook-pro.example.ts.net",
+                tailscaleIPs: ["100.64.0.11"],
+                os: "macOS",
+                online: true),
+            now: quickConnectNow)
+        proposal.issuedAt = quickConnectNow
+        proposal.expiresAt = quickConnectNow.addingTimeInterval(240)
+        proposal.sessionID = "ses_snapshot_quick_connect"
+        proposal.hostAPIPort = 4317
+        proposal.profile = .operator
+        proposal.hostKeys = [
+            QuickConnectHostKey(
+                algorithm: "ssh-ed25519",
+                fingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        ]
+        let saved = HostRecord(
+            id: UUID(uuidString: "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE")!,
+            nickname: "MacBook Pro",
+            hostname: "macbook-pro.example.ts.net",
+            port: 22,
+            username: "daniel",
+            auth: .agentForwarding)
+        return QuickConnectPresentation(
+            proposal: proposal,
+            hostStore: HostStore(hosts: [saved]),
+            now: quickConnectNow)
+    }
+
+    static func quickConnectScreen(_ state: QuickConnectScreenState) -> AnyView {
+        var presentation = quickConnectPresentation()
+        if state == .expired {
+            presentation.proposal.expiresAt = quickConnectNow.addingTimeInterval(-1)
+        }
+        return AnyView(
+            QuickConnectView(
+                snapshot: QuickConnectSnapshot(
+                    presentation: presentation,
+                    state: state)))
+    }
+
     static let all: [Screen] = [
         Screen(
             name: "RootView",
@@ -76,6 +124,40 @@ enum ScreenCatalog {
             build: { model, _ in
                 AnyView(WorkspaceHomeView(model: model, settings: OpenPawSettings()))
             },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "QuickConnectView-reviewing",
+            build: { _, _ in quickConnectScreen(.reviewing) },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "QuickConnectView-connecting",
+            build: { _, _ in quickConnectScreen(.connecting("Connecting SSH")) },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "QuickConnectView-awaiting-trust",
+            build: { _, _ in quickConnectScreen(.awaitingHostTrust) },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "QuickConnectView-expired",
+            build: { _, _ in quickConnectScreen(.expired) },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "QuickConnectView-failure",
+            build: { _, _ in
+                quickConnectScreen(.failed(
+                    message: "Pairing could not be completed. Generate a new code or retry pairing.",
+                    allowsPairingRetry: true))
+            },
+            unavailableReason: ""
+        ),
+        Screen(
+            name: "QuickConnectView-connected",
+            build: { _, _ in quickConnectScreen(.connected) },
             unavailableReason: ""
         ),
         Screen(

@@ -117,23 +117,122 @@ struct HomeTailnetBootstrapTests {
         )
     }
 
-    @Test("Tapping a Home Tailnet device opens that candidate directly for review")
-    func homeCandidateStartsDirectReview() {
+    @Test("Tapping a Home Tailnet device opens Quick Connect without entering Add Device")
+    func homeCandidateStartsQuickConnect() {
         let candidate = AddDeviceCandidate(
             id: "node-1",
-            nickname: "Build Mac",
-            hostname: "build.example.ts.net",
+            nickname: "MacBook Pro",
+            hostname: "macbook-pro.example.ts.net",
+            dnsName: "macbook-pro.example.ts.net",
+            tailscaleIPs: ["100.64.0.11"],
+            os: "macOS",
+            online: true,
             source: .tailscaleAdministrator
         )
+        var received: QuickConnectProposal?
+        let isAdding = false
 
-        let state = AddDeviceFlowState(
-            hosts: [],
-            discovered: [candidate],
-            initiallySelectedCandidateID: candidate.id
-        )
+        WorkspaceHomeCandidateSelection.openQuickConnect(candidate, now: Date(timeIntervalSince1970: 1_800_000_000)) {
+            received = $0
+        }
 
-        #expect(state.step == .confirmCandidate)
-        #expect(state.selectedCandidate == candidate)
+        #expect(received?.id == candidate.id)
+        #expect(received?.nickname == "MacBook Pro")
+        #expect(received?.username == "")
+        #expect(received?.targets.map(\.hostname) == ["macbook-pro.example.ts.net", "100.64.0.11"])
+        #expect(received?.online == true)
+        #expect(isAdding == false)
+        #expect(QuickConnectCopy.primaryAction == "Confirm SSH credential and connect")
+        #expect(QuickConnectScreenState.reviewing.primaryActionTitle == "Confirm SSH credential and connect")
+    }
+
+    @Test("Only the explicit add another action opens Add Device")
+    func explicitAddAnotherRemainsManual() {
+        var openCount = 0
+        WorkspaceHomeCandidateSelection.openAddDevice { openCount += 1 }
+
+        #expect(WorkspaceHomeCandidateAction.candidate.opensAddDevice == false)
+        #expect(WorkspaceHomeCandidateAction.addAnother.opensAddDevice)
+        #expect(WorkspaceHomeCandidateAction.manual.opensAddDevice)
+        #expect(openCount == 1)
+    }
+
+    @Test("A single canonical saved host safely prefills username and credential labels")
+    func oneCanonicalHostPrefillsSafeCredential() throws {
+        let proposal = QuickConnectProposal.from(
+            candidate: AddDeviceCandidate(
+                id: "node-1",
+                nickname: "MacBook Pro",
+                hostname: "macbook-pro.example.ts.net",
+                dnsName: "macbook-pro.example.ts.net",
+                tailscaleIPs: ["100.64.0.11"],
+                os: "macOS",
+                online: true),
+            now: Date(timeIntervalSince1970: 1_800_000_000))
+        let passwordReference = try KeychainReference(identifier: "secret-password-reference")
+        let host = HostRecord(
+            nickname: "MacBook Pro",
+            hostname: "MACBOOK-PRO.EXAMPLE.TS.NET.",
+            port: 22,
+            username: "daniel",
+            auth: .password(reference: passwordReference))
+
+        let presentation = QuickConnectPresentation(
+            proposal: proposal,
+            hostStore: HostStore(hosts: [host]),
+            now: Date(timeIntervalSince1970: 1_800_000_000))
+
+        #expect(presentation.username == "daniel")
+        #expect(presentation.selectedCredential?.choice == .existing(.password(reference: passwordReference)))
+        #expect(presentation.selectedCredential?.label == "MacBook Pro · Saved password")
+        #expect(presentation.credentialOptions.map(\.label) == [
+            "MacBook Pro · Saved password",
+            "Use a password",
+            "Import a private key",
+        ])
+        #expect(presentation.canConfirm)
+        #expect(!presentation.accessibilityIdentifiers.joined().contains("secret-password-reference"))
+    }
+
+    @Test("Ambiguous or new hosts never silently default to unusable authentication")
+    func ambiguousAndNewHostsRequireExplicitUsableCredential() throws {
+        let proposal = QuickConnectProposal.from(
+            candidate: AddDeviceCandidate(
+                id: "node-1",
+                nickname: "MacBook Pro",
+                hostname: "macbook-pro.example.ts.net",
+                dnsName: "macbook-pro.example.ts.net",
+                tailscaleIPs: [],
+                os: "macOS",
+                online: true),
+            now: Date(timeIntervalSince1970: 1_800_000_000))
+        let first = HostRecord(
+            nickname: "Developer account",
+            hostname: "macbook-pro.example.ts.net",
+            username: "daniel",
+            auth: .agentForwarding)
+        let second = HostRecord(
+            nickname: "Root account",
+            hostname: "macbook-pro.example.ts.net",
+            username: "root",
+            auth: .privateKey(reference: try KeychainReference(identifier: "saved-key"), passphraseRef: nil))
+
+        let ambiguous = QuickConnectPresentation(
+            proposal: proposal,
+            hostStore: HostStore(hosts: [first, second]),
+            now: Date(timeIntervalSince1970: 1_800_000_000))
+        let newHost = QuickConnectPresentation(
+            proposal: proposal,
+            hostStore: HostStore(),
+            now: Date(timeIntervalSince1970: 1_800_000_000))
+
+        #expect(ambiguous.username == "")
+        #expect(ambiguous.selectedCredential == nil)
+        #expect(!ambiguous.canConfirm)
+        #expect(newHost.username == "")
+        #expect(newHost.selectedCredential == nil)
+        #expect(newHost.credentialOptions.map(\.label) == ["Use a password", "Import a private key"])
+        #expect(!newHost.canConfirm)
     }
 
     @MainActor
