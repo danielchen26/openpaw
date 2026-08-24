@@ -59,7 +59,115 @@ public struct QuickConnectProposal: Identifiable, Sendable, Hashable {
         return targets.contains { $0.port == host.port && QuickConnectProposal.normalized($0.hostname) == QuickConnectProposal.normalized(host.hostname) }
     }
 
+    public func credentialConfirmationCandidate(in store: HostStore) -> QuickConnectCredentialConfirmation? {
+        guard let host = store.hosts.first(where: { matches(existing: $0) }) else { return nil }
+        return QuickConnectCredentialConfirmation(choice: .existing(host.auth), profile: host, requiresExplicitConfirmation: true)
+    }
+
     fileprivate static func normalized(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased() }
+}
+
+public struct QuickConnectCredentialConfirmation: Sendable, Hashable {
+    public var choice: QuickConnectCredentialChoice
+    public var profile: HostRecord
+    public var requiresExplicitConfirmation: Bool
+
+    public init(choice: QuickConnectCredentialChoice, profile: HostRecord, requiresExplicitConfirmation: Bool = true) {
+        self.choice = choice
+        self.profile = profile
+        self.requiresExplicitConfirmation = requiresExplicitConfirmation
+    }
+}
+
+public enum QuickConnectCredentialChoice: Sendable, Hashable, CustomStringConvertible, CustomDebugStringConvertible {
+    case existing(AuthMethod)
+    case password(label: String, secret: String)
+    case privateKey(label: String, key: Data, passphraseLabel: String?, passphrase: String?)
+
+    public var description: String {
+        switch self {
+        case .existing(let auth):
+            return "QuickConnectCredentialChoice.existing(\(auth))"
+        case .password(let label, _):
+            return "QuickConnectCredentialChoice.password(label: \(String(reflecting: label)), secret: <redacted>)"
+        case .privateKey(let label, _, let passphraseLabel, let passphrase):
+            let redactedPassphrase = passphrase == nil ? "nil" : "<redacted>"
+            return "QuickConnectCredentialChoice.privateKey(label: \(String(reflecting: label)), key: <redacted>, passphraseLabel: \(String(reflecting: passphraseLabel)), passphrase: \(redactedPassphrase))"
+        }
+    }
+
+    public var debugDescription: String { description }
+}
+
+public enum QuickConnectCredentialInstallError: Error, Sendable, Hashable, CustomStringConvertible {
+    case invalidLabel
+    case emptySecret
+    case storageFailed
+
+    public var description: String {
+        switch self {
+        case .invalidLabel: "Invalid credential label."
+        case .emptySecret: "Credential secret is empty."
+        case .storageFailed: "Credential storage failed."
+        }
+    }
+}
+
+public protocol QuickConnectCredentialInstalling: Sendable {
+    func install(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod
+}
+
+public struct QuickConnectStoredSecretRequest: Sendable, Hashable {
+    public var data: Data
+    public var reference: KeychainReference
+    public var requiresUserPresence: Bool
+
+    public init(data: Data, reference: KeychainReference, requiresUserPresence: Bool) {
+        self.data = data
+        self.reference = reference
+        self.requiresUserPresence = requiresUserPresence
+    }
+}
+
+public enum QuickConnectCredentialReferences {
+    public static let labelLimit = 64
+
+    public static func reference(kind: String, label: String) throws -> KeychainReference {
+        let bounded = try boundedLabel(label)
+        return try KeychainReference(identifier: "quick-connect/\(kind)/\(bounded)")
+    }
+
+    public static func boundedLabel(_ label: String) throws -> String {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= labelLimit else { throw QuickConnectCredentialInstallError.invalidLabel }
+        guard trimmed.rangeOfCharacter(from: .controlCharacters) == nil else { throw QuickConnectCredentialInstallError.invalidLabel }
+        return trimmed.map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "_" || $0 == "-" ? String($0) : "-" }.joined()
+    }
+
+    public static func storageRequests(for choice: QuickConnectCredentialChoice) throws -> (auth: AuthMethod, requests: [QuickConnectStoredSecretRequest]) {
+        switch choice {
+        case .existing(let auth):
+            return (auth, [])
+        case .password(let label, let secret):
+            guard let data = secret.data(using: .utf8), !data.isEmpty else { throw QuickConnectCredentialInstallError.emptySecret }
+            let ref = try reference(kind: "password", label: label)
+            return (.password(reference: ref), [.init(data: data, reference: ref, requiresUserPresence: false)])
+        case .privateKey(let label, let key, let passphraseLabel, let passphrase):
+            guard !key.isEmpty else { throw QuickConnectCredentialInstallError.emptySecret }
+            let keyRef = try reference(kind: "private-key", label: label)
+            var requests = [QuickConnectStoredSecretRequest(data: key, reference: keyRef, requiresUserPresence: true)]
+            let passRef: KeychainReference?
+            if let passphrase, !passphrase.isEmpty {
+                let ref = try reference(kind: "passphrase", label: passphraseLabel ?? "\(label)-passphrase")
+                guard let data = passphrase.data(using: .utf8), !data.isEmpty else { throw QuickConnectCredentialInstallError.emptySecret }
+                requests.append(.init(data: data, reference: ref, requiresUserPresence: false))
+                passRef = ref
+            } else {
+                passRef = nil
+            }
+            return (.privateKey(reference: keyRef, passphraseRef: passRef), requests)
+        }
+    }
 }
 
 public enum QuickConnectLinkError: Error, Sendable, Hashable {

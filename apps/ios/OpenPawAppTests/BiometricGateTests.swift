@@ -1,4 +1,5 @@
 import XCTest
+import OpenPawTerminalCore
 @testable import OpenPawProtocol
 @testable import OpenPawUI
 
@@ -232,4 +233,46 @@ final class BiometricGateTests: XCTestCase {
         XCTAssertEqual(GatePolicy.graceLabel(60), "After 1 minute")
         XCTAssertEqual(GatePolicy.graceLabel(600), "After 10 minutes")
     }
+}
+
+final class QuickConnectKeychainCredentialInstallerTests: XCTestCase {
+    func testPasswordStorageIsDeviceLocalWithoutUserPresence() async throws {
+        let recorder = CredentialStoreRecorder()
+        let installer = QuickConnectKeychainCredentialInstaller(storeSecret: recorder.store, deleteSecret: recorder.delete)
+
+        let auth = try await installer.install(.password(label: "Studio login", secret: "pw"))
+
+        XCTAssertEqual(auth, .password(reference: try KeychainReference(identifier: "quick-connect/password/Studio-login")))
+        XCTAssertEqual(recorder.writes.map(\.requiresUserPresence), [false])
+        XCTAssertEqual(String(data: recorder.writes[0].data, encoding: .utf8), "pw")
+    }
+
+    func testPrivateKeyRequiresUserPresenceAndCleansUpPartialWrites() async throws {
+        let recorder = CredentialStoreRecorder(failOnWrite: 2)
+        let installer = QuickConnectKeychainCredentialInstaller(storeSecret: recorder.store, deleteSecret: recorder.delete)
+
+        do {
+            _ = try await installer.install(.privateKey(label: "Studio key", key: Data("key".utf8), passphraseLabel: "Studio passphrase", passphrase: "pass"))
+            XCTFail("Expected storage failure")
+        } catch QuickConnectCredentialInstallError.storageFailed {}
+
+        XCTAssertEqual(recorder.writes.map(\.requiresUserPresence), [true, false])
+        XCTAssertEqual(recorder.deletes, [try KeychainReference(identifier: "quick-connect/private-key/Studio-key")])
+    }
+}
+
+private final class CredentialStoreRecorder: @unchecked Sendable {
+    struct Write { var data: Data; var reference: KeychainReference; var requiresUserPresence: Bool }
+    private(set) var writes: [Write] = []
+    private(set) var deletes: [KeychainReference] = []
+    let failOnWrite: Int?
+
+    init(failOnWrite: Int? = nil) { self.failOnWrite = failOnWrite }
+
+    func store(_ data: Data, _ reference: KeychainReference, _ requiresUserPresence: Bool) throws {
+        writes.append(Write(data: data, reference: reference, requiresUserPresence: requiresUserPresence))
+        if writes.count == failOnWrite { throw QuickConnectCredentialInstallError.storageFailed }
+    }
+
+    func delete(_ reference: KeychainReference) throws { deletes.append(reference) }
 }

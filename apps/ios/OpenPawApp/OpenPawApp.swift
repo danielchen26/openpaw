@@ -201,6 +201,41 @@ struct ActiveSSHCommandRunner: CommandRunner {
     }
 }
 
+struct QuickConnectKeychainCredentialInstaller: QuickConnectCredentialInstalling {
+    var storeSecret: @Sendable (Data, KeychainReference, Bool) throws -> Void
+    var deleteSecret: @Sendable (KeychainReference) throws -> Void
+
+    init(keychain: KeychainStore) {
+        self.storeSecret = { data, reference, requireBiometry in
+            try keychain.store(secret: data, for: reference, requireBiometry: requireBiometry)
+        }
+        self.deleteSecret = { reference in try keychain.delete(reference) }
+    }
+
+    init(
+        storeSecret: @escaping @Sendable (Data, KeychainReference, Bool) throws -> Void,
+        deleteSecret: @escaping @Sendable (KeychainReference) throws -> Void
+    ) {
+        self.storeSecret = storeSecret
+        self.deleteSecret = deleteSecret
+    }
+
+    func install(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod {
+        let plan = try QuickConnectCredentialReferences.storageRequests(for: choice)
+        var written: [KeychainReference] = []
+        do {
+            for request in plan.requests {
+                try storeSecret(request.data, request.reference, request.requiresUserPresence)
+                written.append(request.reference)
+            }
+            return plan.auth
+        } catch {
+            for reference in written.reversed() { try? deleteSecret(reference) }
+            throw QuickConnectCredentialInstallError.storageFailed
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class AppWiring {
@@ -304,6 +339,8 @@ final class AppWiring {
         #endif
         let hosts = HostStoreFile()
         let keychain = KeychainStore(service: "dev.openpaw.app.ssh")
+        let quickConnectCredentialInstaller = QuickConnectKeychainCredentialInstaller(keychain: keychain)
+        _ = quickConnectCredentialInstaller
         // Handed from `makeConfiguration` to `makeTransport`: the pins belong to the `HostRecord`, and only the
         // configuration reaches the factory. `connect(host:)` builds the configuration immediately before dialling, so
         // the ordering is guaranteed by the backend's own control flow.

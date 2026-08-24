@@ -109,8 +109,77 @@ struct QuickConnectTests {
         #expect(proposal.matches(existing: before.hosts[0]))
     }
 
+    @Test("existing exact host preselects credential but still requires confirmation")
+    func exactExistingHostPreselectsCredentialButRequiresConfirmation() throws {
+        let reference = try KeychainReference(identifier: "existing-password-ref")
+        let host = HostRecord(nickname: "Studio", hostname: "studio.tailnet.ts.net", port: 22, username: "daniel", auth: .password(reference: reference))
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+
+        let confirmation = proposal.credentialConfirmationCandidate(in: HostStore(hosts: [host]))
+
+        #expect(confirmation?.choice == .existing(.password(reference: reference)))
+        #expect(confirmation?.profile == host)
+        #expect(confirmation?.requiresExplicitConfirmation == true)
+    }
+
+    @Test("different host or username never preselects credentials")
+    func differentHostOrUsernameDoesNotLeakCredential() throws {
+        let reference = try KeychainReference(identifier: "other-secret-ref")
+        let different = HostRecord(nickname: "Other", hostname: "studio.tailnet.ts.net", port: 22, username: "root", auth: .password(reference: reference))
+        let proposal = try QuickConnectLinkCodec(now: { issuedAt }).decode(try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope()))
+
+        #expect(proposal.credentialConfirmationCandidate(in: HostStore(hosts: [different])) == nil)
+    }
+
+    @Test("new credential drafts install to AuthMethod references without retaining printable secrets")
+    func newCredentialDraftsInstallReferencesAndRedactSecrets() async throws {
+        let password = QuickConnectCredentialChoice.password(label: "Studio login", secret: "correct horse battery staple")
+        let key = QuickConnectCredentialChoice.privateKey(label: "Studio key", key: Data("PRIVATE-KEY-MATERIAL".utf8), passphraseLabel: "Studio passphrase", passphrase: "key passphrase")
+        let installer = RecordingQuickConnectCredentialInstaller()
+
+        let passwordAuth = try await installer.install(password)
+        let keyAuth = try await installer.install(key)
+
+        #expect(passwordAuth == .password(reference: try KeychainReference(identifier: "quick-connect/password/Studio-login")))
+        #expect(keyAuth == .privateKey(reference: try KeychainReference(identifier: "quick-connect/private-key/Studio-key"), passphraseRef: try KeychainReference(identifier: "quick-connect/passphrase/Studio-passphrase")))
+        #expect(installer.requests.map(\.requiresUserPresence) == [false, true, false])
+        #expect(String(describing: password) == "QuickConnectCredentialChoice.password(label: \"Studio login\", secret: <redacted>)")
+        #expect(String(describing: key).contains("PRIVATE-KEY-MATERIAL") == false)
+        #expect(String(describing: key).contains("key passphrase") == false)
+    }
+
+    @Test("credential storage failure leaves host store unchanged and redacts errors")
+    func credentialStorageFailureLeavesHostStoreUnchangedAndRedactsError() async throws {
+        let before = HostStore(hosts: [HostRecord(nickname: "Studio", hostname: "studio", port: 22, username: "daniel", auth: .agentForwarding)])
+        let after = before
+        let installer = FailingQuickConnectCredentialInstaller()
+
+        await #expect(throws: QuickConnectCredentialInstallError.storageFailed) {
+            _ = try await installer.install(.password(label: "Bad", secret: "do-not-print-me"))
+        }
+        #expect(after == before)
+        #expect(String(describing: QuickConnectCredentialInstallError.storageFailed).contains("do-not-print-me") == false)
+    }
+
     private func expectDecodeError(_ error: QuickConnectLinkError, codec: QuickConnectLinkCodec, envelope: QuickConnectEnvelopeV1) throws {
         let url = try QuickConnectLinkCodec(now: { issuedAt }).encodeWithoutValidation(envelope)
         #expect(throws: error) { try codec.decode(url) }
+    }
+}
+
+private final class RecordingQuickConnectCredentialInstaller: QuickConnectCredentialInstalling, @unchecked Sendable {
+    private(set) var requests: [QuickConnectStoredSecretRequest] = []
+
+    func install(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod {
+        let plan = try QuickConnectCredentialReferences.storageRequests(for: choice)
+        requests.append(contentsOf: plan.requests)
+        return plan.auth
+    }
+}
+
+private struct FailingQuickConnectCredentialInstaller: QuickConnectCredentialInstalling {
+    func install(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod {
+        _ = choice
+        throw QuickConnectCredentialInstallError.storageFailed
     }
 }
