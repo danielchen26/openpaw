@@ -677,14 +677,14 @@ mod tests {
     #[cfg(unix)]
     use std::time::Instant;
 
-    /// Two iOS devices on a real tailnet both report `HostName: "localhost"`. Picking the hostname first makes them
+    /// Multiple mobile devices can report `HostName: "localhost"`. Picking the hostname first makes them
     /// indistinguishable in the picker, which is a device-identity bug on the one screen where the user is deciding
-    /// which machine to trust. Taken from an actual `tailscale status --json`.
+    /// which machine to trust.
     #[test]
     fn distinguishes_peers_that_share_a_generic_hostname() {
         let json = br#"{"BackendState":"Running","Peer":{
-            "nodekey:a":{"ID":"nA","HostName":"localhost","DNSName":"ipad165.tail303ce8.ts.net.","TailscaleIPs":["100.72.11.89"],"OS":"iOS","Online":true},
-            "nodekey:b":{"ID":"nB","HostName":"localhost","DNSName":"iphone172.tail303ce8.ts.net.","TailscaleIPs":["100.68.106.52"],"OS":"iOS","Online":false}
+            "nodekey:a":{"ID":"node-a","HostName":"localhost","DNSName":"tablet-a.example-tailnet.ts.net.","TailscaleIPs":["100.64.0.10"],"OS":"iOS","Online":true},
+            "nodekey:b":{"ID":"node-b","HostName":"localhost","DNSName":"phone-b.example-tailnet.ts.net.","TailscaleIPs":["100.64.0.11"],"OS":"iOS","Online":false}
         }}"#;
         let parsed = parse_status_json(json).unwrap();
         let names: Vec<&str> = parsed
@@ -693,7 +693,7 @@ mod tests {
             .map(|c| c.display_name.as_str())
             .collect();
         assert!(
-            names.contains(&"ipad165") && names.contains(&"iphone172"),
+            names.contains(&"tablet-a") && names.contains(&"phone-b"),
             "expected the tailnet names to disambiguate, got {names:?}"
         );
     }
@@ -702,7 +702,7 @@ mod tests {
     /// through as a real timestamp and renders as "last seen in year 1" for a device that is online right now.
     #[test]
     fn treats_the_zero_timestamp_as_never_seen() {
-        let json = br#"{"BackendState":"Running","Peer":{"nodekey:a":{"ID":"nA","HostName":"ipad","DNSName":"ipad.tail.ts.net.","TailscaleIPs":["100.72.11.89"],"OS":"iOS","Online":true,"LastSeen":"0001-01-01T00:00:00Z"}}}"#;
+        let json = br#"{"BackendState":"Running","Peer":{"nodekey:a":{"ID":"node-a","HostName":"tablet","DNSName":"tablet.example-tailnet.ts.net.","TailscaleIPs":["100.64.0.13"],"OS":"iOS","Online":true,"LastSeen":"0001-01-01T00:00:00Z"}}}"#;
         let parsed = parse_status_json(json).unwrap();
         assert_eq!(parsed.candidates[0].last_seen, None);
     }
@@ -710,9 +710,9 @@ mod tests {
     /// A real hostname is the user's own name for the machine and must survive, even when a tailnet label exists.
     #[test]
     fn keeps_a_real_hostname_over_the_tailnet_label() {
-        let json = br#"{"BackendState":"Running","Peer":{"nodekey:a":{"ID":"nA","HostName":"work","DNSName":"work.tail303ce8.ts.net.","TailscaleIPs":["100.74.164.67"],"OS":"macOS","Online":true}}}"#;
+        let json = br#"{"BackendState":"Running","Peer":{"nodekey:a":{"ID":"node-a","HostName":"build-server","DNSName":"build-server.example-tailnet.ts.net.","TailscaleIPs":["100.64.0.12"],"OS":"macOS","Online":true}}}"#;
         let parsed = parse_status_json(json).unwrap();
-        assert_eq!(parsed.candidates[0].display_name, "work");
+        assert_eq!(parsed.candidates[0].display_name, "build-server");
     }
 
     /// With no tailnet name the address still identifies the machine, and means far more to the person choosing it
@@ -734,11 +734,11 @@ mod tests {
     /// A genuine past timestamp still has to survive, or every offline device would claim it was never seen.
     #[test]
     fn keeps_a_genuine_last_seen_timestamp() {
-        let json = br#"{"BackendState":"Running","Peer":{"nodekey:a":{"ID":"nA","HostName":"air","TailscaleIPs":["100.70.52.28"],"Online":false,"LastSeen":"2026-08-19T20:28:37.1Z"}}}"#;
+        let json = br#"{"BackendState":"Running","Peer":{"nodekey:a":{"ID":"node-a","HostName":"laptop","TailscaleIPs":["100.64.0.14"],"Online":false,"LastSeen":"2025-01-02T03:04:05Z"}}}"#;
         let parsed = parse_status_json(json).unwrap();
         assert_eq!(
             parsed.candidates[0].last_seen.as_deref(),
-            Some("2026-08-19T20:28:37.1Z")
+            Some("2025-01-02T03:04:05Z")
         );
     }
 

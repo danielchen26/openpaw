@@ -138,6 +138,20 @@ public struct TailscaleAdminDeviceCandidate: Sendable, Hashable, Decodable {
         case os
         case user
         case lastSeen
-        case isOnline = "online"
+        case connectedToControl
+        case legacyOnline = "online"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        hostname = try container.decodeIfPresent(String.self, forKey: .hostname)
+        addresses = try container.decode([String].self, forKey: .addresses)
+        os = try container.decodeIfPresent(String.self, forKey: .os)
+        user = try container.decodeIfPresent(String.self, forKey: .user)
+        lastSeen = try container.decodeIfPresent(Date.self, forKey: .lastSeen)
+        isOnline = try container.decodeIfPresent(Bool.self, forKey: .connectedToControl)
+            ?? container.decodeIfPresent(Bool.self, forKey: .legacyOnline)
     }
 }

@@ -43,6 +43,23 @@ final class TailscaleAdminConnectorTests: XCTestCase {
         XCTAssertEqual(URLProtocolStub.requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer token-one")
     }
 
+    func testMapsOfficialConnectedToControlFieldToOnlineState() async throws {
+        let connector = makeConnector()
+        let credentials = TailscaleAdminCredentials(clientID: "client-id", clientSecret: "super-secret", tailnet: "example.ts.net")
+
+        URLProtocolStub.routes = [
+            .init(status: 200, body: #"{"access_token":"token-one","expires_in":3600}"#),
+            .init(
+                status: 200,
+                body: #"{"devices":[{"id":"dev1","name":"build-node.example.ts.net","hostname":"build-node","addresses":["100.64.0.10"],"connectedToControl":true}]}"#
+            )
+        ]
+
+        let devices = try await connector.fetchDevices(using: credentials)
+
+        XCTAssertEqual(devices.first?.isOnline, true)
+    }
+
     func testQuad100LocalIdentityUsesOnlyTheFixedEndpointAndDecodesTheSignedInTailnet() async throws {
         URLProtocolStub.routes = [
             .init(
