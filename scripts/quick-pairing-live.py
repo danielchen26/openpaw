@@ -52,6 +52,23 @@ PAIRING_DEVICE_NAME = "Quick Connect live acceptance"
 LIVE_NICKNAME = "127"
 PAIR_URL_PATTERN = re.compile(r"openpaw://pair#v1\.[A-Za-z0-9_-]+")
 RUNTIME_PATTERN = re.compile(r"(?:^|\.)iOS-(\d+)-(\d+)(?:-(\d+))?$")
+PAIRING_PHASES = frozenset(
+    {
+        "responseReturned",
+        "signerValidated",
+        "credentialsSaved",
+        "signerInstalled",
+        "completed",
+        "timedOut",
+        "cancelled",
+        "transport",
+        "forbidden",
+        "server",
+        "decoding",
+        "storage",
+        "other",
+    }
+)
 
 
 class HarnessError(RuntimeError):
@@ -629,6 +646,7 @@ def append_live_xcuitest(test_file: Path) -> None:
         seedApp.terminate()
 
         let app = XCUIApplication()
+        app.launchEnvironment["OPENPAW_DEBUG_PAIRING_PHASE_PORT"] = coordinationPort
         app.launchArguments = [
             "-openpaw-debug-seed-key", keyPath,
             "-openpaw.settings.biometricGate", "<false/>",
@@ -655,6 +673,7 @@ def append_live_xcuitest(test_file: Path) -> None:
         notify("/connected")
 
         app.terminate()
+        app.launchEnvironment["OPENPAW_DEBUG_PAIRING_PHASE_PORT"] = coordinationPort
         app.launchArguments = ["-openpaw.settings.biometricGate", "<false/>"]
         app.launch()
         let connect = app.buttons["Connect to Debug daemon"]
@@ -703,6 +722,7 @@ class CoordinationServer(ThreadingHTTPServer):
         self.pairing_url = ""
         self.secrets = secrets
         self.events: set[str] = set()
+        self.phases: list[str] = []
         self.failure: str | None = None
         self._link_factory: Callable[[], str] | None = link_factory
         self._ready_lock = threading.Lock()
@@ -757,6 +777,14 @@ class CoordinationHandler(BaseHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
             return
+        prefix = "/phase/"
+        if self.path.startswith(prefix):
+            phase = self.path[len(prefix):]
+            if phase in PAIRING_PHASES:
+                self.server.phases.append(phase)
+                self.send_response(204)
+                self.end_headers()
+                return
         self.send_response(404)
         self.end_headers()
 
@@ -787,6 +815,29 @@ def pair_audit_count(state_dir: Path) -> int:
         if isinstance(value, dict) and value.get("action") == "device.pair":
             count += 1
     return count
+
+
+def pair_audit_outcomes(state_dir: Path) -> list[str]:
+    try:
+        lines = (state_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    outcomes: list[str] = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict) or value.get("action") != "device.pair":
+            continue
+        result = value.get("result")
+        if isinstance(result, str) and result.startswith("paired with"):
+            outcomes.append("paired")
+        elif isinstance(result, str) and result.startswith("rejected:"):
+            outcomes.append("rejected")
+        else:
+            outcomes.append("other")
+    return outcomes
 
 
 def main() -> int:
@@ -881,8 +932,9 @@ def main() -> int:
             raise HarnessError(
                 f"live Quick Connect XCUITest failed with exit {xcodebuild.returncode}; "
                 f"coordination checkpoints reached: {checkpoints}; "
+                f"pairing phases: {coordinator.phases}; "
                 f"persisted host device count: {state_device_count(layout.host_state)}; "
-                f"persisted pairing audit count: {pair_audit_count(layout.host_state)}\n"
+                f"pairing audit outcomes: {pair_audit_outcomes(layout.host_state)}\n"
                 f"{errors}\n{xcode_output[-5000:]}"
             )
         if not {"/ready", "/connected", "/persisted"}.issubset(coordinator.events):

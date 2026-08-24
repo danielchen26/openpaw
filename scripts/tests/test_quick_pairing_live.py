@@ -205,6 +205,44 @@ class QuickPairingLiveContractTests(unittest.TestCase):
         self.assertNotIn("PAIRING_CODE", serialized)
         self.assertEqual(self.harness.LIVE_NICKNAME, "127")
 
+    def test_generated_xcuitest_scopes_pairing_phase_port_to_main_app_and_relaunch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            test_file = Path(directory) / "ConnectFlowUITests.swift"
+            test_file.write_text("final class ConnectFlowUITests {\n}\n", encoding="utf-8")
+
+            self.harness.append_live_xcuitest(test_file)
+            source = test_file.read_text(encoding="utf-8")
+
+        port_assignment = (
+            'app.launchEnvironment["OPENPAW_DEBUG_PAIRING_PHASE_PORT"] = coordinationPort'
+        )
+        self.assertEqual(source.count(port_assignment), 2)
+        seed_block = source[source.index("let seedApp"):source.index("let app = XCUIApplication()")]
+        self.assertNotIn("OPENPAW_DEBUG_PAIRING_PHASE_PORT", seed_block)
+
+    def test_coordination_accepts_only_fixed_pairing_phase_whitelist(self) -> None:
+        server = self.harness.CoordinationServer(
+            0, "SIM-UDID", lambda: "openpaw://pair#v1.safe", self.harness.SecretSet()
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        allowed = urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/phase/responseReturned", timeout=5
+        )
+        self.assertEqual(allowed.status, 204)
+        self.assertIn("responseReturned", server.phases)
+
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/phase/token=secret", timeout=5
+            )
+        self.assertEqual(raised.exception.code, 404)
+        self.assertNotIn("token=secret", repr(server.phases))
+
     def test_coordination_issues_and_opens_the_link_only_when_ready_after_build_start(self) -> None:
         events = []
         secrets = self.harness.SecretSet()
@@ -308,6 +346,27 @@ class QuickPairingLiveContractTests(unittest.TestCase):
             )
 
             self.assertEqual(self.harness.pair_audit_count(state), 2)
+
+    def test_pair_audit_outcomes_are_fixed_and_do_not_expose_audit_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            secret = "SECRET-AUDIT-TARGET"
+            (state / "audit.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps({"action": "device.pair", "result": f"paired with {secret}"}),
+                        json.dumps({"action": "device.pair", "result": f"rejected: {secret}"}),
+                        json.dumps({"action": "device.pair", "result": secret}),
+                        json.dumps({"action": "inbox.resolve", "result": f"paired with {secret}"}),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            outcomes = self.harness.pair_audit_outcomes(state)
+
+        self.assertEqual(outcomes, ["paired", "rejected", "other"])
+        self.assertNotIn(secret, repr(outcomes))
 
     def test_replay_request_rejects_the_consumed_pairing_code(self) -> None:
         class Client:

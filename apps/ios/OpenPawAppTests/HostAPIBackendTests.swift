@@ -12,6 +12,94 @@ final class HostAPIBackendTests: XCTestCase {
         try await super.tearDown()
     }
 
+    func testPairRecordsOnlyFixedSuccessfulPhasesInOrder() async throws {
+        let hostID = HostRecord.ID()
+        let phases = PairingPhaseRecorder()
+        let backend = HostAPIBackend(
+            forwarder: FakeForwarder(port: 49_332),
+            credentials: FakeCredentialStore(),
+            urlSession: Self.stubSession(),
+            pairingPhaseRecorder: { phase in phases.record(phase) })
+        installPairingResponse()
+
+        try await backend.connect(hostID: hostID)
+        _ = try await backend.pair(pairingCode: "must-never-be-recorded", deviceName: "secret-device")
+
+        XCTAssertEqual(
+            phases.values,
+            [.responseReturned, .signerValidated, .credentialsSaved, .signerInstalled, .completed])
+    }
+
+    func testPairRecordsStorageAndStopsBeforeCredentialsSaved() async throws {
+        let hostID = HostRecord.ID()
+        let phases = PairingPhaseRecorder()
+        let backend = HostAPIBackend(
+            forwarder: FakeForwarder(port: 49_333),
+            credentials: FakeCredentialStore(saveFailuresRemaining: 1),
+            urlSession: Self.stubSession(),
+            pairingPhaseRecorder: { phase in phases.record(phase) })
+        installPairingResponse()
+
+        try await backend.connect(hostID: hostID)
+        await assertCredentialSaveFails(
+            backend, pairingCode: "must-never-be-recorded", deviceName: "secret-device")
+
+        XCTAssertEqual(phases.values, [.responseReturned, .signerValidated, .storage])
+    }
+
+    func testPairRecordsTimedOutWithoutLeakingUnderlyingError() async throws {
+        let hostID = HostRecord.ID()
+        let phases = PairingPhaseRecorder()
+        let backend = HostAPIBackend(
+            forwarder: FakeForwarder(port: 49_334),
+            credentials: FakeCredentialStore(),
+            urlSession: Self.stubSession(),
+            pairingPhaseRecorder: { phase in phases.record(phase) })
+        StubURLProtocol.outcomes = [
+            .failure(URLError(.networkConnectionLost)),
+            .failure(URLError(.timedOut)),
+            .failure(URLError(.timedOut)),
+        ]
+
+        try await backend.connect(hostID: hostID)
+        do {
+            _ = try await backend.pair(
+                pairingCode: "must-never-be-recorded", deviceName: "secret-device")
+            XCTFail("expected pairing timeout")
+        } catch let error as HostClientError {
+            guard case .transport(let underlying) = error,
+                  (underlying as? URLError)?.code == .timedOut
+            else {
+                return XCTFail("expected timed out transport, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(phases.values, [.timedOut])
+    }
+
+    func testPairRecordsTransportWhenNoActiveHostExists() async {
+        let phases = PairingPhaseRecorder()
+        let backend = HostAPIBackend(
+            forwarder: FakeForwarder(port: 49_335),
+            credentials: FakeCredentialStore(),
+            urlSession: Self.stubSession(),
+            pairingPhaseRecorder: { phase in phases.record(phase) })
+
+        do {
+            _ = try await backend.pair(
+                pairingCode: "must-never-be-recorded", deviceName: "secret-device")
+            XCTFail("expected disconnected transport failure")
+        } catch let error as HostClientError {
+            guard case .transport = error else {
+                return XCTFail("expected transport failure, got \(error)")
+            }
+        } catch {
+            XCTFail("expected HostClientError, got \(error)")
+        }
+
+        XCTAssertEqual(phases.values, [.transport])
+    }
+
     func testConnectLoadsOnlySelectedHostSignerAndDisconnectClearsClientAndPort() async throws {
         let hostA = HostRecord.ID()
         let hostB = HostRecord.ID()
@@ -433,6 +521,23 @@ final class HostAPIBackendTests: XCTestCase {
             XCTAssertEqual(json["platform"] as? String, "ios", file: file, line: line)
             return try XCTUnwrap(request.idempotencyKey, file: file, line: line)
         }
+    }
+}
+
+private final class PairingPhaseRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [HostAPIPairingPhase] = []
+
+    var values: [HostAPIPairingPhase] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func record(_ phase: HostAPIPairingPhase) {
+        lock.lock()
+        recorded.append(phase)
+        lock.unlock()
     }
 }
 

@@ -16,6 +16,22 @@ protocol LoopbackForwarder: Sendable {
     func stop() async
 }
 
+enum HostAPIPairingPhase: String, Sendable {
+    case responseReturned
+    case signerValidated
+    case credentialsSaved
+    case signerInstalled
+    case completed
+    case timedOut
+    case cancelled
+    case transport
+    case forbidden
+    case server
+    case decoding
+    case storage
+    case other
+}
+
 /// `OpenPawBackend` over `HostClient`, reached through an SSH port forward.
 ///
 /// The daemon never listens on a routable address. It binds loopback on the machine it runs on, and this object talks
@@ -32,6 +48,7 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
     private let credentials: any DeviceCredentialStoring
     private let remotePort: UInt16
     private let urlSession: URLSession
+    private let pairingPhaseRecorder: @Sendable (HostAPIPairingPhase) -> Void
 
     private let state = State()
     /// Read without awaiting by `previewURL`, which the protocol declares synchronous because a URL for a WebView is
@@ -44,12 +61,14 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
         forwarder: any LoopbackForwarder,
         credentials: any DeviceCredentialStoring = DeviceCredentialStore(),
         remotePort: UInt16 = HostAPIBackend.defaultRemotePort,
-        urlSession: URLSession = .shared
+        urlSession: URLSession = .shared,
+        pairingPhaseRecorder: @escaping @Sendable (HostAPIPairingPhase) -> Void = { _ in }
     ) {
         self.forwarder = forwarder
         self.credentials = credentials
         self.remotePort = remotePort
         self.urlSession = urlSession
+        self.pairingPhaseRecorder = pairingPhaseRecorder
     }
 
     // MARK: Lifecycle
@@ -114,16 +133,24 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
     @discardableResult
     func pair(pairingCode: String, deviceName: String) async throws -> PairingResult {
         guard let hostID = activeHostID.get() else {
+            pairingPhaseRecorder(.transport)
             throw HostClientError.transport(URLError(.notConnectedToInternet))
         }
         let epoch = lifecycleEpoch.get()
-        let pairing = try await state.beginPairing(
-            hostID: hostID,
-            lifecycleEpoch: epoch,
-            pairingCode: pairingCode,
-            deviceName: deviceName
-        )
+        let pairing: (client: HostClient, idempotencyKey: String)
+        do {
+            pairing = try await state.beginPairing(
+                hostID: hostID,
+                lifecycleEpoch: epoch,
+                pairingCode: pairingCode,
+                deviceName: deviceName
+            )
+        } catch {
+            pairingPhaseRecorder(Self.pairingFailurePhase(error))
+            throw error
+        }
         let client = pairing.client
+        var failureRecorded = false
         do {
             // The simulator can drop the first URLSession request made over a freshly opened loopback tunnel. A pairing
             // code is single-use, so it must never be that sacrificial request. Health is unauthenticated and idempotent;
@@ -139,6 +166,7 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
                 platform: "ios",
                 idempotencyKey: pairing.idempotencyKey
             )
+            pairingPhaseRecorder(.responseReturned)
             guard let signer = result.signer else {
                 throw HostClientError.decoding(
                     DecodingError.dataCorrupted(
@@ -146,16 +174,50 @@ final class HostAPIBackend: OpenPawBackend, StructuredBackendLifecycle, OpenPawH
                     )
                 )
             }
+            pairingPhaseRecorder(.signerValidated)
             guard activeHostID.get() == hostID, lifecycleEpoch.get() == epoch, await state.client === client else {
                 throw HostClientError.transport(URLError(.cancelled))
             }
-            try credentials.save(result, hostID: hostID)
+            do {
+                try credentials.save(result, hostID: hostID)
+            } catch {
+                pairingPhaseRecorder(.storage)
+                failureRecorded = true
+                throw error
+            }
+            pairingPhaseRecorder(.credentialsSaved)
             await client.setSigner(signer)
+            pairingPhaseRecorder(.signerInstalled)
             await state.endPairing(client: client, clearIdempotencyKey: true)
+            pairingPhaseRecorder(.completed)
             return result
         } catch {
             await state.endPairing(client: client)
+            if !failureRecorded {
+                pairingPhaseRecorder(Self.pairingFailurePhase(error))
+            }
             throw error
+        }
+    }
+
+    private static func pairingFailurePhase(_ error: any Error) -> HostAPIPairingPhase {
+        if error is CancellationError { return .cancelled }
+        switch error {
+        case HostClientError.forbidden:
+            return .forbidden
+        case HostClientError.server:
+            return .server
+        case HostClientError.decoding:
+            return .decoding
+        case HostClientError.transport(let underlying):
+            if underlying is CancellationError { return .cancelled }
+            if let urlError = underlying as? URLError {
+                if urlError.code == .timedOut { return .timedOut }
+                if urlError.code == .cancelled { return .cancelled }
+            }
+            return .transport
+        default:
+            return .other
         }
     }
 

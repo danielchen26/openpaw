@@ -459,7 +459,14 @@ final class AppWiring {
         #if DEBUG && targetEnvironment(simulator)
             if let direct = Self.debugDirectForwarder() { forwarder = direct }
         #endif
-        let hostAPI = HostAPIBackend(forwarder: forwarder)
+        #if DEBUG && targetEnvironment(simulator)
+            let hostAPI = HostAPIBackend(
+                forwarder: forwarder,
+                pairingPhaseRecorder: Self.debugPairingPhaseRecorder()
+            )
+        #else
+            let hostAPI = HostAPIBackend(forwarder: forwarder)
+        #endif
         let tailscaleAdmin = TailscaleAdminConnector()
         let tailscaleLocalIdentity = Quad100TailscaleLocalIdentityConnector()
         let asrModels = LocalASRModelStore()
@@ -786,6 +793,24 @@ extension TransportError {
                 let port = UInt16(arguments[arguments.index(after: flag)])
             else { return nil }
             return DirectLoopbackForwarder(port: port)
+        }
+
+        static func debugPairingPhaseRecorder() -> @Sendable (HostAPIPairingPhase) -> Void {
+            let rawPort = ProcessInfo.processInfo.environment["OPENPAW_DEBUG_PAIRING_PHASE_PORT"] ?? ""
+            guard !rawPort.isEmpty,
+                rawPort.utf8.allSatisfy({ (48...57).contains($0) }),
+                let port = UInt16(rawPort),
+                port > 0
+            else { return { _ in } }
+
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.urlCache = nil
+            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            let session = URLSession(configuration: configuration)
+            return { phase in
+                guard let url = URL(string: "http://127.0.0.1:\(port)/phase/\(phase.rawValue)") else { return }
+                Task { _ = try? await session.data(from: url) }
+            }
         }
 
         static func seedDebugKeyIfRequested(into keychain: KeychainStore) {
