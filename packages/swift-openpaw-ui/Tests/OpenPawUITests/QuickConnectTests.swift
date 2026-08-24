@@ -1034,6 +1034,92 @@ struct QuickConnectTests {
         #expect(coordinator.terminalRouteIntent == nil)
     }
 
+    @Test("pairing scanner rejects Inbox routes and ordinary links in place")
+    func pairingScannerRejectsNonPairingURLs() throws {
+        let pairing = try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope())
+        let inbox = InboxRoute(
+            hostID: UUID(uuidString: "00000000-0000-0000-0000-000000000006")!,
+            itemID: InboxID(rawValue: "inb_666666666666666666666666")
+        )
+        var scanner = OpenPawScannerPolicy(now: { issuedAt })
+
+        #expect(scanner.receive(inbox.url.absoluteString, from: .camera) == .rejected)
+        #expect(scanner.receive("https://example.com/pair", from: .camera) == .rejected)
+        #expect(scanner.receive("not a URL", from: .camera) == .rejected)
+        #expect(scanner.isCaptureActive)
+        #expect(scanner.receive(pairing.absoluteString, from: .camera) == .accepted(pairing))
+    }
+
+    @Test("pairing scanner accepts one valid link then pauses")
+    func pairingScannerAcceptsOneAtATime() throws {
+        let first = try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope())
+        var secondEnvelope = knownEnvelope()
+        secondEnvelope.nickname = "Second Mac"
+        let second = try QuickConnectLinkCodec(now: { issuedAt }).encode(secondEnvelope)
+        var scanner = OpenPawScannerPolicy(now: { issuedAt })
+
+        #expect(scanner.receive(first.absoluteString, from: .camera) == .accepted(first))
+        #expect(scanner.isPaused)
+        #expect(!scanner.isCaptureActive)
+        #expect(scanner.receive(second.absoluteString, from: .camera) == .ignored)
+    }
+
+    @Test("manual paste uses the pairing scanner policy and dispatcher")
+    func manualPasteUsesSamePolicyAndDispatcher() throws {
+        let pairing = try QuickConnectLinkCodec(now: { issuedAt }).encode(knownEnvelope())
+        let inbox = InboxRoute(
+            hostID: UUID(uuidString: "00000000-0000-0000-0000-000000000007")!,
+            itemID: InboxID(rawValue: "inb_777777777777777777777777")
+        )
+        var scanner = OpenPawScannerPolicy(now: { issuedAt })
+
+        #expect(scanner.receive(inbox.url.absoluteString, from: .manualPaste) == .rejected)
+        #expect(scanner.receive(pairing.absoluteString, from: .manualPaste) == .accepted(pairing))
+        #expect(scanner.isPaused)
+    }
+
+    @Test("unsupported or unavailable cameras use manual fallback without capture")
+    func unsupportedCameraUsesPureManualFallbackPolicy() {
+        let unsupported = OpenPawScannerPolicy(cameraSupported: false, cameraAvailable: true)
+        let unavailable = OpenPawScannerPolicy(cameraSupported: true, cameraAvailable: false)
+
+        #expect(unsupported.presentation == .manualOnly)
+        #expect(!unsupported.isCaptureActive)
+        #expect(unavailable.presentation == .manualOnly)
+        #expect(!unavailable.isCaptureActive)
+    }
+
+    @Test("pairing scanner stops capture on background and dismissal")
+    func scannerLifecycleStopsCapture() {
+        var scanner = OpenPawScannerPolicy(cameraSupported: true, cameraAvailable: true)
+        #expect(scanner.presentation == .camera)
+        #expect(scanner.isCaptureActive)
+
+        scanner.handleLifecycle(.background)
+        #expect(!scanner.isCaptureActive)
+
+        scanner.handleLifecycle(.active)
+        #expect(scanner.isCaptureActive)
+
+        scanner.handleLifecycle(.dismissed)
+        #expect(!scanner.isCaptureActive)
+        scanner.handleLifecycle(.active)
+        #expect(!scanner.isCaptureActive)
+    }
+
+    @Test("pairing scanner cancellation is navigation neutral")
+    func scannerCancellationIsNavigationNeutral() {
+        var scanner = OpenPawScannerPolicy()
+        var openedURL: URL?
+
+        let outcome = scanner.cancel()
+        if case .accepted(let url) = outcome { openedURL = url }
+
+        #expect(outcome == .cancelled)
+        #expect(openedURL == nil)
+        #expect(!scanner.isCaptureActive)
+    }
+
     @MainActor
     private func waitForCoordinatorToSettle(_ coordinator: QuickConnectCoordinator) async {
         for _ in 0..<1_000 {

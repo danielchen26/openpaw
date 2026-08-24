@@ -326,10 +326,7 @@ final class AppWiring {
             return
         }
         pendingQuickConnectProposal = proposal
-        guard InboxURLAccessGate.refreshAndAllow(
-            gate,
-            onDenied: { [weak self] in self?.cancelPendingQuickConnect() }
-        ) else { return }
+        guard InboxURLAccessGate.refreshAndAllow(gate) else { return }
         openPendingQuickConnectIfUnlocked()
     }
 
@@ -664,7 +661,6 @@ final class AppWiring {
         gate.handleForeground()
         guard gate.decision == .unlocked else {
             cancelActiveInboxRoute()
-            cancelPendingQuickConnect()
             return
         }
         await terminal.reconnectIfNeeded()

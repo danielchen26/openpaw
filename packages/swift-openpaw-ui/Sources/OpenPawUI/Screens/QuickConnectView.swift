@@ -11,6 +11,22 @@ import UniformTypeIdentifiers
 #endif
 
 public struct OpenPawScannerPolicy: Sendable {
+    public enum InputSource: Sendable, Equatable {
+        case camera
+        case manualPaste
+    }
+
+    public enum Presentation: Sendable, Equatable {
+        case camera
+        case manualOnly
+    }
+
+    public enum Lifecycle: Sendable, Equatable {
+        case active
+        case background
+        case dismissed
+    }
+
     public enum Outcome: Sendable, Equatable {
         case accepted(URL)
         case rejected
@@ -20,30 +36,47 @@ public struct OpenPawScannerPolicy: Sendable {
 
     public private(set) var isPaused = false
     public private(set) var isCancelled = false
+    public let presentation: Presentation
+    private var lifecycle: Lifecycle = .active
     private let now: @Sendable () -> Date
 
-    public init(now: @escaping @Sendable () -> Date = Date.init) {
+    public init(
+        cameraSupported: Bool = true,
+        cameraAvailable: Bool = true,
+        now: @escaping @Sendable () -> Date = Date.init
+    ) {
+        presentation = cameraSupported && cameraAvailable ? .camera : .manualOnly
         self.now = now
     }
 
+    public var isCaptureActive: Bool {
+        presentation == .camera && lifecycle == .active && !isPaused && !isCancelled
+    }
+
     public mutating func receive(_ payload: String) -> Outcome {
-        guard !isPaused, !isCancelled else { return .ignored }
+        receive(payload, from: .camera)
+    }
+
+    public mutating func receive(_ payload: String, from _: InputSource) -> Outcome {
+        guard lifecycle == .active, !isPaused, !isCancelled else { return .ignored }
         guard payload == payload.trimmingCharacters(in: .whitespacesAndNewlines),
               let url = URL(string: payload)
         else { return .rejected }
 
-        if InboxRoute(url: url) != nil {
-            isPaused = true
-            return .accepted(url)
-        }
         guard (try? QuickConnectLinkCodec(now: now).decode(url)) != nil else { return .rejected }
         isPaused = true
         return .accepted(url)
     }
 
+    public mutating func handleLifecycle(_ event: Lifecycle) {
+        guard lifecycle != .dismissed else { return }
+        lifecycle = event
+    }
+
     public mutating func cancel() -> Outcome {
         isPaused = true
         isCancelled = true
+        lifecycle = .dismissed
         return .cancelled
     }
 }
@@ -56,19 +89,24 @@ public struct OpenPawScannerPolicy: Sendable {
         @State private var policy = OpenPawScannerPolicy()
         @State private var manualLink = ""
         @State private var message: String?
-        @State private var isScanning = true
         @Environment(\.scenePhase) private var scenePhase
 
         public init(onOpenPawURL: @escaping (URL) -> Void, onCancel: @escaping () -> Void) {
             self.onOpenPawURL = onOpenPawURL
             self.onCancel = onCancel
+            _policy = State(initialValue: OpenPawScannerPolicy(
+                cameraSupported: DataScannerViewController.isSupported,
+                cameraAvailable: DataScannerViewController.isAvailable
+            ))
         }
 
         public var body: some View {
             NavigationStack {
                 VStack(spacing: OpenPawTheme.Space.large) {
-                    if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
-                        OpenPawDataScanner(isScanning: isScanning, onPayload: receive)
+                    if policy.presentation == .camera {
+                        OpenPawDataScanner(
+                            isScanning: policy.isCaptureActive,
+                            onPayload: { receive($0, from: .camera) })
                             .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card, style: .continuous))
                             .overlay(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.card).stroke(OpenPawTheme.lineStrong))
                             .accessibilityLabel("Pairing QR camera")
@@ -88,7 +126,7 @@ public struct OpenPawScannerPolicy: Sendable {
                             .autocorrectionDisabled()
                             .privacySensitive()
                             .accessibilityLabel("Pairing link")
-                        Button("Use pairing link") { _ = receive(manualLink) }
+                        Button("Use pairing link") { _ = receive(manualLink, from: .manualPaste) }
                             .disabled(manualLink.isEmpty || policy.isPaused)
                     }
 
@@ -109,19 +147,18 @@ public struct OpenPawScannerPolicy: Sendable {
                 }
             }
             .onChange(of: scenePhase) { _, phase in
-                if phase != .active { isScanning = false }
+                policy.handleLifecycle(phase == .active ? .active : .background)
             }
             .onDisappear {
-                isScanning = false
+                policy.handleLifecycle(.dismissed)
                 manualLink = ""
             }
         }
 
         @discardableResult
-        private func receive(_ payload: String) -> Bool {
-            switch policy.receive(payload) {
+        private func receive(_ payload: String, from source: OpenPawScannerPolicy.InputSource) -> Bool {
+            switch policy.receive(payload, from: source) {
             case .accepted(let url):
-                isScanning = false
                 manualLink = ""
                 message = nil
                 onOpenPawURL(url)
@@ -136,7 +173,6 @@ public struct OpenPawScannerPolicy: Sendable {
 
         private func cancel() {
             _ = policy.cancel()
-            isScanning = false
             manualLink = ""
             onCancel()
         }

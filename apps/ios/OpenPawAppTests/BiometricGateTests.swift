@@ -241,19 +241,14 @@ final class BiometricGateTests: XCTestCase {
     }
 
     @MainActor
-    func testLockedPairingReceiptDoesNotBypassGateOrReplayAfterUnlock() {
+    func testLockedPairingReceiptDoesNotBypassGateWhilePending() {
         let wiring = AppWiring()
         wiring.gate.policy = policy()
         XCTAssertEqual(wiring.gate.decision, .authenticate)
 
         wiring.receiveOpenPawURL(pairingURL(nickname: "Locked Mac"))
 
-        XCTAssertNil(wiring.pendingQuickConnectProposal)
-        XCTAssertNil(wiring.quickConnectCoordinator.proposal)
-
-        wiring.gate.policy = policy(enabled: false)
-        wiring.openPendingQuickConnectIfUnlocked()
-
+        XCTAssertEqual(wiring.pendingQuickConnectProposal?.nickname, "Locked Mac")
         XCTAssertNil(wiring.quickConnectCoordinator.proposal)
     }
 
@@ -279,9 +274,10 @@ final class BiometricGateTests: XCTestCase {
     }
 
     @MainActor
-    func testNewestPairingLinkSupersedesOlderPairingWithoutClearingInboxState() {
+    func testNewestValidPendingPairingLinkSupersedesOlderWhileGateRemainsLocked() {
         let wiring = AppWiring()
-        wiring.gate.policy = policy(enabled: false)
+        wiring.gate.policy = policy()
+        XCTAssertEqual(wiring.gate.decision, .authenticate)
         let inbox = InboxRoute(
             hostID: UUID(uuidString: "00000000-0000-0000-0000-000000000004")!,
             itemID: InboxID(rawValue: "inb_222222222222222222222222")
@@ -291,8 +287,15 @@ final class BiometricGateTests: XCTestCase {
         wiring.receiveOpenPawURL(pairingURL(nickname: "Older Mac"))
         wiring.receiveOpenPawURL(pairingURL(nickname: "Newest Mac"))
 
-        XCTAssertEqual(wiring.quickConnectCoordinator.proposal?.nickname, "Newest Mac")
+        XCTAssertNil(wiring.quickConnectCoordinator.proposal)
+        XCTAssertEqual(wiring.pendingQuickConnectProposal?.nickname, "Newest Mac")
         XCTAssertEqual(wiring.pendingInboxRoute, inbox)
+
+        wiring.gate.policy = policy(enabled: false)
+        wiring.openPendingQuickConnectIfUnlocked()
+
+        XCTAssertEqual(wiring.quickConnectCoordinator.proposal?.nickname, "Newest Mac")
+        XCTAssertNil(wiring.pendingQuickConnectProposal)
     }
 
     func testScannerRejectsNonOpenPawTextAndOrdinaryWebLinksInPlace() {
