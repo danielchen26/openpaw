@@ -104,10 +104,10 @@ final class ConnectFlowUITests: XCTestCase {
 
     private func waitForProgress(_ label: String, in app: XCUIApplication, timeout: TimeInterval = 10) {
         let deadline = Date().addingTimeInterval(timeout)
+        let issue = app.alerts["Session discovery issue"]
         while Date() < deadline {
             if app.staticTexts[label].exists { return }
-            dismissSessionDiscoveryIssueIfPresent(in: app)
-            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            if issue.exists { issue.buttons["Dismiss"].tap() }
         }
         XCTFail("Timed out waiting for \(label). \(app.debugDescription)")
     }
@@ -118,15 +118,13 @@ final class ConnectFlowUITests: XCTestCase {
     }
 
     private func assertTerminalDestination(in app: XCUIApplication) {
-        dismissSessionDiscoveryIssueIfPresent(in: app)
         let pager = app.otherElements["root.destination.pager"]
-        let automaticallySelected = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "value == %@", "Terminal"),
-            object: pager)
-        XCTAssertEqual(
-            XCTWaiter.wait(for: [automaticallySelected], timeout: 10),
-            .completed,
-            app.debugDescription)
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline, pager.value as? String != "Terminal" {
+            dismissSessionDiscoveryIssueIfPresent(in: app)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        XCTAssertEqual(pager.value as? String, "Terminal", app.debugDescription)
         XCTAssertTrue(app.textViews.firstMatch.waitForExistence(timeout: 10), app.debugDescription)
     }
 
