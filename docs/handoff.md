@@ -39,6 +39,50 @@ Latest verified on 2026-08-22: **all canonical steps passed** in 245s, including
 **39 host end-to-end checks**. The script prints the current test counts; do not freeze them here as the suites
 are growing.
 
+## Real local Quick Connect acceptance
+
+Run the opt-in acceptance harness on a Mac with Xcode first launch completed, an installed iOS simulator, `sshd`,
+Rust, and Python 3:
+
+```sh
+JCODE_SCRATCH_DIR="$HOME/.cache/jcode" python3 scripts/quick-pairing-live.py
+```
+
+The command selects the newest installed phone simulator unless `--simulator UDID` is supplied. It creates every
+mutable artifact beneath `JCODE_SCRATCH_DIR`, including generated SSH keys, a user-level high-port SSH daemon,
+`openpaw-host` state, a fixture Git repository, a scratch copy of the iOS project, DerivedData, and captured logs.
+The per-run directory and child processes are removed on success, failure, SIGINT, and SIGTERM. The live run is not
+part of `scripts/check.sh`; only `scripts/tests/test_quick_pairing_live.py`'s hermetic contracts run there.
+
+Acceptance is local and real: `openpaw-host pair --qr` issues the exact five-minute envelope, `simctl openurl` sends
+that exact link to the app, XCUITest confirms the preselected credential and unknown host key, the app establishes
+real SSH and redeems real `/v1/pair` exactly once, a relaunch proves the signer is available for the selected host,
+Terminal is selected, and a direct replay receives a rejection. No camera injection or cloud service is used.
+
+Credential boundary: the generated private key remains outside the repository and is supplied only to the existing
+DEBUG+simulator `-openpaw-debug-seed-key` launch hook. The hook imports it through OpenPaw's own
+`KeychainStore`/credential path. The Python harness never edits the simulator Keychain. The private key, hook token,
+pairing code, returned bearer token, HMAC key, and secret-bearing `openpaw://` URL must not appear in console output;
+captured subprocess diagnostics are redacted before any failure is printed.
+
+Attempted on 2026-08-24 with:
+
+```sh
+python3 scripts/quick-pairing-live.py
+```
+
+The machine had working Xcode first-launch content and 15 available iPhone simulators. The harness generated both
+real SSH keys, proved the disposable high-port SSH login, started the real daemon, issued the real QR/link, launched
+the focused XCUITest, and reached the `/ready` coordination checkpoint. `xcrun simctl openurl <udid> <redacted-url>`
+returned success, but the iOS 26.5 simulator kept Home visible and never presented the Quick Connect review, so the
+test correctly failed before `/connected`. Earlier attempts also caught an obsolete Add Device identifier and an
+iOS 26.5 UI-test-runner exit while editing the numeric Port field; the harness now avoids both by using the existing
+app-owned DEBUG host/key seeding boundary. Every attempt printed
+`cleanup verified: child processes stopped and scratch run removed`. No simulator-only fake was substituted. The
+remaining blocker is delivery/routing of the exact custom-scheme URL into the XCUITest-controlled app on this runtime;
+the real SSH, one-time redemption, signer persistence, Terminal, and replay evidence lines must not be claimed until
+that route presents the confirmation screen and the run exits zero.
+
 ## Simulator acceptance completed on 2026-08-21
 
 The Milestone 1 app was built, installed and launched on an **iPhone 16 Pro simulator running iOS 18.2**.

@@ -106,8 +106,9 @@ if errors:
 PY
 }
 
-step "docs · product claims"  product_claims_step
-step "scripts · test"         python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+step "docs · product claims"       product_claims_step
+# Contract tests are safe and hermetic. Environment-dependent live harnesses stay opt-in.
+step "scripts · contract tests"    python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
 if [ "${OPENPAW_PRODUCT_CLAIMS_ONLY:-0}" = 1 ]; then
   if ((${#FAILED[@]})); then

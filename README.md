@@ -121,6 +121,25 @@ Formatting, lints, 268 Rust tests, 375 Swift tests, the app build, 140 headless 
 `scripts/smoke.py` driving the built daemon end to end — pairing, request signing, replay rejection, the approval
 gate, git routes, the preview proxy, uploads, and the absence of a remote-command endpoint.
 
+The real Quick Connect path is intentionally opt-in because it needs Xcode, an installed iOS simulator, and the
+macOS user SSH daemon binary:
+
+```sh
+JCODE_SCRATCH_DIR="$HOME/.cache/jcode" python3 scripts/quick-pairing-live.py
+```
+
+That harness dynamically chooses an installed phone simulator, creates a fresh SSH client key and host key under
+`JCODE_SCRATCH_DIR`, starts disposable high-port `sshd` and `openpaw-host` processes, issues the daemon's exact real
+QR/link envelope, and opens that link with `simctl openurl`. A scratch-copy XCUITest taps **Confirm SSH credential
+and connect**, explicitly trusts the unknown host key, verifies Terminal, relaunches to prove the selected host's
+signer persisted, and confirms the consumed pairing code is rejected on replay. It has no cloud dependency and
+removes its processes and per-run directory on success, failure, SIGINT, and SIGTERM.
+
+The fresh private key enters the simulator only through the existing DEBUG+simulator
+`-openpaw-debug-seed-key` launch hook. That hook calls the app-owned Keychain credential code. The harness does not
+write simulator Keychain data externally. Private key material, hook tokens, pairing codes, returned bearer/HMAC
+credentials, and the secret-bearing URL are captured and redacted rather than printed.
+
 Picking this up on a different machine, or wondering what has never been verified anywhere?
 [`docs/handoff.md`](docs/handoff.md).
 
