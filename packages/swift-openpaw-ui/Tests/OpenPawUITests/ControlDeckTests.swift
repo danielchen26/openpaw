@@ -105,6 +105,16 @@ struct ControlDeckTests {
         // Paging is otherwise a silent visual event for someone using VoiceOver.
         #expect(ControlDeck(page: .destinations).voiceLabel == "Go, page 2 of 3")
     }
+
+    @Test("compact navigation exposes only the current destination and its neighbours")
+    func compactNavigationIsSinglePurpose() {
+        #expect(ControlDeck.previousDestination(before: .home) == nil)
+        #expect(ControlDeck.nextDestination(after: .home) == .terminal)
+        #expect(ControlDeck.previousDestination(before: .inbox) == .sessions)
+        #expect(ControlDeck.nextDestination(after: .inbox) == .repo)
+        #expect(ControlDeck.previousDestination(before: .settings) == .repo)
+        #expect(ControlDeck.nextDestination(after: .settings) == nil)
+    }
 }
 
 /// Swiping the strip off the side of the screen entirely.

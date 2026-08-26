@@ -418,6 +418,8 @@ public struct RootView: View {
     @State private var pushToTalk = PushToTalkController()
     /// The bottom strip: which page it is showing and whether it is folded away.
     @State private var deck = ControlDeck()
+    @State private var deckBeforeTerminalSearch: ControlDeck?
+    @State private var isTerminalSearchPresented = false
     /// Modifiers the key bar is holding down. Owned here because the key bar moved out of the terminal screen and
     /// onto the strip, and a latched `ctrl` has to survive the user swiping to another page.
     @State private var latchedModifiers: KeyModifiers = []
@@ -759,10 +761,10 @@ public struct RootView: View {
         navigated(router.destination, width: width)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !deck.isStowed { controlDeck(width: width) }
+                if !isTerminalSearchPresented, !deck.isStowed { controlDeck(width: width) }
             }
             .overlay(alignment: .bottomLeading) {
-                if deck.isStowed { controlDeck(width: width) }
+                if !isTerminalSearchPresented, deck.isStowed { controlDeck(width: width) }
             }
             // Arriving somewhere new turns the strip to the page that screen is driven from, because a strip
             // showing terminal keys over a settings screen is a row of controls that do nothing.
@@ -772,7 +774,7 @@ public struct RootView: View {
     }
 
     /// The room the strip takes from the content, and nothing when it has been swiped off the screen.
-    private var deckInset: CGFloat { deck.isStowed ? 0 : deck.height }
+    private var deckInset: CGFloat { isTerminalSearchPresented || deck.isStowed ? 0 : deck.height }
 
     private func controlDeck(width: RootWidth) -> some View {
         ControlDeckView(deck: $deck, overTerminal: router.destination == .terminal) {
@@ -802,11 +804,37 @@ public struct RootView: View {
 
     private var destinationsPage: some View {
         HStack(spacing: 0) {
-            ForEach(ShellDestination.allCases) { destination in
-                destinationItem(destination)
-            }
+            adjacentDestinationButton(
+                ControlDeck.previousDestination(before: router.destination),
+                direction: .previous
+            )
+            destinationItem(router.destination)
+            adjacentDestinationButton(
+                ControlDeck.nextDestination(after: router.destination),
+                direction: .next
+            )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func adjacentDestinationButton(
+        _ destination: ShellDestination?,
+        direction: DestinationPageDecision
+    ) -> some View {
+        Button {
+            if let destination { router.destination = destination }
+        } label: {
+            Image(systemName: direction == .previous ? "chevron.left" : "chevron.right")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(OpenPawTheme.textSecondary)
+        .disabled(destination == nil)
+        .accessibilityIdentifier("root.destination.\(direction == .previous ? "previous" : "next")")
+        .accessibilityLabel(destination.map {
+            "\(direction == .previous ? "Previous" : "Next") destination, \($0.title)"
+        } ?? "No \(direction == .previous ? "previous" : "next") destination")
     }
 
     private func destinationItem(_ destination: ShellDestination) -> some View {
@@ -1067,7 +1095,8 @@ public struct RootView: View {
                 surface: terminalSurface,
                 onFontSizeChange: { _ in },
                 onAddDevice: { requestedSheet = .addDevice },
-                onManageHosts: { requestedSheet = .manageHosts }
+                onManageHosts: { requestedSheet = .manageHosts },
+                onSearchPresentationChange: updateTerminalSearchPresentation
             )
         case .sessions:
             sessions(width: width)
@@ -1084,6 +1113,17 @@ public struct RootView: View {
             repo
         case .settings:
             SettingsView(model: model, settings: settings)
+        }
+    }
+
+    private func updateTerminalSearchPresentation(_ isPresented: Bool) {
+        guard isTerminalSearchPresented != isPresented else { return }
+        isTerminalSearchPresented = isPresented
+        if isPresented {
+            deckBeforeTerminalSearch = deck
+        } else if let prior = deckBeforeTerminalSearch {
+            deck = prior
+            deckBeforeTerminalSearch = nil
         }
     }
 

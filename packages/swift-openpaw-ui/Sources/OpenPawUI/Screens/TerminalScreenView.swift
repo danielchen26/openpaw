@@ -90,6 +90,7 @@ public struct TerminalScreenView: View {
     private let onFontSizeChange: (CGFloat) -> Void
     private let onAddDevice: () -> Void
     private let onManageHosts: () -> Void
+    private let onSearchPresentationChange: (Bool) -> Void
 
     @State private var latched: KeyModifiers = []
     @State private var isSearching = false
@@ -102,6 +103,7 @@ public struct TerminalScreenView: View {
     @State private var dictationTask: Task<Void, Never>?
     @State private var dictationTranscription: DictationTranscription?
     @State private var dictationTurnID: VoiceTurnID?
+    @FocusState private var isSearchFieldFocused: Bool
 
     public init(
         model: OpenPawModel,
@@ -111,7 +113,8 @@ public struct TerminalScreenView: View {
         surface: @escaping () -> AnyView,
         onFontSizeChange: @escaping (CGFloat) -> Void,
         onAddDevice: @escaping () -> Void = {},
-        onManageHosts: @escaping () -> Void = {}
+        onManageHosts: @escaping () -> Void = {},
+        onSearchPresentationChange: @escaping (Bool) -> Void = { _ in }
     ) {
         self.model = model
         self.settings = settings
@@ -121,6 +124,7 @@ public struct TerminalScreenView: View {
         self.onFontSizeChange = onFontSizeChange
         self.onAddDevice = onAddDevice
         self.onManageHosts = onManageHosts
+        self.onSearchPresentationChange = onSearchPresentationChange
     }
 
     public var body: some View {
@@ -148,7 +152,7 @@ public struct TerminalScreenView: View {
             claimDictatedText(model.dictatedText)
             // The strip at the bottom of the app owns these buttons now, but the state they act on is here.
             controls.onDictate = { toggleDictation() }
-            controls.onSearch = { isSearching = true }
+            controls.onSearch = { openSearch() }
             controls.onCopyAll = { Task { await copyAllOutput() } }
         }
         // Released on the way out so a tap on the strip from another screen does not reach a terminal the user is
@@ -292,6 +296,7 @@ public struct TerminalScreenView: View {
                 .foregroundStyle(OpenPawTheme.textTertiary)
                 .accessibilityHidden(true)
             TextField("Find in scrollback", text: $query)
+                .focused($isSearchFieldFocused)
                 .font(OpenPawTheme.Machine.body)
                 .foregroundStyle(OpenPawTheme.textPrimary)
                 .textFieldStyle(.plain)
@@ -314,10 +319,7 @@ public struct TerminalScreenView: View {
             .disabled(matches.isEmpty)
             .accessibilityLabel("Next match")
             Button("Done") {
-                isSearching = false
-                query = ""
-                matches = []
-                focused = nil
+                closeSearch()
             }
             .buttonStyle(.plain)
             .font(OpenPawTheme.Machine.label)
@@ -331,6 +333,28 @@ public struct TerminalScreenView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(OpenPawTheme.line).frame(height: OpenPawTheme.hairline)
         }
+    }
+
+    private func openSearch() {
+        #if canImport(UIKit)
+            UIApplication.shared.sendAction(
+                #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
+        isSearching = true
+        onSearchPresentationChange(true)
+        Task { @MainActor in
+            await Task.yield()
+            isSearchFieldFocused = true
+        }
+    }
+
+    private func closeSearch() {
+        isSearchFieldFocused = false
+        isSearching = false
+        query = ""
+        matches = []
+        focused = nil
+        onSearchPresentationChange(false)
     }
 
     private var matchSummary: String {

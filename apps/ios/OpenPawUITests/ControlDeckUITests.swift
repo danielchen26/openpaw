@@ -10,10 +10,15 @@ final class ControlDeckUITests: XCTestCase {
     private func launchedApp() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
-            "-openpaw-debug-seed-key", "/tmp/openpaw-sim-key",
             "-openpaw.settings.biometricGate", "<false/>",
+            "-openpaw-debug-scenario", "connectedWorkspace",
+            "-openpaw-ui-test-steady-terminal-cursor",
         ]
         app.launch()
+        let dismiss = app.alerts.buttons["Dismiss"]
+        if dismiss.waitForExistence(timeout: 2) { dismiss.tap() }
+        let next = app.buttons["root.destination.next"]
+        if next.waitForExistence(timeout: 15) { next.tap() }
         return app
     }
 
@@ -23,8 +28,6 @@ final class ControlDeckUITests: XCTestCase {
     /// inset, so the terminal got what was left. One paged strip has to cost a fraction of that.
     func testTheBottomOfTheScreenIsOneStripAndNotAStackOfBars() throws {
         let app = launchedApp()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
-        app.buttons["Terminal"].tap()
 
         let terminal = app.textViews.firstMatch
         XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface")
@@ -44,8 +47,6 @@ final class ControlDeckUITests: XCTestCase {
     /// what makes the row cost one row. If the swipe does not page, the strip is just a smaller tab bar.
     func testSwipingTheStripPagesBetweenControlGroups() throws {
         let app = launchedApp()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
-        app.buttons["Terminal"].tap()
 
         // Arriving at the terminal lands on the keys, because a phone keyboard has no esc, ctrl or arrows.
         // Looked up by the spoken label rather than the cap: "esc" is not a word, so VoiceOver says "Escape".
@@ -79,8 +80,6 @@ final class ControlDeckUITests: XCTestCase {
     /// One physical swipe must never perform both navigations.
     func testSwipingTheStripDoesNotAlsoChangeTheRootDestination() throws {
         let app = launchedApp()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
-        app.buttons["Terminal"].tap()
 
         let pager = app.otherElements["root.destination.pager"]
         XCTAssertTrue(pager.waitForExistence(timeout: 10), "the root paging accessibility surface never appeared")
@@ -104,8 +103,6 @@ final class ControlDeckUITests: XCTestCase {
     /// long press is not a gesture VoiceOver can perform.
     func testTheMicrophoneIsNotPermanentlyOnScreen() throws {
         let app = launchedApp()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
-        app.buttons["Terminal"].tap()
         XCTAssertTrue(app.buttons["Escape"].waitForExistence(timeout: 10), "the keys page never appeared")
 
         XCTAssertFalse(
@@ -128,8 +125,6 @@ final class ControlDeckUITests: XCTestCase {
     /// terminal with no controls and a gesture nobody was told about as the only way back.
     func testTheStripFoldsAwayAndComesBack() throws {
         let app = launchedApp()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
-        app.buttons["Terminal"].tap()
         XCTAssertTrue(app.buttons["Escape"].waitForExistence(timeout: 10), "the keys page never appeared")
 
         app.buttons["Hide controls"].tap()
@@ -148,8 +143,6 @@ final class ControlDeckUITests: XCTestCase {
     /// which a stray vertical swipe can trigger, it is only reachable by deliberately swiping past the first page.
     func testSwipingTheStripOffTheLeftGivesTheScreenToTheContent() throws {
         let app = launchedApp()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
-        app.buttons["Terminal"].tap()
 
         let terminal = app.textViews.firstMatch
         XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface")
@@ -186,6 +179,37 @@ final class ControlDeckUITests: XCTestCase {
         XCTAssertTrue(
             app.buttons["Escape"].waitForExistence(timeout: 5),
             "the strip did not come back to the page it left from"
+        )
+    }
+
+    func testSearchStowsTheDeckReleasesTerminalKeyboardAndRestoresThePriorDeckPage() throws {
+        let app = launchedApp()
+
+        let terminal = app.textViews.firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface")
+        terminal.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "terminal keyboard never appeared")
+
+        swipeStrip(app, toward: .leading)
+        swipeStrip(app, toward: .leading)
+        let search = app.buttons["Search scrollback"]
+        XCTAssertTrue(search.waitForExistence(timeout: 5), "the view page never appeared")
+        search.tap()
+
+        let searchField = app.textFields["Find in scrollback"]
+        XCTAssertTrue(searchField.waitForExistence(timeout: 5), "search did not open")
+        XCTAssertFalse(app.buttons["Copy all output"].exists, "the custom deck remained visible over search")
+        searchField.typeText("needle")
+        XCTAssertEqual(
+            searchField.value as? String,
+            "needle",
+            "the terminal kept keyboard focus instead of releasing it to search"
+        )
+
+        app.buttons["Done"].tap()
+        XCTAssertTrue(
+            app.buttons["Copy all output"].waitForExistence(timeout: 5),
+            "closing search did not restore the prior view page"
         )
     }
 

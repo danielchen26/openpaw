@@ -153,6 +153,24 @@ public struct ControlDeck: Sendable, Equatable {
         isAccessibilitySize || isSelected
     }
 
+    public static func previousDestination(before destination: ShellDestination) -> ShellDestination? {
+        adjacentDestination(to: destination, offset: -1)
+    }
+
+    public static func nextDestination(after destination: ShellDestination) -> ShellDestination? {
+        adjacentDestination(to: destination, offset: 1)
+    }
+
+    private static func adjacentDestination(
+        to destination: ShellDestination,
+        offset: Int
+    ) -> ShellDestination? {
+        guard let index = ShellDestination.allCases.firstIndex(of: destination) else { return nil }
+        let adjacent = index + offset
+        guard ShellDestination.allCases.indices.contains(adjacent) else { return nil }
+        return ShellDestination.allCases[adjacent]
+    }
+
     /// The page to show on arriving at a destination.
     ///
     /// A terminal is hard to drive from a phone without esc, ctrl and the arrows, so arriving there puts them

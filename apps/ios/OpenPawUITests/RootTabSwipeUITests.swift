@@ -43,6 +43,18 @@ final class RootTabSwipeUITests: XCTestCase {
         XCTAssertEqual(result, .completed, "expected root destination \(title), got \(String(describing: pager.value))", file: file, line: line)
     }
 
+    private func navigate(to destination: String, in app: XCUIApplication) {
+        let titles = ["Home", "Terminal", "Sessions", "Inbox", "Repo", "Settings"]
+        guard let target = titles.firstIndex(of: destination) else {
+            XCTFail("unknown root destination \(destination)")
+            return
+        }
+        for _ in 0..<target {
+            app.buttons["root.destination.next"].tap()
+        }
+        assertCurrent(destination, in: app)
+    }
+
     private enum Direction { case previous, next }
 
     private func fling(_ direction: Direction, in app: XCUIApplication, y: CGFloat = 0.18) {
@@ -75,9 +87,29 @@ final class RootTabSwipeUITests: XCTestCase {
         assertCurrent("Home", in: app)
     }
 
+    func testCompactDeckShowsOnlyCurrentDestinationWithPreviousAndNextControls() {
+        let app = launch()
+
+        XCTAssertTrue(app.buttons["root.destination.home"].exists)
+        XCTAssertTrue(app.buttons["root.destination.next"].exists)
+        XCTAssertFalse(app.buttons["root.destination.terminal"].exists)
+        XCTAssertFalse(app.buttons["root.destination.sessions"].exists)
+
+        app.buttons["root.destination.next"].tap()
+        assertCurrent("Terminal", in: app)
+        fling(.next, in: app)
+        assertCurrent("Sessions", in: app)
+        XCTAssertTrue(app.buttons["root.destination.previous"].exists)
+        XCTAssertTrue(app.buttons["root.destination.sessions"].exists)
+        XCTAssertTrue(app.buttons["root.destination.next"].exists)
+        XCTAssertFalse(app.buttons["root.destination.home"].exists)
+        XCTAssertFalse(app.buttons["root.destination.terminal"].exists)
+        XCTAssertFalse(app.buttons["root.destination.inbox"].exists)
+    }
+
     func testTerminalTypingAndVerticalScrollingStayInTheTerminal() {
         let app = launch()
-        app.buttons["root.destination.terminal"].tap()
+        navigate(to: "Terminal", in: app)
         assertCurrent("Terminal", in: app)
 
         let terminal = app.textViews.firstMatch
@@ -114,7 +146,7 @@ final class RootTabSwipeUITests: XCTestCase {
 
     func testLeadingEdgeBackPopsSessionDetailInsteadOfChangingTheRootDestination() {
         let app = launch("sessions")
-        app.buttons["root.destination.sessions"].tap()
+        navigate(to: "Sessions", in: app)
         assertCurrent("Sessions", in: app)
 
         let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Fix the flaking auth tests")).firstMatch
@@ -135,7 +167,7 @@ final class RootTabSwipeUITests: XCTestCase {
 
     func testActiveTextSelectionStaysLocalToTheEditor() {
         let app = launch("sessions")
-        app.buttons["root.destination.sessions"].tap()
+        navigate(to: "Sessions", in: app)
         assertCurrent("Sessions", in: app)
 
         let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Fix the flaking auth tests")).firstMatch
@@ -177,7 +209,7 @@ final class RootTabSwipeUITests: XCTestCase {
 
     func testDiffHorizontalScrollAndInboxRowActionsRemainLocal() {
         let app = launch("repoProviders")
-        app.buttons["root.destination.repo"].tap()
+        navigate(to: "Repo", in: app)
         assertCurrent("Repo", in: app)
 
         let file = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "tests/conftest.py")).firstMatch
@@ -194,7 +226,7 @@ final class RootTabSwipeUITests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: 5), "the diff navigation back button never appeared")
         back.tap()
 
-        app.buttons["root.destination.inbox"].tap()
+        navigate(to: "Inbox", in: app)
         assertCurrent("Inbox", in: app)
         let row = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "inbox.item."))
