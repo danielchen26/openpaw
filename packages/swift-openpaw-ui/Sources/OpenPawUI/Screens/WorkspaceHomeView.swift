@@ -132,7 +132,6 @@ public struct WorkspaceHomeView: View {
         let presentation = WorkspaceHomePresentation(sessions: model.sessions, pendingInbox: model.pendingInbox, repos: model.repos)
         return ScrollView {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.xl) {
-                networkSummary
                 tailnetBootstrapPanel
                 deviceGrid
                 if !presentation.agentSessions.isEmpty { agentSessions(presentation.agentSessions) }

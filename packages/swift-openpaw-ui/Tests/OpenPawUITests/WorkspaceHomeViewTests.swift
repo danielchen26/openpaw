@@ -45,6 +45,25 @@ struct WorkspaceHomeViewTests {
         #expect(received?.online == true)
     }
 
+    @Test("Populated Home leads with machines instead of a duplicate network summary")
+    func populatedHomeOmitsDuplicateNetworkSummary() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let packageRoot = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent("Sources/OpenPawUI/Screens/WorkspaceHomeView.swift"),
+            encoding: .utf8)
+        let populatedBody = try #require(
+            source.split(separator: "private var populatedHome", maxSplits: 1).last?
+                .split(separator: "private var tailnetBootstrapPanel", maxSplits: 1).first)
+
+        #expect(!populatedBody.contains("networkSummary"))
+        #expect(populatedBody.contains("tailnetBootstrapPanel"))
+        #expect(populatedBody.contains("deviceGrid"))
+    }
+
     @Test("Home source and snapshot catalog omit remote catalog transfer")
     func remoteCatalogTransferIsAbsent() throws {
         let testFile = URL(fileURLWithPath: #filePath)
