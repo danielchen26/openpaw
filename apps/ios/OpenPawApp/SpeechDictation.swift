@@ -47,6 +47,22 @@ final class SpeechDictation: DictationEngine {
         SFSpeechRecognizer(locale: locale)?.supportsOnDeviceRecognition ?? false
     }
 
+    /// Converts Speech framework implementation errors into the small, stable set the UI can explain to a person.
+    /// `kAFAssistantErrorDomain` is what both the simulator and devices currently use for recognition failures; the
+    /// description fallback keeps "no speech" useful if Apple changes that private domain while retaining its text.
+    static func classifyRecognitionError(_ error: any Error, locale: Locale) -> DictationError {
+        if let failure = error as? DictationError { return failure }
+
+        let cocoa = error as NSError
+        let description = cocoa.localizedDescription.lowercased()
+        if (cocoa.domain == "kAFAssistantErrorDomain" && cocoa.code == 1_110)
+            || description.contains("no speech")
+        {
+            return .noSpeech
+        }
+        return .recognizerUnavailable(locale.identifier)
+    }
+
     func transcribe(locale: Locale, mode: DictationMode) -> DictationTranscription {
         let pair = AsyncThrowingStream<DictationUpdate, any Error>.makeStream()
         let session = session
@@ -80,6 +96,7 @@ enum DictationError: LocalizedError, Equatable {
     case speechRecognitionDenied
     case localeUnsupported(String)
     case recognizerUnavailable(String)
+    case noSpeech
     case audioSessionFailed(String)
     case audioEngineFailed(String)
 
@@ -94,6 +111,8 @@ enum DictationError: LocalizedError, Equatable {
             "This device cannot recognise \(identifier). Pick another dictation language in Settings."
         case .recognizerUnavailable(let identifier):
             "Speech recognition for \(identifier) is unavailable right now. Try again in a moment, or type instead."
+        case .noSpeech:
+            "No speech was detected. Wait until listening starts, speak closer to the microphone, and try again."
         case .audioSessionFailed(let detail):
             "The audio session could not start (\(detail)). End any call or recording and try again."
         case .audioEngineFailed(let detail):
@@ -207,7 +226,15 @@ private actor DictationSession {
             let update = result.map {
                 DictationUpdate(text: $0.bestTranscription.formattedString, isFinal: $0.isFinal)
             }
-            Task { await self.deliver(update: update, error: error, turn: turn, continuation: continuation) }
+            Task {
+                await self.deliver(
+                    update: update,
+                    error: error,
+                    turn: turn,
+                    locale: locale,
+                    continuation: continuation
+                )
+            }
         }
         continuation.yield(DictationUpdate(text: "", isFinal: false, isReady: true))
         return turn
@@ -240,9 +267,11 @@ private actor DictationSession {
         update: DictationUpdate?,
         error: (any Error)?,
         turn: Int,
+        locale: Locale,
         continuation: AsyncThrowingStream<DictationUpdate, any Error>.Continuation
-    ) {
-        guard turn == activeTurn || update?.isFinal == true && turn == lateFinalTurn else { return }
+    ) async {
+        let isLateCompletion = turn == lateFinalTurn && (update?.isFinal == true || error != nil)
+        guard turn == activeTurn || isLateCompletion else { return }
         if let update {
             continuation.yield(update)
             if update.isFinal {
@@ -251,9 +280,12 @@ private actor DictationSession {
             }
         }
         if let error {
-            // A cancellation after the final result is the normal end of a push-to-talk turn, not a failure, and
-            // finishing twice is harmless — `AsyncThrowingStream` ignores the second.
-            continuation.finish(throwing: error)
+            // Speech framework errors are implementation details. Stop the graph before surfacing a stable failure;
+            // otherwise the UI can show an error while the microphone remains active.
+            let failure = SpeechDictation.classifyRecognitionError(error, locale: locale)
+            if turn == activeTurn { await stop(turn: turn) }
+            if turn == lateFinalTurn { lateFinalTurn = nil }
+            continuation.finish(throwing: failure)
         }
     }
 

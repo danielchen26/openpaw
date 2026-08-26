@@ -17,6 +17,50 @@ import XCTest
 /// would train us to ignore the suite.
 final class LiveDictationTests: XCTestCase {
 
+    func testDictationFailuresKeepDistinctActionablePresentations() throws {
+        let failures: [(DictationError, String, String)] = [
+            (.microphoneDenied, "microphone", "Settings"),
+            (.speechRecognitionDenied, "speech recognition", "Settings"),
+            (.recognizerUnavailable("en-US"), "unavailable", "Try again"),
+            (.noSpeech, "No speech", "speak"),
+            (.audioSessionFailed("busy"), "audio session", "call or recording"),
+            (.audioEngineFailed("no input"), "microphone", "Try again"),
+        ]
+
+        for (failure, diagnosis, recovery) in failures {
+            let message = try XCTUnwrap(failure.errorDescription)
+            XCTAssertEqual(failure.localizedDescription, message, "the UI reads localizedDescription")
+            XCTAssertTrue(
+                message.localizedCaseInsensitiveContains(diagnosis),
+                "\(failure) does not diagnose the failure: \(message)"
+            )
+            XCTAssertTrue(
+                message.localizedCaseInsensitiveContains(recovery),
+                "\(failure) does not tell the user what to do: \(message)"
+            )
+        }
+    }
+
+    func testSpeechFrameworkNoSpeechErrorIsClassifiedWithoutLosingOtherFailures() {
+        let noSpeech = NSError(domain: "kAFAssistantErrorDomain", code: 1_110)
+        XCTAssertEqual(
+            SpeechDictation.classifyRecognitionError(noSpeech, locale: Locale(identifier: "en-US")),
+            .noSpeech
+        )
+
+        let unavailable = NSError(domain: "kAFAssistantErrorDomain", code: 1_101)
+        XCTAssertEqual(
+            SpeechDictation.classifyRecognitionError(unavailable, locale: Locale(identifier: "zh-CN")),
+            .recognizerUnavailable("zh-CN")
+        )
+
+        let existing = DictationError.audioEngineFailed("input route vanished")
+        XCTAssertEqual(
+            SpeechDictation.classifyRecognitionError(existing, locale: Locale(identifier: "en-US")),
+            existing
+        )
+    }
+
     private struct RequiredDeviceCapabilityMissing: LocalizedError {
         let message: String
         var errorDescription: String? { message }
