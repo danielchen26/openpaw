@@ -170,12 +170,24 @@ public struct TerminalScreenView: View {
     private var header: some View {
         let status = ConnectionPresentation.make(model.connection)
         return VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
-            HostSwitcher(
-                model: model,
-                onAddDevice: onAddDevice,
-                onManageHosts: onManageHosts,
-                onConnected: { settings.recordConnection(to: $0) }
-            )
+            HStack(spacing: OpenPawTheme.Space.small) {
+                HostSwitcher(
+                    model: model,
+                    onAddDevice: onAddDevice,
+                    onManageHosts: onManageHosts,
+                    onConnected: { settings.recordConnection(to: $0) }
+                )
+                Button {
+                    toggleDictation()
+                } label: {
+                    Image(systemName: voice.isActive ? "mic.fill" : "mic")
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(voice.isActive ? Color.green : OpenPawTheme.textPrimary)
+                .accessibilityLabel(voice.isActive ? "Stop dictation" : "Dictate into a terminal draft")
+                .accessibilityHint(voice.isActive ? "Stops listening" : "Starts listening and hides the keyboard")
+            }
             if model.selectedHost != nil, let detail = status.detail {
                 Text(detail)
                     .font(OpenPawTheme.Human.caption)
@@ -442,7 +454,18 @@ public struct TerminalScreenView: View {
     }
 
     private func startDictation() {
-        guard let engine = model.dictation, engine.isAvailable else { return }
+        guard let engine = model.dictation else {
+            model.present(TerminalDictationStartError.unavailable, while: "starting dictation")
+            return
+        }
+        guard engine.isAvailable else {
+            model.present(TerminalDictationStartError.unavailable, while: "starting dictation")
+            return
+        }
+        #if canImport(UIKit)
+            UIApplication.shared.sendAction(
+                #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
         let mode = VoiceDestination.terminal.dictationMode
         let locale = settings.dictationLocale
         let turnID = voice.start()
@@ -490,6 +513,14 @@ public struct TerminalScreenView: View {
         Task {
             await transcription?.stop()
         }
+    }
+}
+
+private enum TerminalDictationStartError: LocalizedError {
+    case unavailable
+
+    var errorDescription: String? {
+        "Speech input is unavailable. Check microphone and Speech Recognition access in Settings."
     }
 }
 
