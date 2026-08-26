@@ -113,6 +113,7 @@ public struct HostSwitcher: View {
         ForEach(model.hostStore.hosts) { host in
             Button {
                 Task {
+                    guard host.id != model.selectedHostID else { return }
                     guard await model.selectHost(host.id) != nil else { return }
                     let lease = await model.connectSelectedHost()
                     if let lease, model.ownsConnection(lease) { onConnected(host.id) }
@@ -142,7 +143,6 @@ public struct HostSwitcher: View {
                 .accessibilityIdentifier("host.switcher.disconnect")
         case .resolving, .connecting, .authenticating, .reconnecting:
             Button("Cancel connection") { disconnect() }
-                .disabled(model.isConnectionOperationInProgress)
                 .accessibilityIdentifier("host.switcher.disconnect")
         case .idle, .disconnected, .failed:
             Button("Connect") { connect() }

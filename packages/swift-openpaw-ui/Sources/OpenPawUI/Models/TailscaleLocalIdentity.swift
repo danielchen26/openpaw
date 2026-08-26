@@ -52,7 +52,19 @@ public struct FixtureTailscaleLocalIdentityConnector: TailscaleLocalIdentityConn
 }
 
 public struct HomeTailnetBootstrapState: Sendable, Hashable {
-    public enum Source: String, Sendable, Hashable { case none, localIdentity, savedAdministrator, pairedHost, merged }
+    public enum Source: String, Sendable, Hashable {
+        case none, localIdentity, savedAdministrator, pairedHost, merged
+
+        public var displayName: String {
+            switch self {
+            case .none: "Tailscale"
+            case .localIdentity: "Tailscale local identity"
+            case .savedAdministrator: "saved Tailscale administrator access"
+            case .pairedHost: "a paired OpenPaw host"
+            case .merged: "Tailscale and paired hosts"
+            }
+        }
+    }
     public enum Phase: Sendable, Hashable { case idle, loading, loaded, unavailable, failed(String) }
     public var phase: Phase = .idle
     public var localIdentity: TailscaleLocalIdentity?

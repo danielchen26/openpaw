@@ -10,6 +10,15 @@ struct WorkspaceHomeViewTests {
         #expect(WorkspaceHomeCopy.discoveryEyebrow == "tailscale / local identity / candidates")
         #expect(WorkspaceHomeCopy.discoveryTitle == "Tailscale discovery")
         #expect(!WorkspaceHomeCopy.userVisibleCopy.joined(separator: " ").localizedCaseInsensitiveContains("tailnet"))
+        for source in [
+            HomeTailnetBootstrapState.Source.none,
+            .localIdentity,
+            .savedAdministrator,
+            .pairedHost,
+            .merged,
+        ] {
+            #expect(!source.displayName.localizedCaseInsensitiveContains("tailnet"))
+        }
     }
 
     @Test("Online candidates invite a direct connection while offline candidates remain status-only")

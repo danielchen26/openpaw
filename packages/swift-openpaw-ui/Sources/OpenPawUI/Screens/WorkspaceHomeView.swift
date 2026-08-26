@@ -234,7 +234,7 @@ public struct WorkspaceHomeView: View {
             let tailscaleNetwork = identity.tailnetName ?? identity.domainName ?? "unknown Tailscale network"
             return "Local identity: \(account) on \(tailscaleNetwork)."
         } ?? "Local identity unavailable. iOS cannot read the Tailscale app Keychain or account database. Quad100 may be unavailable on some clients."
-        let candidates = "Discovered \(state.candidateCount) candidate\(state.candidateCount == 1 ? "" : "s") from \(state.source.rawValue). Candidates are not trusted, saved, or connected automatically."
+        let candidates = "Discovered \(state.candidateCount) candidate\(state.candidateCount == 1 ? "" : "s") from \(state.source.displayName). Candidates are not trusted, saved, or connected automatically."
         switch state.phase {
         case .idle: return identity + " Ready to check saved OpenPaw credentials or a connected host."
         case .loading: return identity + " Loading saved administrator credentials or connected-host discovery."

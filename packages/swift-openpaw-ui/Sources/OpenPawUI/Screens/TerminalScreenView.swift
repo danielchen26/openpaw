@@ -144,7 +144,10 @@ public struct TerminalScreenView: View {
                 search
             }
         }
-        .onDisappear(perform: cancelDictation)
+        .onDisappear {
+            cancelDictation()
+            closeSearch()
+        }
         .onChange(of: model.dictatedText) { _, text in claimDictatedText(text) }
         // Also on appear, not only on change: a sentence spoken on another screen is waiting to be claimed by
         // whichever screen can hold a draft, and arriving here is the moment this one can.
