@@ -15,8 +15,8 @@ final class DictationFlowUITests: XCTestCase {
     private func control(_ label: String, in app: XCUIApplication) -> XCUIElement {
         let button = app.buttons[label]
         guard !button.exists else { return button }
-        let strip = app.otherElements["Terminal keys"].exists
-            ? app.otherElements["Terminal keys"] : app.windows.firstMatch
+        let deck = app.otherElements["root.control-deck"]
+        let strip = deck.exists ? deck : app.windows.firstMatch
         for _ in 0..<ControlDeckPages {
             guard !button.exists else { return button }
             strip.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.94))
@@ -33,8 +33,9 @@ final class DictationFlowUITests: XCTestCase {
         // The gate would otherwise sit on a biometric prompt no automation can answer. The seeded key lets the
         // tests that need a live host connect to one.
         app.launchArguments = [
-            "-openpaw-debug-seed-key", "/tmp/openpaw-sim-key",
             "-openpaw.settings.biometricGate", "<false/>",
+            "-openpaw-debug-scenario", "connectedWorkspace",
+            "-openpaw-ui-test-steady-terminal-cursor",
         ]
         app.launch()
         return app
@@ -44,8 +45,9 @@ final class DictationFlowUITests: XCTestCase {
     /// the same thing as no dictation at all, so both are asserted.
     func testTheMicrophoneControlIsAvailableInTheTerminal() throws {
         let app = launchedApp()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
-        app.buttons["Terminal"].tap()
+        let next = app.buttons["root.destination.next"]
+        XCTAssertTrue(next.waitForExistence(timeout: 15), "the Terminal navigation entry never appeared")
+        next.tap()
 
         // On the strip's view page rather than always on screen: holding anywhere is the everyday route to
         // speech, so a permanent microphone icon was spending width on a job a gesture already does. It still has
