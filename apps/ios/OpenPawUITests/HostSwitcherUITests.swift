@@ -23,9 +23,9 @@ final class HostSwitcherUITests: XCTestCase {
     private func hostSwitcher(in app: XCUIApplication) -> XCUIElement {
         let switcher = app.buttons["host.switcher"]
         if !switcher.waitForExistence(timeout: 2) {
-            let terminal = app.buttons["root.destination.terminal"]
-            XCTAssertTrue(terminal.waitForExistence(timeout: 10))
-            terminal.tap()
+            let next = app.buttons["root.destination.next"]
+            XCTAssertTrue(next.waitForExistence(timeout: 10))
+            next.tap()
         }
         XCTAssertTrue(switcher.waitForExistence(timeout: 10))
         return switcher
