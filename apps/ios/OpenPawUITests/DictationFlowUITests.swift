@@ -49,10 +49,10 @@ final class DictationFlowUITests: XCTestCase {
         XCTAssertTrue(next.waitForExistence(timeout: 15), "the Terminal navigation entry never appeared")
         next.tap()
 
-        // Dictation is a primary terminal action. Hiding it on another deck page made speaking appear to do
-        // nothing, especially with the system keyboard covering the bottom of the screen. It must be reachable
-        // directly from the Terminal without paging or relying on an undiscoverable hold gesture.
-        let mic = app.buttons["Dictate into a terminal draft"]
+        // On the strip's view page rather than always on screen: holding anywhere is the everyday route to
+        // speech, so a permanent microphone icon was spending width on a job a gesture already does. It still has
+        // to exist, because a press held for a third of a second is not a gesture VoiceOver can perform.
+        let mic = control("Dictate into a terminal draft", in: app)
         XCTAssertTrue(
             mic.waitForExistence(timeout: 10),
             "no dictation control anywhere on the strip. On screen:\n\(app.debugDescription)"
@@ -138,11 +138,10 @@ final class DictationFlowUITests: XCTestCase {
     /// claim that the audio graph is live; without it the user is talking to a control that did nothing.
     func testTappingTheMicrophoneStartsAndStopsDictation() throws {
         let app = launchedApp()
-        let next = app.buttons["root.destination.next"]
-        XCTAssertTrue(next.waitForExistence(timeout: 15), "the Terminal navigation entry never appeared")
-        next.tap()
+        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
+        app.buttons["Terminal"].tap()
 
-        let mic = app.buttons["Dictate into a terminal draft"]
+        let mic = control("Dictate into a terminal draft", in: app)
         XCTAssertTrue(mic.waitForExistence(timeout: 10), "no dictation control on the strip")
         mic.tap()
 
