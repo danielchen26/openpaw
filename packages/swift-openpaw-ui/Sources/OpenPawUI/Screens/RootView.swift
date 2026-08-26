@@ -694,7 +694,13 @@ public struct RootView: View {
         #if os(iOS)
             ZStack {
                 PushToTalkCatcher(
-                    onBegan: { pushToTalk.touchBegan(at: $0) },
+                    onBegan: {
+                        // A hold is now the input method. Retire the large software keyboard immediately so the
+                        // listening ring and the terminal line stay visible while the user speaks.
+                        UIApplication.shared.sendAction(
+                            #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                        pushToTalk.touchBegan(at: $0)
+                    },
                     onArmed: {
                         pushToTalk.arm()
                         // The only confirmation available to someone who is looking at their thumb, not the screen.
@@ -727,6 +733,18 @@ public struct RootView: View {
         // misheard command that runs itself on a remote machine is not a bug anyone gets to make twice.
         pushToTalk.onCommit = { [weak model] text in
             guard let model else { return }
+            if router.destination == .terminal, let terminal = model.terminal {
+                // Put recognised text at the live shell prompt without Return. The user sees and can edit the
+                // command exactly like keyboard input; speech must never execute a remote command by itself.
+                Task {
+                    do {
+                        try await terminal.send(text: text)
+                    } catch {
+                        model.present(error, while: "inserting dictated text into the terminal")
+                    }
+                }
+                return
+            }
             // Appended rather than replaced: a second sentence spoken before a screen has claimed the first must
             // not silently delete it. The claimer clears the slot when it takes the words.
             if let pending = model.dictatedText, !pending.isEmpty {
