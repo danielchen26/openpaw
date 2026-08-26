@@ -217,12 +217,14 @@ final class ControlDeckUITests: XCTestCase {
 
     /// Swipes across the strip itself, which is the bottom row of the screen.
     private func swipeStrip(_ app: XCUIApplication, toward: Toward) {
-        let window = app.windows.firstMatch
+        let deck = app.otherElements["root.control-deck"]
+        let grip = app.buttons["Hide controls"]
+        let surface = deck.exists ? deck : (grip.exists ? grip : app.windows.firstMatch)
         let from = toward == .leading ? 0.75 : 0.25
         let to = toward == .leading ? 0.25 : 0.75
-        window.coordinate(withNormalizedOffset: CGVector(dx: from, dy: 0.955))
+        surface.coordinate(withNormalizedOffset: CGVector(dx: from, dy: 0.5))
             .press(
                 forDuration: 0.05,
-                thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: to, dy: 0.955)))
+                thenDragTo: surface.coordinate(withNormalizedOffset: CGVector(dx: to, dy: 0.5)))
     }
 }

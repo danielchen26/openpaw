@@ -95,6 +95,7 @@ public struct ControlDeckView<KeysPage: View, DestinationsPage: View, ViewPage: 
         // scrollable sideways while the strip itself also pages sideways.
         .simultaneousGesture(swipe)
         .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("root.control-deck")
         // VoiceOver cannot swipe a strip: the rotor's adjustable actions are how it pages instead.
         .accessibilityAdjustableAction { direction in
             switch direction {
