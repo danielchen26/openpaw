@@ -127,6 +127,27 @@ enum ScreenCatalog {
             unavailableReason: ""
         ),
         Screen(
+            name: "WorkspaceHomeView-online-candidate",
+            build: { model, _ in
+                AnyView(
+                    WorkspaceHomeView(
+                        model: model,
+                        settings: OpenPawSettings(),
+                        candidates: [
+                            AddDeviceCandidate(
+                                id: "snapshot-online-candidate",
+                                nickname: "Build Mac",
+                                hostname: "build.example.ts.net",
+                                dnsName: "build.example.ts.net",
+                                tailscaleIPs: ["100.64.0.9"],
+                                os: "macOS",
+                                online: true,
+                                source: .tailscaleAdministrator)
+                        ]))
+            },
+            unavailableReason: ""
+        ),
+        Screen(
             name: "QuickConnectView-reviewing",
             build: { _, _ in quickConnectScreen(.reviewing) },
             unavailableReason: ""

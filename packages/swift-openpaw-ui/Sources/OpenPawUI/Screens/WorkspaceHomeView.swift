@@ -7,7 +7,10 @@ public enum WorkspaceHomeCopy {
     public static let headline = "Bring your own machine online"
     public static let message = "OpenPaw connects to your own Mac or server. Credentials remain local on this device, and you stay in control of what is trusted, saved, and opened."
     public static let localControl = "Nothing is dialed from Home until you add SSH details and choose to connect."
+    public static let discoveryEyebrow = "tailscale / local identity / candidates"
+    public static let discoveryTitle = "Tailscale discovery"
     public static let emptyAndOnboardingCopy = [emptyPrimaryAction, headline, message, localControl]
+    public static let userVisibleCopy = emptyAndOnboardingCopy + [discoveryEyebrow, discoveryTitle]
 }
 
 public enum WorkspaceHomeCandidateSelection {
@@ -47,6 +50,18 @@ public enum WorkspaceHomeCandidateAction: Sendable, Hashable {
     public var opensAddDevice: Bool { self != .candidate }
 }
 
+public enum WorkspaceHomeCandidatePresentation {
+    public static func actionTitle(for candidate: AddDeviceCandidate) -> String {
+        candidate.online ? "Connect directly" : "Offline"
+    }
+
+    public static func accessibilityLabel(for candidate: AddDeviceCandidate) -> String {
+        candidate.online
+            ? "\(candidate.accessibilityLabel). Connect directly with Quick Connect"
+            : "\(candidate.accessibilityLabel). Offline"
+    }
+}
+
 @MainActor
 public struct WorkspaceHomeView: View {
     private let model: OpenPawModel
@@ -59,7 +74,6 @@ public struct WorkspaceHomeView: View {
     private let onQuickConnect: (QuickConnectProposal) -> Void
     private let onOpenPawURL: (URL) -> Void
     private let onAddDevice: () -> Void
-    @State private var isShowingProviderImport = false
     #if os(iOS) && canImport(VisionKit)
         @State private var isShowingPairingScanner = false
     #endif
@@ -97,9 +111,6 @@ public struct WorkspaceHomeView: View {
                 populatedHome
             }
         }
-        .sheet(isPresented: $isShowingProviderImport) {
-            NavigationStack { ProviderImportView(model: model) }
-        }
         #if os(iOS) && canImport(VisionKit)
             .fullScreenCover(isPresented: $isShowingPairingScanner) {
                 OpenPawPairingScannerView(
@@ -124,7 +135,6 @@ public struct WorkspaceHomeView: View {
                 networkSummary
                 tailnetBootstrapPanel
                 deviceGrid
-                remoteCatalogTransfer
                 if !presentation.agentSessions.isEmpty { agentSessions(presentation.agentSessions) }
                 if !presentation.pendingApprovals.isEmpty { approvals(presentation.pendingApprovals) }
                 if !presentation.recentWorkspaces.isEmpty { recentWorkspaces(presentation.recentWorkspaces) }
@@ -138,65 +148,15 @@ public struct WorkspaceHomeView: View {
         .navigationTitle("Home")
     }
 
-    private var remoteCatalogTransfer: some View {
-        section("Remote catalog transfer") {
-            Panel {
-                VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
-                    Text("remote catalog / host transfer / local workspace")
-                        .font(OpenPawTheme.Machine.label)
-                        .foregroundStyle(OpenPawTheme.signal)
-                    Text("Import a remote repository through your host")
-                        .font(OpenPawTheme.Human.title)
-                        .foregroundStyle(OpenPawTheme.textPrimary)
-                    Text(remoteCatalogDetail)
-                        .font(OpenPawTheme.Human.prose)
-                        .foregroundStyle(OpenPawTheme.textSecondary)
-                    Button(remoteCatalogActionTitle) {
-                        if model.connection.isConnected, model.canListProviders == .available {
-                            isShowingProviderImport = true
-                        } else if let host = model.selectedHost {
-                            onDeviceAction(host, .terminal)
-                        }
-                    }
-                    .disabled(remoteCatalogActionDisabled)
-                    .frame(minHeight: 44)
-                    .buttonStyle(.borderedProminent)
-                }
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Remote catalog transfer")
-            .accessibilityValue(remoteCatalogDetail)
-        }
-    }
-
-    private var remoteCatalogDetail: String {
-        let host = model.selectedHost?.nickname ?? "this host"
-        guard model.connection.isConnected else { return "Connect \(host) first. Repository browsing and imports run on the host, not from this device." }
-        if model.canListProviders == .denied || model.canAuthorizeProviders == .denied || model.canImportRepos == .denied {
-            return "This paired device cannot import repositories. Re-pair this device with providers.read, providers.manage, and repos.manage to authorize and import repositories."
-        }
-        if model.canListProviders == .unavailable { return "Provider import is unavailable on this host. Install or update openpaw-host with provider support, then reconnect." }
-        return "OpenPaw never clones a repository on this phone. The selected host authorizes, clones, validates, and registers the workspace it owns."
-    }
-
-    private var remoteCatalogActionTitle: String {
-        guard model.connection.isConnected else { return "Connect host" }
-        return model.canListProviders == .available ? "Browse remote catalogs" : "Provider import unavailable"
-    }
-
-    private var remoteCatalogActionDisabled: Bool {
-        model.connection.isConnected && model.canListProviders != .available
-    }
-
     private var tailnetBootstrapPanel: some View {
         let state = model.homeTailnetBootstrap
         let visibleCandidates = visibleTailnetCandidates
         return Panel {
             VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
-                Text("tailnet / local identity / candidates")
+                Text(WorkspaceHomeCopy.discoveryEyebrow)
                     .font(OpenPawTheme.Machine.label)
                     .foregroundStyle(OpenPawTheme.signal)
-                Text("Tailnet discovery")
+                Text(WorkspaceHomeCopy.discoveryTitle)
                     .font(OpenPawTheme.Human.title)
                     .foregroundStyle(OpenPawTheme.textPrimary)
                 Text(tailnetBootstrapDetail(state))
@@ -214,7 +174,7 @@ public struct WorkspaceHomeView: View {
                                 tailnetCandidateRow(candidate)
                             }
                             .buttonStyle(.plain)
-                            .accessibilityLabel(candidate.accessibilityLabel)
+                            .accessibilityLabel(WorkspaceHomeCandidatePresentation.accessibilityLabel(for: candidate))
                         }
                     }
                 }
@@ -227,7 +187,7 @@ public struct WorkspaceHomeView: View {
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Tailnet discovery")
+        .accessibilityLabel(WorkspaceHomeCopy.discoveryTitle)
         .accessibilityValue(tailnetBootstrapDetail(state))
     }
 
@@ -255,7 +215,7 @@ public struct WorkspaceHomeView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
-            Text(candidate.online ? "Online" : "Offline")
+            Text(WorkspaceHomeCandidatePresentation.actionTitle(for: candidate))
                 .font(OpenPawTheme.Human.caption)
                 .foregroundStyle(candidate.online ? OpenPawTheme.ok : OpenPawTheme.textTertiary)
             Image(systemName: "chevron.right")
@@ -272,8 +232,8 @@ public struct WorkspaceHomeView: View {
     private func tailnetBootstrapDetail(_ state: HomeTailnetBootstrapState) -> String {
         let identity = state.localIdentity.flatMap { identity in
             let account = identity.profile?.displayName ?? identity.profile?.loginName ?? "signed-in local profile"
-            let tailnet = identity.tailnetName ?? identity.domainName ?? "unknown tailnet"
-            return "Local identity: \(account) on \(tailnet)."
+            let tailscaleNetwork = identity.tailnetName ?? identity.domainName ?? "unknown Tailscale network"
+            return "Local identity: \(account) on \(tailscaleNetwork)."
         } ?? "Local identity unavailable. iOS cannot read the Tailscale app Keychain or account database. Quad100 may be unavailable on some clients."
         let candidates = "Discovered \(state.candidateCount) candidate\(state.candidateCount == 1 ? "" : "s") from \(state.source.rawValue). Candidates are not trusted, saved, or connected automatically."
         switch state.phase {

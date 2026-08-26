@@ -46,6 +46,18 @@ final class HomeInteractionUITests: XCTestCase {
         pageScrollView(app).swipeUp()
     }
 
+    func testHomeUsesTailscaleCopyAndOmitsRemoteCatalogTransfer() {
+        let app = launchedApp()
+
+        let discovery = app.staticTexts["Tailscale discovery"].firstMatch
+        XCTAssertTrue(discovery.waitForExistence(timeout: 15), "Home does not expose Tailscale discovery copy")
+
+        dismissAnyAlert(app)
+        XCTAssertFalse(app.staticTexts["Tailnet discovery"].exists)
+        XCTAssertFalse(app.staticTexts["Remote catalog transfer"].exists)
+        XCTAssertFalse(app.buttons["Browse remote catalogs"].exists)
+    }
+
     /// The device list has to be reachable. With one saved device the content already runs past the bottom of the
     /// screen, so if the scroll view will not move, the buttons below the fold cannot be tapped at all.
     func testHomeScrollsToReachContentBelowTheFold() {
