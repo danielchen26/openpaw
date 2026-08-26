@@ -208,11 +208,16 @@ struct PushToTalkControllerTests {
     func unavailableEngineIsSurfaced() {
         let controller = PushToTalkController()
         controller.configure(engine: nil, locale: .current, mode: .terminal)
+        var failure: String?
+        controller.onFailure = { failure = $0.localizedDescription }
 
         controller.touchBegan(at: CGPoint(x: 5, y: 5))
+        #expect(!controller.isUnavailable, "ordinary taps should not throw a dictation alert")
+        controller.arm()
 
         #expect(controller.isUnavailable)
         #expect(controller.ring == nil, "a ring that cannot listen is a lie about what is happening")
+        #expect(failure?.localizedCaseInsensitiveContains("Dictation unavailable") == true)
     }
 
     @Test("recognition failures are surfaced instead of silently dropping speech")

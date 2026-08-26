@@ -13,31 +13,45 @@ import Testing
 struct DictationEngineChoiceTests {
 
     @Test("an engine that cannot hear Chinese is not offered to someone dictating Chinese")
-    func chineseExcludesParakeet() {
+    func chineseExcludesParakeetAndApple() {
         // Parakeet does not fail on Chinese — it transliterates it into English syllables, which looks like a
-        // transcript and is not one. Offering it is worse than offering nothing.
+        // transcript and is not one. Apple is legacy decoding only and must not be offered at all.
         let choices = DictationEngineChoice.choices(forLocale: "zh-CN")
         #expect(!choices.contains(.parakeet))
+        #expect(!choices.contains(.appleSpeech))
         #expect(choices.contains(.qwen3Small))
-        #expect(choices.contains(.appleSpeech))
 
         // Every spelling of Chinese a locale picker can produce, not just the canonical one.
         for identifier in ["zh-Hans-CN", "zh_CN", "zh-TW", "ZH-CN"] {
             #expect(
                 !DictationEngineChoice.choices(forLocale: identifier).contains(.parakeet),
                 "\(identifier) is Chinese and Parakeet cannot transcribe it")
+            #expect(
+                !DictationEngineChoice.choices(forLocale: identifier).contains(.appleSpeech),
+                "\(identifier) must not expose Apple's legacy recogniser")
         }
     }
 
-    @Test("an English speaker is offered every engine")
-    func englishOffersEverything() {
-        let choices = DictationEngineChoice.choices(forLocale: "en-US")
-        #expect(choices.count == DictationEngineChoice.allCases.count)
+    @Test("Apple Speech is never offered for any visible locale")
+    func appleSpeechIsNeverOffered() {
+        for identifier in ["en-US", "zh-CN", "zh-Hans-CN", "ja-JP", "de-DE"] {
+            #expect(
+                !DictationEngineChoice.choices(forLocale: identifier).contains(.appleSpeech),
+                "\(identifier) offered Apple's legacy recogniser")
+        }
     }
 
-    @Test("a stored choice that cannot serve the language falls back rather than transliterating")
+    @Test("an English speaker is offered only local engines")
+    func englishOffersLocalEngines() {
+        let choices = DictationEngineChoice.choices(forLocale: "en-US")
+        #expect(choices == [.qwen3Small, .qwen3Large, .parakeet])
+    }
+
+    @Test("a stored choice that cannot serve the language falls back to the default local model")
     func resolveFallsBack() {
-        #expect(DictationEngineChoice.resolve(.parakeet, forLocale: "zh-CN") == .appleSpeech)
+        #expect(DictationEngineChoice.resolve(.appleSpeech, forLocale: "en-US") == .qwen3Small)
+        #expect(DictationEngineChoice.resolve(.appleSpeech, forLocale: "zh-CN") == .qwen3Small)
+        #expect(DictationEngineChoice.resolve(.parakeet, forLocale: "zh-CN") == .qwen3Small)
         #expect(DictationEngineChoice.resolve(.parakeet, forLocale: "en-US") == .parakeet)
         #expect(DictationEngineChoice.resolve(.qwen3Large, forLocale: "zh-CN") == .qwen3Large)
     }
@@ -51,7 +65,7 @@ struct DictationEngineChoiceTests {
         settings.dictationLocaleID = "zh-CN"
 
         #expect(settings.dictationEngine == .parakeet, "the stored preference survives")
-        #expect(settings.effectiveDictationEngine == .appleSpeech, "but it is not what runs on Chinese")
+        #expect(settings.effectiveDictationEngine == .qwen3Small, "but Chinese falls back to the default local model")
 
         settings.dictationLocaleID = "en-US"
         #expect(settings.effectiveDictationEngine == .parakeet)
@@ -67,10 +81,22 @@ struct DictationEngineChoiceTests {
         #expect(second.dictationEngine == .qwen3Small, "paying for a 450 MB download once should be enough")
     }
 
-    @Test("a fresh install dictates with the engine that needs no download")
-    func defaultIsAppleSpeech() {
+    @Test("a fresh install defaults to Qwen3 0.6B")
+    func defaultIsQwen3Small() {
         let settings = OpenPawSettings(defaults: Self.freshDefaults())
-        #expect(settings.dictationEngine == .appleSpeech)
+        #expect(settings.dictationEngine == .qwen3Small)
+        #expect(settings.effectiveDictationEngine == .qwen3Small)
+    }
+
+    @Test("a stored legacy Apple choice migrates to Qwen3 0.6B")
+    func storedAppleMigratesToQwen3Small() {
+        let defaults = Self.freshDefaults()
+        defaults.set("apple", forKey: "openpaw.settings.dictationEngine")
+
+        let settings = OpenPawSettings(defaults: defaults)
+
+        #expect(settings.dictationEngine == .qwen3Small)
+        #expect(defaults.string(forKey: "openpaw.settings.dictationEngine") == DictationEngineChoice.qwen3Small.rawValue)
     }
 
     @Test("a settings file exported before engine choice existed still imports")
@@ -93,11 +119,32 @@ struct DictationEngineChoiceTests {
             }
             """
         let snapshot = try JSONDecoder().decode(SettingsSnapshot.self, from: Data(legacy.utf8))
-        #expect(snapshot.dictationEngine == .appleSpeech)
+        #expect(snapshot.dictationEngine == .qwen3Small)
         #expect(snapshot.dictationLocaleID == "en-US")
     }
+    @Test("legacy Apple snapshots import as Qwen3 0.6B")
+    func snapshotDecodesLegacyAppleAsQwen3Small() throws {
+        let legacy = """
+            {
+              "requires_biometric_gate": true,
+              "dictation_locale": "en-US",
+              "dictation_mode": "composer",
+              "dictation_engine": "apple",
+              "terminal_font_size": 13,
+              "terminal_theme": "slate",
+              "scrollback_lines": 10000,
+              "application_cursor_keys": false,
+              "preview_port": 3000,
+              "event_budget_per_session": 2000,
+              "shortcuts": {"version": 1, "shortcuts": []},
+              "session_profiles": {}
+            }
+            """
+        let snapshot = try JSONDecoder().decode(SettingsSnapshot.self, from: Data(legacy.utf8))
+        #expect(snapshot.dictationEngine == .qwen3Small)
+    }
 
-    @Test("an exported snapshot carries the engine and restores it")
+
     func snapshotRoundTripsEngine() throws {
         let settings = OpenPawSettings(defaults: Self.freshDefaults())
         settings.dictationEngine = .qwen3Large
@@ -122,8 +169,15 @@ struct DictationEngineChoiceTests {
             }
         }
     }
+    @Test("Qwen3 names distinguish default high accuracy from maximum accuracy")
+    func qwenAccuracyLabelsAreClear() {
+        #expect(DictationEngineChoice.qwen3Small.summary.contains("Default high accuracy"))
+        #expect(DictationEngineChoice.qwen3Large.summary.contains("Maximum accuracy"))
+        #expect(DictationEngineChoice.qwen3Small.approximateDownloadMegabytes == 450)
+        #expect(DictationEngineChoice.qwen3Large.approximateDownloadMegabytes == 1_900)
+    }
 
-    @Test("download state says something specific enough to act on")
+
     func stateTextIsActionable() {
         #expect(DictationModelState.absent.statusText == "Not downloaded")
         #expect(DictationModelState.installed.isInstalled)
@@ -135,9 +189,9 @@ struct DictationEngineChoiceTests {
         #expect(DictationModelState.failed("no network").isInstalled == false)
     }
 
-    @Test("only the streaming engine claims to stream")
+    @Test("the legacy Apple engine never claims to stream in current policy")
     func streamingIsDeclaredHonestly() {
-        #expect(DictationEngineChoice.appleSpeech.streamsPartialResults)
+        #expect(!DictationEngineChoice.appleSpeech.streamsPartialResults)
         for choice in DictationEngineChoice.allCases where choice.requiresDownload {
             #expect(
                 !choice.streamsPartialResults,
@@ -180,6 +234,22 @@ struct DictationEngineChoiceTests {
         // The reason reaches the screen verbatim rather than being wrapped in "Download failed", which would be
         // a false description of a device that never attempted a download.
         #expect(DictationModelState.unsupported("Needs a real device").statusText == "Needs a real device")
+    }
+
+    @Test("finishing a model download invalidates the root push-to-talk configuration")
+    func rootConfigurationTracksModelState() {
+        let settings = OpenPawSettings(defaults: Self.freshDefaults())
+        settings.dictationEngine = .qwen3Small
+        let store = StubDictationModelStore(states: [.qwen3Small: .absent])
+        let model = OpenPawModel(dictationModels: store, settings: settings)
+
+        let before = RootPushToTalkConfiguration.make(model: model, settings: settings)
+        store.states[.qwen3Small] = .installed
+        let after = RootPushToTalkConfiguration.make(model: model, settings: settings)
+
+        #expect(before != after)
+        #expect(before.modelState == .absent)
+        #expect(after.modelState == .installed)
     }
 
     private static func freshDefaults() -> UserDefaults {

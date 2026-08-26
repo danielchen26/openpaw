@@ -238,7 +238,18 @@ final class LocalDictationAccuracyTests: XCTestCase {
         )
     }
 
-    /// The guard that keeps a simulator from taking the app down, asserted where the danger actually is.
+    /// The legacy enum case stays decodable, but no runtime path may build or return Apple's recogniser.
+    ///
+    /// This is not just a settings rule. The factory is the last gate before a hold opens the microphone, so returning
+    /// nil here is what prevents a stored `apple` value or a debug launch argument from silently selecting Apple.
+    func testFactoryRefusesLegacyAppleSpeechChoice() async {
+        let store = await MainActor.run { LocalASRModelStore() }
+        let engine = await MainActor.run {
+            LocalASREngineFactory(store: store).engine(for: .appleSpeech)
+        }
+        XCTAssertNil(engine, "the legacy Apple choice must not construct or return SpeechDictation")
+    }
+
     ///
     /// Inverted on purpose: this is the one test in the file that runs on a simulator and skips on a phone. The
     /// other two need hardware, so without this the whole file would be green-by-absence in CI, which is the state
@@ -275,12 +286,12 @@ final class LocalDictationAccuracyTests: XCTestCase {
             }
         }
 
-        // Apple's recogniser is untouched by all of this. If the guard ever widened to catch it, dictation would
-        // be gone entirely on a simulator and the settings screen would be inert for no reason.
+        // The legacy Apple case is decoding-only now. Returning nil makes a stored `apple` value flow into the same
+        // unavailable guidance as any missing local model instead of silently running SFSpeechRecognizer.
         let apple = await MainActor.run {
             LocalASREngineFactory(store: store).engine(for: .appleSpeech)
         }
-        XCTAssertNotNil(apple, "Apple's recogniser still has to work on a simulator")
+        XCTAssertNil(apple, "Apple's recogniser must never be returned, including on a simulator")
     }
 
     /// What the model says must reach the terminal unchanged, apart from the model's own tags.

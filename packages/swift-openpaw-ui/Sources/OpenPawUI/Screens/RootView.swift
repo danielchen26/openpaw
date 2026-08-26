@@ -384,6 +384,31 @@ public enum RootQuickConnectRouting {
     }
 }
 
+/// Everything that can change which engine the app-wide hold gesture should use.
+///
+/// Keeping model state in this value is important: downloading Qwen does not change the selected setting, so a
+/// root that only watches the picker remains bound to `nil` until it is recreated. Reading `state(of:)` here also
+/// registers the observable model store with SwiftUI, and the completed download invalidates the key immediately.
+struct RootPushToTalkConfiguration: Equatable {
+    let choice: DictationEngineChoice
+    let localeID: String
+    let mode: DictationMode
+    let modelState: DictationModelState
+    let hasInjectedEngine: Bool
+
+    @MainActor
+    static func make(model: OpenPawModel, settings: OpenPawSettings) -> Self {
+        let choice = settings.effectiveDictationEngine
+        return Self(
+            choice: choice,
+            localeID: settings.dictationLocaleID,
+            mode: settings.dictationMode,
+            modelState: model.dictationModels.state(of: choice),
+            hasInjectedEngine: model.dictation != nil
+        )
+    }
+}
+
 private struct ExistingOnlyQuickConnectCredentialInstaller: QuickConnectCredentialInstalling {
     func install(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod {
         guard case .existing(let auth) = choice else { throw QuickConnectCredentialInstallError.storageFailed }
@@ -600,11 +625,11 @@ public struct RootView: View {
         }
 #endif
         .task { await pumpScrollback() }
-        .onChange(of: model.dictation == nil) { _, _ in configurePushToTalk() }
-        .onChange(of: settings.dictationLocaleID) { _, _ in configurePushToTalk() }
-        // Switching recogniser has to take effect on the next hold, not the next launch: a user who just downloaded
-        // Qwen and held the screen would otherwise still be talking to Apple's.
-        .onChange(of: settings.dictationEngine) { _, _ in configurePushToTalk() }
+        // Includes the model-install state, not only the picker. Completing a Qwen download must replace the
+        // unavailable binding before the next hold without requiring navigation or relaunch.
+        .onChange(of: RootPushToTalkConfiguration.make(model: model, settings: settings)) { _, _ in
+            configurePushToTalk()
+        }
         .onAppear { configurePushToTalk() }
         .sheet(item: sheetBinding) { sheet in
             switch sheet {
@@ -720,14 +745,14 @@ public struct RootView: View {
     }
 
     private func configurePushToTalk() {
-        // The chosen recogniser, built fresh whenever the choice changes: an engine holds a microphone graph and a
-        // loaded model, and reusing the previous one after the user switched from Apple to Qwen would leave the old
-        // recogniser hearing the next sentence.
-        let engine = model.dictationEngineFactory?.engine(for: settings.effectiveDictationEngine) ?? model.dictation
+        // Resolve again whenever the configuration key changes. A completed model download can turn this from nil
+        // into a live local engine without changing any setting.
+        let engine = model.selectedDictationEngine(for: settings)
         pushToTalk.configure(
             engine: engine,
             locale: settings.dictationLocale,
-            mode: settings.dictationMode
+            mode: settings.dictationMode,
+            unavailableMessage: model.dictationUnavailableMessage(for: settings)
         )
         // Speech lands wherever the user is. Terminal text is staged as a draft rather than executed: a
         // misheard command that runs itself on a remote machine is not a bug anyone gets to make twice.

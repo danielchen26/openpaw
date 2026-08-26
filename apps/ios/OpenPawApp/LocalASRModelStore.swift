@@ -208,18 +208,16 @@ final class LocalASRModelStore: DictationModelInstalling {
 final class LocalASREngineFactory: DictationEngineMaking {
 
     private let store: LocalASRModelStore
-    private let apple: any DictationEngine
     private var localEngines: [DictationEngineChoice: LocalASRDictation] = [:]
 
-    init(store: LocalASRModelStore, apple: any DictationEngine = SpeechDictation()) {
+    init(store: LocalASRModelStore) {
         self.store = store
-        self.apple = apple
     }
 
     func engine(for choice: DictationEngineChoice) -> (any DictationEngine)? {
         switch choice {
         case .appleSpeech:
-            return apple
+            return nil
         case .qwen3Small, .qwen3Large, .parakeet:
             // Never on a simulator, whatever the settings say. MLX asks Metal for a shared-storage heap and the
             // simulator's renderer refuses with `MTLStorageModePrivate is required for heaps`, which is a failed

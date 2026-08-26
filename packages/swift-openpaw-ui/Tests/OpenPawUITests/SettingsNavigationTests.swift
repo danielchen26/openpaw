@@ -130,6 +130,10 @@ struct SettingsNavigationTests {
     @Test func presentationPolicyMatchesDeviceClass() {
         #expect(SettingsPresentationPolicy.presentation(horizontalSizeClass: .compact) == .stack)
         #expect(SettingsPresentationPolicy.presentation(horizontalSizeClass: .regular) == .split)
+        #expect(SettingsPresentationPolicy.presentation(horizontalSizeClass: .regular, availableWidth: 402) == .stack)
+        #expect(SettingsPresentationPolicy.presentation(horizontalSizeClass: .regular, availableWidth: 834) == .split)
+        #expect(SettingsPresentationPolicy.presentation(horizontalSizeClass: .regular, availableWidth: 874, availableHeight: 402) == .stack)
+        #expect(SettingsPresentationPolicy.presentation(horizontalSizeClass: .regular, availableWidth: 834, availableHeight: 1194) == .split)
         #expect(SettingsPresentationPolicy.presentation(horizontalSizeClass: nil) == .stack)
     }
 

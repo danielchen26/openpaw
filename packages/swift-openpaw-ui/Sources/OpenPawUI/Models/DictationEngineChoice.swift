@@ -9,7 +9,8 @@ import Foundation
 /// right and averages 2%. That gap is the whole reason this enum exists: the choice is not a preference between
 /// equivalent engines, it is a choice between one that can hear the user and one that cannot.
 ///
-/// The cost of the better answer is a model download and a slower turnaround, so the choice stays the user's.
+/// The cost of the better answer is a model download and a slower turnaround, so the choice stays the user's among
+/// local engines. The Apple case is retained only so old settings files can be decoded and migrated.
 public enum DictationEngineChoice: String, Codable, Sendable, CaseIterable, Hashable {
     /// `SFSpeechRecognizer`. No download, streaming partial results, weak on mixed Chinese and English.
     case appleSpeech = "apple"
@@ -21,16 +22,24 @@ public enum DictationEngineChoice: String, Codable, Sendable, CaseIterable, Hash
     /// Parakeet TDT v3, CoreML on the Neural Engine. Fastest and smallest, English and European languages only.
     case parakeet = "parakeet-v3"
 
+    public static let defaultChoice: DictationEngineChoice = .qwen3Small
+
+    /// Converts old persisted values into the current policy before they can be used or written back.
+    public static func migratedStoredChoice(_ choice: DictationEngineChoice?) -> DictationEngineChoice {
+        guard let choice, choice != .appleSpeech else { return defaultChoice }
+        return choice
+    }
+
     public var displayName: String {
         switch self {
         case .appleSpeech: "Apple"
-        case .qwen3Small: "Qwen3 0.6B"
-        case .qwen3Large: "Qwen3 1.7B"
+        case .qwen3Small: "Qwen3 0.6B · Default high accuracy"
+        case .qwen3Large: "Qwen3 1.7B · Maximum accuracy"
         case .parakeet: "Parakeet"
         }
     }
 
-    /// True when the engine needs weights fetched before it can hear anything. Apple's is part of the OS.
+    /// True when the engine needs weights fetched before it can hear anything. Apple's legacy case is decoding-only.
     public var requiresDownload: Bool { self != .appleSpeech }
 
     /// The HuggingFace repository the weights come from, or nil for the system recogniser.
@@ -65,21 +74,20 @@ public enum DictationEngineChoice: String, Codable, Sendable, CaseIterable, Hash
     /// instead of letting a zh-CN user discover it by dictating.
     public var supportsChinese: Bool { self != .parakeet }
 
-    /// Emits words while the user is still speaking. Only Apple's does; the local models transcribe the utterance
-    /// once the finger comes up, so the ring shows no live text and the words arrive together.
-    public var streamsPartialResults: Bool { self == .appleSpeech }
+    /// Emits words while the user is still speaking. No current engine does; the local models transcribe the
+    /// utterance once the finger comes up, so the ring shows no live text and the words arrive together.
+    public var streamsPartialResults: Bool { false }
 
     /// One line under the picker: what picking this costs and what it buys.
     public var summary: String {
         switch self {
         case .appleSpeech:
-            "Built into iOS. Words appear as you speak. Weakest on Chinese sentences containing English commands."
+            "Legacy setting only. OpenPaw no longer uses Apple Speech. This value migrates to Qwen3 0.6B."
         case .qwen3Small:
-            "450 MB download, runs on this device. Handles Chinese mixed with English commands well; the transcript "
-                + "arrives when you let go rather than as you speak."
+            "Default high accuracy. 450 MB download, runs on this device, and handles Chinese mixed with English "
+                + "commands well. The transcript arrives when you let go rather than as you speak."
         case .qwen3Large:
-            "1.9 GB download, runs on this device. The most accurate option, and needs a recent phone with memory "
-                + "to spare."
+            "Maximum accuracy. 1.9 GB download, runs on this device, and needs a recent phone with memory to spare."
         case .parakeet:
             "700 MB download, runs on the Neural Engine. Fast and accurate in English and European languages, and "
                 + "cannot transcribe Chinese at all."
@@ -93,14 +101,17 @@ public enum DictationEngineChoice: String, Codable, Sendable, CaseIterable, Hash
     /// report that reads "dictation writes gibberish".
     public static func choices(forLocale identifier: String) -> [DictationEngineChoice] {
         let isChinese = identifier.lowercased().hasPrefix("zh")
-        return allCases.filter { !isChinese || $0.supportsChinese }
+        return allCases.filter { choice in
+            choice != .appleSpeech && (!isChinese || choice.supportsChinese)
+        }
     }
 
     /// The engine to fall back to when the stored choice cannot serve the selected language.
     public static func resolve(_ choice: DictationEngineChoice, forLocale identifier: String)
         -> DictationEngineChoice
     {
-        choices(forLocale: identifier).contains(choice) ? choice : .appleSpeech
+        let migrated = migratedStoredChoice(choice)
+        return choices(forLocale: identifier).contains(migrated) ? migrated : defaultChoice
     }
 }
 

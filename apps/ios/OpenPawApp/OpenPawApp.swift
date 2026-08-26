@@ -470,20 +470,25 @@ final class AppWiring {
         let tailscaleAdmin = TailscaleAdminConnector()
         let tailscaleLocalIdentity = Quad100TailscaleLocalIdentityConnector()
         let asrModels = LocalASRModelStore()
-        let appleSpeech = SpeechDictation()
+        let asrEngineFactory = LocalASREngineFactory(store: asrModels)
         let settings = OpenPawSettings()
         let model: OpenPawModel
         #if DEBUG && targetEnvironment(simulator)
             if let debugScenario {
-                model = debugScenario.makeModel(terminal: terminal, settings: settings)
+                model = debugScenario.makeModel(
+                    terminal: terminal,
+                    settings: settings,
+                    dictationModels: asrModels,
+                    dictationEngineFactory: asrEngineFactory
+                )
             } else {
                 model = OpenPawModel(
                     hostStore: hosts.load(),
                     backend: hostAPI,
                     terminal: terminal,
-                    dictation: appleSpeech,
+                    dictation: nil,
                     dictationModels: asrModels,
-                    dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech),
+                    dictationEngineFactory: asrEngineFactory,
                     tailscaleAdminConnector: tailscaleAdmin,
                     tailscaleLocalIdentityConnector: tailscaleLocalIdentity,
                     connectionPreflightRunner: connectionPreflight,
@@ -495,9 +500,9 @@ final class AppWiring {
                 hostStore: hosts.load(),
                 backend: hostAPI,
                 terminal: terminal,
-                dictation: appleSpeech,
+                dictation: nil,
                 dictationModels: asrModels,
-                dictationEngineFactory: LocalASREngineFactory(store: asrModels, apple: appleSpeech),
+                dictationEngineFactory: asrEngineFactory,
                 tailscaleAdminConnector: tailscaleAdmin,
                 tailscaleLocalIdentityConnector: tailscaleLocalIdentity,
                 connectionPreflightRunner: connectionPreflight,

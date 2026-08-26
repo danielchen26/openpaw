@@ -442,7 +442,14 @@ public struct TerminalScreenView: View {
     }
 
     private func startDictation() {
-        guard let engine = model.dictation, engine.isAvailable else { return }
+        guard let engine = model.selectedDictationEngine(for: settings), engine.isAvailable else {
+            model.present(
+                DictationUnavailableError(
+                    model.dictationUnavailableMessage(for: settings)
+                        ?? "Dictation unavailable. Download a local recogniser in Settings before using voice input."),
+                while: "starting dictation")
+            return
+        }
         let mode = VoiceDestination.terminal.dictationMode
         let locale = settings.dictationLocale
         let turnID = voice.start()
@@ -467,7 +474,7 @@ public struct TerminalScreenView: View {
     }
 
     private func stopDictation() {
-        let engine = model.dictation
+        let engine = model.selectedDictationEngine(for: settings)
         voice.stop()
         let task = dictationTask
         dictationTask = nil

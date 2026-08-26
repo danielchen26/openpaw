@@ -37,7 +37,15 @@ public final class OpenPawSettings {
     public var eventBudgetPerSession: Int { didSet { let value = Self.validatedEventBudget(eventBudgetPerSession); if eventBudgetPerSession != value { eventBudgetPerSession = value; return }; defaults.set(eventBudgetPerSession, forKey: Key.eventBudget) } }
     public var dictationLocaleID: String { didSet { defaults.set(dictationLocaleID, forKey: Key.dictationLocale) } }
     public var dictationMode: DictationMode { didSet { defaults.set(dictationMode.rawValue, forKey: Key.dictationMode) } }
-    public var dictationEngine: DictationEngineChoice { didSet { defaults.set(dictationEngine.rawValue, forKey: Key.dictationEngine) } }
+    public var dictationEngine: DictationEngineChoice {
+        didSet {
+            let migrated = DictationEngineChoice.migratedStoredChoice(dictationEngine)
+            if migrated != dictationEngine {
+                dictationEngine = migrated
+            }
+            defaults.set(migrated.rawValue, forKey: Key.dictationEngine)
+        }
+    }
     public var terminalFontSize: CGFloat { didSet { let value = Self.clamp(fontSize: terminalFontSize); if terminalFontSize != value { terminalFontSize = value; return }; defaults.set(Double(terminalFontSize), forKey: Key.fontSize) } }
     public var terminalTheme: TerminalTheme { didSet { defaults.set(terminalTheme.rawValue, forKey: Key.theme) } }
     public var scrollbackLines: Int { didSet { let value = Self.sanitizedScrollback(scrollbackLines); if scrollbackLines != value { scrollbackLines = value; return }; defaults.set(scrollbackLines, forKey: Key.scrollback) } }
@@ -72,7 +80,10 @@ public final class OpenPawSettings {
         eventBudgetPerSession = storedBudget > 0 ? Self.validatedEventBudget(storedBudget) : Self.defaultEventBudgetPerSession
         dictationLocaleID = VoiceLocaleChoices.normalize(defaults.string(forKey: Key.dictationLocale) ?? Locale.current.identifier)
         dictationMode = defaults.string(forKey: Key.dictationMode).flatMap(DictationMode.init(rawValue:)) ?? .composer
-        dictationEngine = defaults.string(forKey: Key.dictationEngine).flatMap(DictationEngineChoice.init(rawValue:)) ?? .appleSpeech
+        let storedDictationEngine = DictationEngineChoice.migratedStoredChoice(
+            defaults.string(forKey: Key.dictationEngine).flatMap(DictationEngineChoice.init(rawValue:)))
+        dictationEngine = storedDictationEngine
+        defaults.set(storedDictationEngine.rawValue, forKey: Key.dictationEngine)
         let storedSize = defaults.double(forKey: Key.fontSize)
         terminalFontSize = storedSize > 0 ? Self.clamp(fontSize: CGFloat(storedSize)) : 13
         terminalTheme = defaults.string(forKey: Key.theme).flatMap(TerminalTheme.init(rawValue:)) ?? .slate
@@ -107,7 +118,7 @@ public final class OpenPawSettings {
         requiresBiometricGate = snapshot.requiresBiometricGate
         dictationLocaleID = snapshot.dictationLocaleID
         dictationMode = snapshot.dictationMode
-        dictationEngine = snapshot.dictationEngine
+        dictationEngine = DictationEngineChoice.migratedStoredChoice(snapshot.dictationEngine)
         terminalFontSize = Self.clamp(fontSize: CGFloat(snapshot.terminalFontSize))
         terminalTheme = snapshot.terminalTheme
         scrollbackLines = snapshot.scrollbackLines

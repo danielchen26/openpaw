@@ -20,12 +20,12 @@ public struct SettingsSnapshot: Codable, Sendable, Hashable {
     public var isShortcutBarVisible: Bool
     public var biometricGraceInterval: TimeInterval
 
-    public init(requiresBiometricGate: Bool, dictationLocaleID: String, dictationMode: DictationMode, dictationEngine: DictationEngineChoice = .appleSpeech, terminalFontSize: Double, terminalTheme: TerminalTheme, scrollbackLines: Int, applicationCursorKeys: Bool, previewPort: Int, eventBudgetPerSession: Int, shortcuts: ShortcutSet, sessionProfiles: [String: SessionProfile], isShortcutBarVisible: Bool = true, biometricGraceInterval: TimeInterval = 120, schemaVersion: Int = Self.currentSchemaVersion) {
+    public init(requiresBiometricGate: Bool, dictationLocaleID: String, dictationMode: DictationMode, dictationEngine: DictationEngineChoice = DictationEngineChoice.defaultChoice, terminalFontSize: Double, terminalTheme: TerminalTheme, scrollbackLines: Int, applicationCursorKeys: Bool, previewPort: Int, eventBudgetPerSession: Int, shortcuts: ShortcutSet, sessionProfiles: [String: SessionProfile], isShortcutBarVisible: Bool = true, biometricGraceInterval: TimeInterval = 120, schemaVersion: Int = Self.currentSchemaVersion) {
         self.schemaVersion = schemaVersion
         self.requiresBiometricGate = requiresBiometricGate
         self.dictationLocaleID = dictationLocaleID
         self.dictationMode = dictationMode
-        self.dictationEngine = dictationEngine
+        self.dictationEngine = DictationEngineChoice.migratedStoredChoice(dictationEngine)
         self.terminalFontSize = terminalFontSize
         self.terminalTheme = terminalTheme
         self.scrollbackLines = scrollbackLines
@@ -63,7 +63,8 @@ public struct SettingsSnapshot: Codable, Sendable, Hashable {
         requiresBiometricGate = try c.decodeIfPresent(Bool.self, forKey: .requiresBiometricGate) ?? true
         dictationLocaleID = try c.decodeIfPresent(String.self, forKey: .dictationLocaleID) ?? Locale.current.identifier
         dictationMode = try c.decodeIfPresent(DictationMode.self, forKey: .dictationMode) ?? .composer
-        dictationEngine = try c.decodeIfPresent(DictationEngineChoice.self, forKey: .dictationEngine) ?? .appleSpeech
+        dictationEngine = DictationEngineChoice.migratedStoredChoice(
+            try c.decodeIfPresent(DictationEngineChoice.self, forKey: .dictationEngine))
         terminalFontSize = try c.decodeIfPresent(Double.self, forKey: .terminalFontSize) ?? 13
         terminalTheme = try c.decodeIfPresent(TerminalTheme.self, forKey: .terminalTheme) ?? .slate
         scrollbackLines = try c.decodeIfPresent(Int.self, forKey: .scrollbackLines) ?? 10_000

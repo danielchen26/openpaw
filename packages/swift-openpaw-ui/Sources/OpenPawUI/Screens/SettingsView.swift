@@ -63,36 +63,43 @@ public struct SettingsView: View {
     }
 
     public var body: some View {
-        Group {
-            switch SettingsPresentationPolicy.presentation(horizontalSizeClass: horizontalSizeClass) {
-            case .stack:
-                NavigationStack {
-                    SettingsHomeView(searchText: searchText)
-                        .navigationDestination(for: SettingsDestination.self) { destination in
-                            categoryView(destination)
-                        }
+        GeometryReader { geometry in
+            Group {
+                switch SettingsPresentationPolicy.presentation(
+                    horizontalSizeClass: horizontalSizeClass,
+                    availableWidth: geometry.size.width,
+                    availableHeight: geometry.size.height
+                ) {
+                case .stack:
+                    NavigationStack {
+                        SettingsHomeView(searchText: searchText)
+                            .navigationDestination(for: SettingsDestination.self) { destination in
+                                categoryView(destination)
+                            }
+                            .searchable(text: $searchText, prompt: "Search settings")
+                    }
+                case .split:
+                    HStack(spacing: 0) {
+                        SettingsHomeView(
+                            searchText: searchText,
+                            selectedDestination: selectedDestination,
+                            onSelect: { selectedDestination = SettingsSelectionPolicy.selection(afterSelecting: $0) }
+                        )
                         .searchable(text: $searchText, prompt: "Search settings")
-                }
-            case .split:
-                HStack(spacing: 0) {
-                    SettingsHomeView(
-                        searchText: searchText,
-                        selectedDestination: selectedDestination,
-                        onSelect: { selectedDestination = SettingsSelectionPolicy.selection(afterSelecting: $0) }
-                    )
-                    .searchable(text: $searchText, prompt: "Search settings")
-                    .frame(width: 340)
+                        .frame(width: 340)
+                        .background(OpenPawTheme.ink)
+
+                        Rectangle()
+                            .fill(OpenPawTheme.line)
+                            .frame(width: OpenPawTheme.hairline)
+
+                        categoryView(selectedDestination ?? SettingsSelectionPolicy.defaultDestination)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                     .background(OpenPawTheme.ink)
-
-                    Rectangle()
-                        .fill(OpenPawTheme.line)
-                        .frame(width: OpenPawTheme.hairline)
-
-                    categoryView(selectedDestination ?? SettingsSelectionPolicy.defaultDestination)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .background(OpenPawTheme.ink)
             }
+            .background(OpenPawTheme.ink)
         }
         .background(OpenPawTheme.ink)
         .tint(OpenPawTheme.textPrimary)
@@ -237,11 +244,10 @@ public struct SettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                // Only when nothing can be done about it. A local engine whose weights are still absent also has no
-                // live recogniser, but the row above already says "Not downloaded" next to the button that fixes
-                // it, and telling that user their device cannot dictate would be both false and discouraging.
-                if model.dictation?.isAvailable != true, !engineAwaitsDownload {
-                    Text("No dictation engine is available on this device, so these settings are inert for now.")
+                // Only when the row above has not already named the action. An absent model has the Download button
+                // beside it, while an unsupported one needs the device reason rather than a generic inert-settings line.
+                if !engineAwaitsDownload, let message = model.dictationUnavailableMessage(for: settings) {
+                    Text(message)
                         .font(OpenPawTheme.Human.caption)
                         .foregroundStyle(OpenPawTheme.warn)
                         .fixedSize(horizontal: false, vertical: true)
@@ -378,13 +384,10 @@ public struct SettingsView: View {
 
     /// Where the user's voice goes, stated per engine rather than once for the screen.
     ///
-    /// Apple's recogniser may leave the device for some locales, and the local models never can. Printing Apple's
-    /// caveat under a downloaded model would be a false statement about the user's privacy, in the direction that
-    /// makes the product look worse than it is, so the sentence follows the choice.
+    /// Local models never send audio off the phone. Apple's recogniser is a legacy setting value only, so its old
+    /// caveat is no longer reachable from Settings.
     private var privacyDisclosure: String {
-        settings.effectiveDictationEngine == .appleSpeech
-            ? VoicePrivacyDisclosure.appleSpeech
-            : VoicePrivacyDisclosure.localModel
+        VoicePrivacyDisclosure.localModel
     }
 
     private var dictationExplanation: String {

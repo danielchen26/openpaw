@@ -105,6 +105,30 @@ public final class OpenPawModel {
     /// heard on a remote machine is not a risk worth taking, so this is a draft the user confirms.
     public var dictatedText: String?
 
+    public func selectedDictationEngine(for settings: OpenPawSettings) -> (any DictationEngine)? {
+        dictationEngineFactory?.engine(for: settings.effectiveDictationEngine) ?? dictation
+    }
+
+    public func dictationUnavailableMessage(for settings: OpenPawSettings) -> String? {
+        if selectedDictationEngine(for: settings)?.isAvailable == true { return nil }
+        let choice = settings.effectiveDictationEngine
+        guard choice.requiresDownload else {
+            return "Dictation unavailable. Choose and download a local recogniser in Settings."
+        }
+        switch dictationModels.state(of: choice) {
+        case .absent:
+            return "Dictation unavailable. Download \(choice.displayName) in Settings before using voice input."
+        case .downloading(let progress, let detail):
+            return "Dictation unavailable. \(choice.displayName) is still downloading in Settings: \(detail) \(Int(progress * 100))%."
+        case .failed(let reason):
+            return "Dictation unavailable. Download \(choice.displayName) failed: \(reason). Open Settings to retry."
+        case .unsupported(let reason):
+            return "Dictation unavailable. \(reason)."
+        case .installed:
+            return "Dictation unavailable. \(choice.displayName) is installed but cannot start on this device."
+        }
+    }
+
     // MARK: - Hosts and connection
 
     public var hostStore: HostStore

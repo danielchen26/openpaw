@@ -192,6 +192,7 @@ public struct ComposerView: View {
 
     private let engine: (any DictationEngine)?
     private let settings: OpenPawSettings
+    private let unavailableMessage: String?
     private let supportsAgentAttachments: Bool
     private let onCommit: (VoiceCommitAction, [ComposerAttachment]) async -> Bool
 
@@ -215,12 +216,14 @@ public struct ComposerView: View {
     public init(
         engine: (any DictationEngine)? = nil,
         settings: OpenPawSettings = OpenPawSettings(),
+        unavailableMessage: String? = nil,
         supportsAgentAttachments: Bool = true,
         initialDestination: VoiceDestination? = nil,
         onCommit: @escaping (VoiceCommitAction, [ComposerAttachment]) async -> Bool
     ) {
         self.engine = engine
         self.settings = settings
+        self.unavailableMessage = unavailableMessage
         self.supportsAgentAttachments = supportsAgentAttachments
         self.onCommit = onCommit
         let restored = ComposerDictationPreferences.restored(localeID: settings.dictationLocaleID, mode: settings.dictationMode)
@@ -386,6 +389,8 @@ public struct ComposerView: View {
 
             if hasDictation {
                 dictationControls
+            } else if let unavailableMessage {
+                dictationUnavailableLabel(unavailableMessage)
             }
 
             Spacer(minLength: 0)
@@ -400,6 +405,14 @@ public struct ComposerView: View {
             modeToggle
             localeMenu
         }
+    }
+
+    private func dictationUnavailableLabel(_ message: String) -> some View {
+        Text(message)
+            .font(OpenPawTheme.Human.caption)
+            .foregroundStyle(OpenPawTheme.warn)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityLabel(message)
     }
 
     /// Where your voice goes is a two-state, safety-relevant choice, so it is a visible toggle carrying the word.
@@ -631,7 +644,10 @@ public struct ComposerView: View {
     }
 
     private func startDictation() {
-        guard let engine, engine.isAvailable, !voice.isActive else { return }
+        guard let engine, engine.isAvailable, !voice.isActive else {
+            failure = unavailableMessage
+            return
+        }
         let turnID = voice.start()
         failure = nil
         let locale = Locale(identifier: localeID)

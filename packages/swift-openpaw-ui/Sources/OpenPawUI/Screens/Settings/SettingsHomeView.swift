@@ -156,8 +156,15 @@ public enum SettingsSearchIndex {
 public enum SettingsPresentation: Hashable, Sendable { case stack, split }
 
 public enum SettingsPresentationPolicy {
-    public static func presentation(horizontalSizeClass: UserInterfaceSizeClass?) -> SettingsPresentation {
-        horizontalSizeClass == .regular ? .split : .stack
+    public static func presentation(
+        horizontalSizeClass: UserInterfaceSizeClass?,
+        availableWidth: CGFloat? = nil,
+        availableHeight: CGFloat? = nil
+    ) -> SettingsPresentation {
+        guard horizontalSizeClass == .regular else { return .stack }
+        guard let availableWidth else { return .split }
+        let usableSpan = min(availableWidth, availableHeight ?? availableWidth)
+        return usableSpan >= 720 ? .split : .stack
     }
 }
 

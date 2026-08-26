@@ -35,8 +35,19 @@
         }
 
         @MainActor
-        func makeModel(terminal: (any TerminalBackend)? = nil, settings: OpenPawSettings) -> OpenPawModel {
-            if self == .quickPairing { return makeQuickPairingModel(settings: settings) }
+        func makeModel(
+            terminal: (any TerminalBackend)? = nil,
+            settings: OpenPawSettings,
+            dictationModels: any DictationModelInstalling = UnavailableDictationModelStore(),
+            dictationEngineFactory: (any DictationEngineMaking)? = nil
+        ) -> OpenPawModel {
+            if self == .quickPairing {
+                return makeQuickPairingModel(
+                    settings: settings,
+                    dictationModels: dictationModels,
+                    dictationEngineFactory: dictationEngineFactory
+                )
+            }
             let backend = PreviewBackend(previewScenario)
             let host = HostRecord(
                 id: Self.hostID,
@@ -73,6 +84,8 @@
                 hostStore: HostStore(hosts: hosts),
                 backend: backend,
                 terminal: modelTerminal,
+                dictationModels: dictationModels,
+                dictationEngineFactory: dictationEngineFactory,
                 tailscaleRouteHintSource: DebugTailscaleRoutePathSource(),
                 tailscaleAdminConnector: DebugTailscaleAdminConnector(),
                 connectionPreflightRunner: DebugConnectionPreflightRunner(),
@@ -123,7 +136,11 @@
         }
 
         @MainActor
-        private func makeQuickPairingModel(settings: OpenPawSettings) -> OpenPawModel {
+        private func makeQuickPairingModel(
+            settings: OpenPawSettings,
+            dictationModels: any DictationModelInstalling,
+            dictationEngineFactory: (any DictationEngineMaking)?
+        ) -> OpenPawModel {
             let credentialReference = try? KeychainReference(identifier: "quick-pairing-existing-key")
             let auth = credentialReference.map { AuthMethod.privateKey(reference: $0, passphraseRef: nil) }
                 ?? .agentForwarding
@@ -149,6 +166,8 @@
                 hostStore: HostStore(hosts: [savedHost]),
                 backend: backend,
                 terminal: DebugQuickPairingTerminalBackend(),
+                dictationModels: dictationModels,
+                dictationEngineFactory: dictationEngineFactory,
                 tailscaleRouteHintSource: DebugTailscaleRoutePathSource(),
                 tailscaleAdminConnector: DebugQuickPairingCandidateSource(),
                 settings: settings)

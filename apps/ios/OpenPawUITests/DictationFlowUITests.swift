@@ -2,10 +2,8 @@ import XCTest
 
 /// Drives dictation the way a user does: open the terminal, tap the microphone, and check the app reacts.
 ///
-/// The simulator's audio input is the host Mac's microphone, so this exercises the real `AVAudioEngine` and
-/// `SFSpeechRecognizer` path rather than a substitute. What the recogniser *hears* depends on whether anyone is
-/// speaking, so the assertions are about the app's own behaviour — the control arms, the draft row opens for input,
-/// and stopping puts it back — which is exactly the part that would break without anyone noticing.
+/// The simulator cannot run the local speech models, so this exercises the app's visible refusal path rather than
+/// falling back to Apple's recogniser. What the model hears is covered by the physical-device accuracy test.
 final class DictationFlowUITests: XCTestCase {
 
     /// Swipes the bottom strip to the page a control is on and returns it.
@@ -14,15 +12,85 @@ final class DictationFlowUITests: XCTestCase {
     /// for a button by name would fail for a reason that has nothing to do with what it is testing.
     private func control(_ label: String, in app: XCUIApplication) -> XCUIElement {
         let button = app.buttons[label]
-        guard !button.exists else { return button }
+        if button.exists && button.isHittable { return button }
         let deck = app.otherElements["root.control-deck"]
         let strip = deck.exists ? deck : app.windows.firstMatch
         for _ in 0..<ControlDeckPages {
-            guard !button.exists else { return button }
+            if button.exists && button.isHittable { return button }
             strip.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.94))
                 .press(forDuration: 0.05, thenDragTo: strip.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.94)))
         }
         return button
+    }
+
+    private func dismissAlertIfPresent(_ app: XCUIApplication) {
+        let dismiss = app.buttons["Dismiss"].firstMatch
+        if dismiss.exists && dismiss.isHittable { dismiss.tap() }
+    }
+
+    private let rootDestinations = ["Home", "Terminal", "Sessions", "Inbox", "Repo", "Settings"]
+
+    private func pager(in app: XCUIApplication) -> XCUIElement {
+        app.otherElements["root.destination.pager"]
+    }
+
+    private func currentRootDestination(in app: XCUIApplication) -> String {
+        let value = (pager(in: app).value as? String) ?? ""
+        if let title = rootDestinations.first(where: { value.localizedCaseInsensitiveContains($0) }) {
+            return title
+        }
+        let visibleButton = [
+            ("Home", "root.destination.home"),
+            ("Terminal", "root.destination.terminal"),
+            ("Sessions", "root.destination.sessions"),
+            ("Inbox", "root.destination.inbox"),
+            ("Repo", "root.destination.repo"),
+            ("Settings", "root.destination.settings"),
+        ].first { app.buttons[$0.1].firstMatch.exists }
+        return visibleButton?.0 ?? "Home"
+    }
+
+    private func assertCurrentRootDestination(
+        _ title: String,
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let pager = pager(in: app)
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", title), object: pager)
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [expectation], timeout: 5),
+            .completed,
+            "expected root destination \(title), got \(String(describing: pager.value))",
+            file: file,
+            line: line
+        )
+    }
+
+    private func navigate(to destination: String, in app: XCUIApplication) {
+        dismissAlertIfPresent(app)
+        XCTAssertTrue(pager(in: app).waitForExistence(timeout: 15), "the root paging accessibility surface never appeared")
+        guard let targetIndex = rootDestinations.firstIndex(of: destination) else {
+            return XCTFail("unknown root destination \(destination)")
+        }
+
+        for _ in 0..<rootDestinations.count {
+            let current = currentRootDestination(in: app)
+            if current == destination { return }
+            let currentIndex = rootDestinations.firstIndex(of: current) ?? 0
+            let step = targetIndex >= currentIndex ? 1 : -1
+            let buttonIdentifier = step == 1 ? "root.destination.next" : "root.destination.previous"
+            let button = app.buttons[buttonIdentifier].firstMatch
+            XCTAssertTrue(button.waitForExistence(timeout: 5), "missing \(buttonIdentifier) while navigating to \(destination)")
+            XCTAssertTrue(button.isEnabled, "\(buttonIdentifier) disabled while navigating to \(destination)")
+            button.tap()
+            dismissAlertIfPresent(app)
+        }
+        assertCurrentRootDestination(destination, in: app)
+    }
+
+    private func goToTerminal(_ app: XCUIApplication) {
+        navigate(to: "Terminal", in: app)
     }
 
     /// How many pages the strip has, and so how many swipes can be needed to reach one.
@@ -45,9 +113,7 @@ final class DictationFlowUITests: XCTestCase {
     /// the same thing as no dictation at all, so both are asserted.
     func testTheMicrophoneControlIsAvailableInTheTerminal() throws {
         let app = launchedApp()
-        let next = app.buttons["root.destination.next"]
-        XCTAssertTrue(next.waitForExistence(timeout: 15), "the Terminal navigation entry never appeared")
-        next.tap()
+        goToTerminal(app)
 
         // On the strip's view page rather than always on screen: holding anywhere is the everyday route to
         // speech, so a permanent microphone icon was spending width on a job a gesture already does. It still has
@@ -69,8 +135,7 @@ final class DictationFlowUITests: XCTestCase {
     /// Both are checked here by name, because either one reappearing silently takes the gesture back.
     func testHoldingTheTerminalDoesNotRaiseAMenuInsteadOfDictating() throws {
         let app = launchedApp()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
-        app.buttons["Terminal"].tap()
+        goToTerminal(app)
 
         let terminal = app.textViews.firstMatch
         XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface to hold")
@@ -89,6 +154,14 @@ final class DictationFlowUITests: XCTestCase {
             "holding the terminal raised the output menu instead of starting dictation"
         )
 
+        let unavailable = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'dictation unavailable'")).firstMatch
+        XCTAssertTrue(
+            unavailable.waitForExistence(timeout: 5),
+            "holding with no local model did not show unavailable/download guidance. On screen:\n\(app.debugDescription)"
+        )
+        let dismiss = app.buttons["Dismiss"].firstMatch
+        if dismiss.exists { dismiss.tap() }
+
         // What replaced it: copying is still reachable, from the strip's view page rather than from a hold.
         XCTAssertTrue(
             control("Copy all output", in: app).waitForExistence(timeout: 5),
@@ -103,15 +176,9 @@ final class DictationFlowUITests: XCTestCase {
     /// near the cursor, so an ordinary tap-to-focus produced a menu nobody asked for, on top of the ring.
     func testTappingNearTheCursorDoesNotRaiseAnEditMenu() throws {
         let app = launchedApp()
-        // Connected on purpose. A disconnected terminal has no cursor and no text, so every path to this menu is
-        // unreachable and the test would pass while the defect is fully intact — which it did, twice.
-        let connect = app.buttons["Connect to home"]
-        XCTAssertTrue(connect.waitForExistence(timeout: 15), "no host to connect to")
-        connect.tap()
-        let trust = app.buttons["Trust this host key and continue connecting"]
-        if trust.waitForExistence(timeout: 10) { trust.tap() }
-        XCTAssertTrue(app.buttons["Resume home"].waitForExistence(timeout: 30), "never connected")
-        app.buttons["Terminal"].tap()
+        // `connectedWorkspace` is already the authenticated public workspace. Reconnecting it here races the
+        // deterministic discovery alert and turns a cursor regression into a host-lifecycle test.
+        goToTerminal(app)
 
         let terminal = app.textViews.firstMatch
         XCTAssertTrue(terminal.waitForExistence(timeout: 10), "no terminal surface to tap")
@@ -134,74 +201,37 @@ final class DictationFlowUITests: XCTestCase {
         }
     }
 
-    /// Tapping the microphone has to actually arm dictation. The label flipping to "Stop dictation" is the app's own
-    /// claim that the audio graph is live; without it the user is talking to a control that did nothing.
-    func testTappingTheMicrophoneStartsAndStopsDictation() throws {
+    /// Tapping the microphone with no local model available must explain what to do, not silently do nothing and not
+    /// arm Apple Speech as a simulator fallback.
+    func testTappingTheMicrophoneShowsDownloadGuidanceWhenNoLocalModelCanRun() throws {
         let app = launchedApp()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
-        app.buttons["Terminal"].tap()
+        goToTerminal(app)
 
         let mic = control("Dictate into a terminal draft", in: app)
         XCTAssertTrue(mic.waitForExistence(timeout: 10), "no dictation control on the strip")
         mic.tap()
 
-        // The microphone permission dialog appears on a machine that has not answered it yet. Allowing it is part of
-        // the flow a first-time user goes through.
-        let allow = app.alerts.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'Allow' OR label CONTAINS[c] 'OK'")).firstMatch
-        if allow.waitForExistence(timeout: 5) { allow.tap() }
-
-        let stop = app.buttons["Stop dictation"]
+        let guidance = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'dictation unavailable'")).firstMatch
         XCTAssertTrue(
-            stop.waitForExistence(timeout: 15),
-            "the control never armed, so nothing is listening. On screen:\n\(app.debugDescription)"
+            guidance.waitForExistence(timeout: 10),
+            "tapping dictation without a local engine did not show unavailable/download guidance. On screen:\n\(app.debugDescription)"
         )
-
-        stop.tap()
-        XCTAssertTrue(
-            app.buttons["Dictate into a terminal draft"].waitForExistence(timeout: 15),
-            "dictation never stopped, so the microphone would stay live after the user asked it not to"
-        )
+        XCTAssertFalse(app.buttons["Stop dictation"].exists, "the app armed a recogniser even though no local model can run")
     }
 
-    /// The dictated words land in an editable draft that is only sent on an explicit tap. That is the product's
-    /// safety property: speech never runs a command by itself.
-    func testTheDraftIsEditableAndExecutedOnlyOnDemand() throws {
+    /// The missing-model path must not open an empty draft row that looks like listening.
+    func testUnavailableDictationDoesNotOpenASilentDraft() throws {
         let app = launchedApp()
-        XCTAssertTrue(app.buttons["Terminal"].waitForExistence(timeout: 15), "the Terminal tab never appeared")
-        app.buttons["Terminal"].tap()
+        goToTerminal(app)
 
-        // The draft strip only exists while there is something to draft, so dictation has to be armed first. That is
-        // the design: no speech in progress and nothing dictated means no half-open command sitting on screen.
         let mic = control("Dictate into a terminal draft", in: app)
         XCTAssertTrue(mic.waitForExistence(timeout: 10), "no dictation control on the strip")
         mic.tap()
-        let allow = app.alerts.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'Allow' OR label CONTAINS[c] 'OK'")).firstMatch
-        if allow.waitForExistence(timeout: 5) { allow.tap() }
 
         let draft = app.textFields["Speak, then execute"]
-        XCTAssertTrue(
-            draft.waitForExistence(timeout: 15),
-            "dictation is armed but there is no draft to speak into. On screen:\n\(app.debugDescription)"
-        )
-        // Typing is refused while the recogniser is running, so the keyboard and the transcript cannot fight over
-        // the same field. The draft becomes editable once speech stops, which is when a user corrects what was heard.
-        XCTAssertFalse(draft.isEnabled, "the draft accepts typing mid-utterance, which races the transcript")
-
-        // Execute stays refused for as long as there is nothing to run, so a stray tap on a silent draft cannot
-        // send an empty command to the host.
-        let execute = app.buttons["Execute"]
-        XCTAssertTrue(execute.exists, "there is no way to send a dictated draft")
-        XCTAssertFalse(execute.isEnabled, "an empty draft can be executed, which would send nothing to the host")
-
-        app.buttons["Stop dictation"].tap()
-        XCTAssertTrue(
-            app.buttons["Dictate into a terminal draft"].waitForExistence(timeout: 15),
-            "dictation never stopped"
-        )
-        // Nothing was said, so nothing is drafted and the strip retires rather than leaving an empty row on screen.
         XCTAssertFalse(
             draft.exists,
-            "an empty draft strip stayed on screen after dictation ended"
+            "unavailable dictation opened an empty draft strip instead of showing guidance"
         )
     }
 }

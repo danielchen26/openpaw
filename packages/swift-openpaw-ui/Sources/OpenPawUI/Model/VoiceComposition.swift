@@ -44,6 +44,16 @@ public enum VoicePrivacyDisclosure {
     public static let localModel = "Speech is transcribed by a model stored on this device, inside this app. Audio never leaves the phone, and the only network access is the one-time model download."
 }
 
+public struct DictationUnavailableError: LocalizedError, Sendable, Equatable {
+    public let message: String
+
+    public init(_ message: String) {
+        self.message = message
+    }
+
+    public var errorDescription: String? { message }
+}
+
 public enum VoiceTerminalActionController {
     public static func execute(
         composition: inout VoiceComposition,

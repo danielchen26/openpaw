@@ -28,7 +28,7 @@
     }
 
     func testConnectedWorkspaceSeedsOneSSHHostAndCoherentWorkspaceState() {
-        let model = DebugScenario.connectedWorkspace.makeModel(settings: isolatedSettings("connected"))
+        let model = scenarioModel(.connectedWorkspace, settingsName: "connected")
 
         XCTAssertEqual(model.hostStore.hosts.map(\.nickname), ["Scenario host"])
         XCTAssertEqual(model.selectedHostID, model.hostStore.hosts.first?.id)
@@ -41,7 +41,7 @@
     }
 
     func testFailureScenarioUsesTypedDisconnectedState() {
-        let model = DebugScenario.connectionFailures.makeModel(settings: isolatedSettings("failure"))
+        let model = scenarioModel(.connectionFailures, settingsName: "failure")
 
         guard case .disconnected(let reason) = model.connection else {
             return XCTFail("expected a disconnected fixture")
@@ -51,7 +51,7 @@
     }
 
     func testNoHostsScenarioContainsNoSavedOrSelectedHost() {
-        let model = DebugScenario.noHosts.makeModel(settings: isolatedSettings("no-hosts"))
+        let model = scenarioModel(.noHosts, settingsName: "no-hosts")
 
         XCTAssertTrue(model.hostStore.hosts.isEmpty)
         XCTAssertNil(model.selectedHostID)
@@ -59,7 +59,7 @@
     }
 
     func testHostSwitcherScenarioSelectsWithoutConnectingAndConnectsOnlyOnRequest() async throws {
-        let model = DebugScenario.hostSwitcher.makeModel(settings: isolatedSettings("switcher"))
+        let model = scenarioModel(.hostSwitcher, settingsName: "switcher")
         let second = try XCTUnwrap(model.hostStore.hosts.last)
 
         XCTAssertEqual(model.hostStore.hosts.map(\.nickname), ["Scenario host", "Build server"])
@@ -77,7 +77,7 @@
         let settings = isolatedSettings("shared-settings")
         settings.eventBudgetPerSession = 321
 
-        let model = DebugScenario.connectedWorkspace.makeModel(settings: settings)
+        let model = scenarioModel(.connectedWorkspace, settings: settings)
 
         XCTAssertEqual(model.eventBudgetPerSession, 321)
         model.eventBudgetPerSession = 654
@@ -89,6 +89,24 @@
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
         return OpenPawSettings(defaults: defaults)
+    }
+
+    private func scenarioModel(
+        _ scenario: DebugScenario,
+        settingsName: String
+    ) -> OpenPawModel {
+        scenarioModel(scenario, settings: isolatedSettings(settingsName))
+    }
+
+    private func scenarioModel(
+        _ scenario: DebugScenario,
+        settings: OpenPawSettings
+    ) -> OpenPawModel {
+        scenario.makeModel(
+            settings: settings,
+            dictationModels: UnavailableDictationModelStore(),
+            dictationEngineFactory: nil
+        )
     }
     }
 #endif

@@ -54,6 +54,7 @@ public final class PushToTalkController {
     private var mode: DictationMode = .composer
     private var listenTask: Task<Void, Never>?
     private var transcription: DictationTranscription?
+    private var unavailableMessage = "Dictation unavailable. Download a local recogniser in Settings before using voice input."
     private var transcriptionGeneration = 0
     private var armTask: Task<Void, Never>?
     /// The wait for a non-streaming model's answer after the microphone closed.
@@ -62,10 +63,16 @@ public final class PushToTalkController {
 
     public init() {}
 
-    public func configure(engine: (any DictationEngine)?, locale: Locale, mode: DictationMode) {
+    public func configure(
+        engine: (any DictationEngine)?,
+        locale: Locale,
+        mode: DictationMode,
+        unavailableMessage: String? = nil
+    ) {
         self.engine = engine
         self.locale = locale
         self.mode = mode
+        if let unavailableMessage { self.unavailableMessage = unavailableMessage }
     }
 
     public var ring: TouchRingPresentation? { TouchRingPresentation(state) }
@@ -73,10 +80,6 @@ public final class PushToTalkController {
     /// A finger went down. The ring appears immediately, before the hold has armed, so the press is visibly
     /// acknowledged rather than seeming to do nothing for a third of a second.
     public func touchBegan(at point: CGPoint) {
-        guard engine?.isAvailable == true else {
-            isUnavailable = true
-            return
-        }
         isUnavailable = false
         state.touchBegan(at: point)
     }
@@ -84,7 +87,13 @@ public final class PushToTalkController {
     /// The hold threshold elapsed. Recognition starts here, not on touch down: starting on every tap would open
     /// the microphone dozens of times a minute and make the first word of a real utterance arrive late.
     public func arm() {
-        guard state.holdElapsed(at: clock.now), let engine else { return }
+        guard state.holdElapsed(at: clock.now) else { return }
+        guard let engine, engine.isAvailable else {
+            isUnavailable = true
+            state.cancel()
+            onFailure?(DictationUnavailableError(unavailableMessage))
+            return
+        }
         // A new hold supersedes a pending finalize: the previous sentence had its chance, and leaving that task to
         // fire later would drop stale words into the draft the user is speaking into now.
         finalizeTask?.cancel()

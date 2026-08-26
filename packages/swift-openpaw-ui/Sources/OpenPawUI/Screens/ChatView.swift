@@ -397,8 +397,9 @@ public struct ChatView: View {
             }
 
             ComposerView(
-                engine: model.dictation,
+                engine: model.selectedDictationEngine(for: settings),
                 settings: settings,
+                unavailableMessage: model.dictationUnavailableMessage(for: settings),
                 supportsAgentAttachments: model.canSendAgentAttachments()
             ) { action, attachments in
                 await model.commitVoice(action, attachments: attachments)
