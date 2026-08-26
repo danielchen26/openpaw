@@ -50,6 +50,7 @@
 		1A2B3C00000000000000CB01 /* SessionCreationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000CB02 /* SessionCreationUITests.swift */; };
 		1A2B3C0000000000000000B0 /* ConnectFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */; };
 		1A2B3C00000000000000F000 /* SymbolsNerdFontMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F001 /* SymbolsNerdFontMono-Regular.ttf */; };
+		1A2B3C00000000000000FA00 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000FA01 /* Assets.xcassets */; };
 		1A2B3C00000000000000F101 /* DebugScenario.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F100 /* DebugScenario.swift */; };
 		1A2B3C00000000000000F103 /* DebugScenarioTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F102 /* DebugScenarioTests.swift */; };
 		1A2B3C00000000000000F105 /* ScenarioLaunchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F104 /* ScenarioLaunchUITests.swift */; };
@@ -116,6 +117,7 @@
 		1A2B3C00000000000000CB02 /* SessionCreationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCreationUITests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000B1 /* ConnectFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectFlowUITests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F001 /* SymbolsNerdFontMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "SymbolsNerdFontMono-Regular.ttf"; path = "Resources/Fonts/SymbolsNerdFontMono-Regular.ttf"; sourceTree = "<group>"; };
+		1A2B3C00000000000000FA01 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		1A2B3C00000000000000F100 /* DebugScenario.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugScenario.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F102 /* DebugScenarioTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugScenarioTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F104 /* ScenarioLaunchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScenarioLaunchUITests.swift; sourceTree = "<group>"; };
@@ -198,6 +200,7 @@
 				1A2B3C00000000000000F112 /* TailscaleAdminConnector.swift */,
 				1A2B3C000000000000000029 /* Info.plist */,
 				1A2B3C00000000000000F001 /* SymbolsNerdFontMono-Regular.ttf */,
+				1A2B3C00000000000000FA01 /* Assets.xcassets */,
 			);
 			path = OpenPawApp;
 			sourceTree = "<group>";
@@ -366,6 +369,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A2B3C00000000000000F000 /* SymbolsNerdFontMono-Regular.ttf in Resources */,
+				1A2B3C00000000000000FA00 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -443,6 +447,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_ENABLE_MODULES = YES;
@@ -486,6 +491,7 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
 				CLANG_ENABLE_MODULES = YES;
