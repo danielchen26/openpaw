@@ -20,7 +20,7 @@
 - Freeze graph and proposal ordering for the lifetime of one gesture.
 - After every asynchronous boundary, recheck host ID, connection generation, graph snapshot ID and target Session/Tab.
 
-### Task 1: Make high-accuracy voice recognition the truthful automatic policy
+### Task 1: Remove Apple Speech and default voice input to Qwen3 0.6B
 
 **Files:**
 - Modify: `packages/swift-openpaw-ui/Sources/OpenPawUI/Models/DictationEngineChoice.swift`
@@ -29,116 +29,75 @@
 - Modify: `apps/ios/OpenPawApp/LocalASRModelStore.swift`
 - Modify: `apps/ios/OpenPawApp/OpenPawApp.swift`
 - Modify: `packages/swift-openpaw-ui/Tests/OpenPawUITests/DictationEngineChoiceTests.swift`
+- Modify: `apps/ios/OpenPawAppTests/LocalDictationAccuracyTests.swift`
 - Modify: `apps/ios/OpenPawUITests/DictationEngineSettingsUITests.swift`
+- Modify: `apps/ios/OpenPawUITests/DictationFlowUITests.swift`
 
-**Step 1: Write failing policy tests**
+**Step 1: Write failing no-Apple policy tests**
 
-Add tests for an explicit selection and an automatic high-accuracy preference:
+Add tests proving the concrete product contract:
 
 ```swift
-@Test func automaticVoicePrefersTheMostAccurateInstalledChineseModel() {
-    #expect(
-        DictationEnginePolicy.resolve(
-            preference: .automaticHighAccuracy,
-            localeID: "zh-CN",
-            installed: [.qwen3Small, .qwen3Large]
-        ).choice == .qwen3Large
-    )
+@Test func aFreshInstallDefaultsToQwenSmall() {
+    let defaults = UserDefaults(suiteName: #function)!
+    defaults.removePersistentDomain(forName: #function)
+    let settings = OpenPawSettings(defaults: defaults)
+    #expect(settings.dictationEngine == .qwen3Small)
 }
 
-@Test func automaticVoiceFallsBackToInstalledQwenSmallBeforeApple() {
-    #expect(
-        DictationEnginePolicy.resolve(
-            preference: .automaticHighAccuracy,
-            localeID: "zh-CN",
-            installed: [.qwen3Small]
-        ).choice == .qwen3Small
-    )
+@Test func aStoredAppleChoiceMigratesToQwenSmall() {
+    let defaults = UserDefaults(suiteName: #function)!
+    defaults.set("apple", forKey: "openpaw.settings.dictationEngine")
+    let settings = OpenPawSettings(defaults: defaults)
+    #expect(settings.dictationEngine == .qwen3Small)
 }
 
-@Test func automaticVoiceNamesAppleAsAFallbackWhenNoLocalModelIsReady() {
-    let result = DictationEnginePolicy.resolve(
-        preference: .automaticHighAccuracy,
-        localeID: "zh-CN",
-        installed: []
-    )
-    #expect(result.choice == .appleSpeech)
-    #expect(result.fallbackReason != nil)
-}
-
-@Test func anExplicitAppleChoiceIsNeverOverridden() {
-    let result = DictationEnginePolicy.resolve(
-        preference: .specific(.appleSpeech),
-        localeID: "zh-CN",
-        installed: [.qwen3Large]
-    )
-    #expect(result.choice == .appleSpeech)
-    #expect(result.fallbackReason == nil)
+@Test func settingsNeverOfferAppleSpeech() {
+    for locale in ["zh-CN", "en-US"] {
+        #expect(!DictationEngineChoice.choices(forLocale: locale).contains(.appleSpeech))
+    }
 }
 ```
 
-**Step 2: Run the focused tests and verify failure**
+Add app-target tests proving `LocalASREngineFactory.engine(for: .appleSpeech)` returns `nil`, Qwen 0.6B is returned only when installed, and an absent model produces an actionable unavailable state rather than Apple recognition.
 
-Run:
+**Step 2: Run the focused tests and verify failure**
 
 ```bash
 cd packages/swift-openpaw-ui
 swift test --filter DictationEngineChoiceTests
 ```
 
-Expected: FAIL because `DictationEnginePolicy` and automatic preference do not exist.
+Expected: FAIL because fresh settings and stored Apple currently resolve to Apple Speech.
 
-**Step 3: Add the minimal policy model**
+**Step 3: Make Qwen3 0.6B the only default**
 
-Add sendable values alongside `DictationEngineChoice`:
+In `OpenPawSettings`, map a missing key, an unknown value and the legacy `apple` value to `.qwen3Small`. Keep `.qwen3Large` and `.parakeet` only when explicitly stored and valid for the selected language.
+
+In `DictationEngineChoice.choices(forLocale:)`, omit `.appleSpeech` from all user-visible choices. Keep the legacy case only for backward decoding until a later schema cleanup.
+
+**Step 4: Remove every runtime Apple fallback**
+
+Change `LocalASREngineFactory` so it no longer stores or constructs a `SpeechDictation` instance. Its legacy `.appleSpeech` branch returns `nil`. In `OpenPawApp`, remove `let appleSpeech = SpeechDictation()`, pass `dictation: nil`, and construct `LocalASREngineFactory(store:)` without an Apple dependency.
+
+The effective behavior must be:
 
 ```swift
-public enum DictationEnginePreference: Sendable, Hashable, Codable {
-    case automaticHighAccuracy
-    case specific(DictationEngineChoice)
-}
-
-public struct DictationEngineResolution: Sendable, Hashable {
-    public var choice: DictationEngineChoice
-    public var fallbackReason: String?
-}
-
-public enum DictationEnginePolicy {
-    public static func resolve(
-        preference: DictationEnginePreference,
-        localeID: String,
-        installed: Set<DictationEngineChoice>
-    ) -> DictationEngineResolution {
-        if case .specific(let choice) = preference {
-            return .init(
-                choice: DictationEngineChoice.resolve(choice, forLocale: localeID),
-                fallbackReason: nil
-            )
-        }
-        for choice in [DictationEngineChoice.qwen3Large, .qwen3Small] {
-            if installed.contains(choice), DictationEngineChoice.choices(forLocale: localeID).contains(choice) {
-                return .init(choice: choice, fallbackReason: nil)
-            }
-        }
-        return .init(
-            choice: .appleSpeech,
-            fallbackReason: "No high-accuracy Qwen model is ready on this device."
-        )
-    }
+switch selectedChoice {
+case .qwen3Small, .qwen3Large, .parakeet:
+    return modelIsInstalledAndSupported ? localEngine : nil
+case .appleSpeech:
+    return nil
 }
 ```
 
-Persist `automaticHighAccuracy` separately from concrete model choices. Migrate the absence of the old key to automatic mode, while preserving every existing stored concrete choice as explicit. Expose installed choices from `LocalASRModelStore` and inject them into the effective-resolution path used by `OpenPawApp` and Settings.
+Do not add a simulator exception that selects Apple. Simulator dictation must truthfully report that local speech models require a physical device.
 
-Do not start a model download automatically. Selecting or downloading Qwen remains an explicit user action.
+**Step 5: Make missing-model UI actionable**
 
-**Step 4: Make Settings display the effective recognizer and fallback reason**
+Settings must identify Qwen3 0.6B as the default high-accuracy recognizer and expose its 450 MB download action. Label Qwen3 1.7B as `Maximum accuracy` with its 1.9 GB cost. If the selected model is absent, hold-to-talk and the dictation button must show a direct `Download in Settings` explanation instead of listening silently.
 
-Show `Automatic, high accuracy` as the default preference. Under it, name the current effective engine. If Apple is the fallback, show the reason and `Download Qwen3 1.7B` and `Download Qwen3 0.6B` actions. Preserve the existing state-specific progress, failure and unsupported copy.
-
-**Step 5: Run package and UI tests**
-
-Run:
+**Step 6: Run package, app and UI tests**
 
 ```bash
 cd packages/swift-openpaw-ui
@@ -148,12 +107,15 @@ xcodebuild test -project apps/ios/OpenPaw.xcodeproj -scheme OpenPaw \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
   -derivedDataPath "$JCODE_SCRATCH_DIR/openpaw-radial-voice" \
   -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO \
-  -only-testing:OpenPawUITests/DictationEngineSettingsUITests
+  -only-testing:OpenPawUITests/DictationEngineSettingsUITests \
+  -only-testing:OpenPawUITests/DictationFlowUITests
 ```
 
-Expected: policy tests pass; Settings exposes truthful automatic and fallback labels.
+Expected: Apple is absent from Settings and runtime wiring; missing local weights produce an explicit unavailable/download path.
 
-**Step 6: Commit**
+On a physical iPhone with Qwen3 0.6B already downloaded, run `OpenPawAppTests/LocalDictationAccuracyTests` and require the existing bilingual command corpus to remain below the 15 percent CER threshold through the app wrapper.
+
+**Step 7: Commit**
 
 ```bash
 git add packages/swift-openpaw-ui/Sources/OpenPawUI/Models/DictationEngineChoice.swift \
@@ -162,8 +124,10 @@ git add packages/swift-openpaw-ui/Sources/OpenPawUI/Models/DictationEngineChoice
   apps/ios/OpenPawApp/LocalASRModelStore.swift \
   apps/ios/OpenPawApp/OpenPawApp.swift \
   packages/swift-openpaw-ui/Tests/OpenPawUITests/DictationEngineChoiceTests.swift \
-  apps/ios/OpenPawUITests/DictationEngineSettingsUITests.swift
-git commit -m "Prefer high accuracy dictation models"
+  apps/ios/OpenPawAppTests/LocalDictationAccuracyTests.swift \
+  apps/ios/OpenPawUITests/DictationEngineSettingsUITests.swift \
+  apps/ios/OpenPawUITests/DictationFlowUITests.swift
+git commit -m "Require high accuracy local dictation"
 ```
 
 ### Task 2: Preserve Herdr workspace and tab metadata
@@ -791,10 +755,10 @@ Observe and record:
 - second gesture sends one safe action to the selected Herdr pane;
 - destructive command arrives without Return;
 - full-screen hold-to-talk outside the Orb still transcribes;
-- Settings identifies Qwen3 1.7B, Qwen3 0.6B or an explicit Apple fallback truthfully;
+- Settings identifies Qwen3 0.6B as the default or Qwen3 1.7B as an explicit maximum-accuracy choice, and never exposes or runs Apple Speech;
 - app remains responsive during Agent event refresh.
 
-If the 1.7B model is not installed, do not download it automatically. Validate the fallback presentation and, if the user elects to download, rerun the real speech path afterward.
+If the selected Qwen model is not installed, do not download it automatically and do not substitute Apple. Validate the unavailable/download presentation and, if the user elects to download, rerun the real speech path afterward.
 
 **Step 4: Iterate until acceptance behavior is observed**
 

@@ -149,15 +149,16 @@ The normal page swipe remains available. VoiceOver receives an equivalent hierar
 
 “VoiceOver” and voice input are separate features. iOS VoiceOver remains the system screen reader. OpenPaw hold-to-talk and dictation use a speech-to-text recognizer.
 
-The current source defaults to Apple Speech. Repository accuracy evidence says Apple averages roughly 22 percent character error across the bilingual benchmark and corrupts important English command names inside Chinese sentences. Qwen3-ASR 0.6B averages roughly 2 percent, while Qwen3-ASR 1.7B is the highest-accuracy supported option.
+The current source defaults to Apple Speech, but that path is not acceptable for OpenPaw voice input. Repository accuracy evidence says Apple averages roughly 22 percent character error across the bilingual benchmark and corrupts important English command names inside Chinese sentences. Qwen3-ASR 0.6B averages roughly 2 percent and is the model already covered by the app's physical-device accuracy acceptance. Qwen3-ASR 1.7B is larger and potentially more accurate, but costs about 1.9 GB and requires substantially more memory.
 
-The product policy is therefore:
+The approved product policy is therefore:
 
-1. Prefer Qwen3-ASR 1.7B when it is installed and supported.
-2. Otherwise prefer installed Qwen3-ASR 0.6B.
-3. Use Apple Speech only as a clearly labelled fallback when no high-accuracy local model is ready or the user explicitly selected Apple.
-4. Never silently download 1.9 GB or override an explicit recognizer choice.
-5. Show the effective recognizer and fallback reason on the Settings screen and in voice failure presentation.
+1. Default every new and migrated installation to Qwen3-ASR 0.6B.
+2. Offer Qwen3-ASR 1.7B as an explicit “Maximum accuracy” option for recent high-memory devices.
+3. Never use Apple Speech for OpenPaw voice input, including as a runtime fallback, simulator fallback or migration fallback.
+4. If the selected Qwen model is absent or unsupported, voice input is unavailable and shows an actionable download or device-support explanation.
+5. Never silently download model weights or silently substitute a different recognizer.
+6. Keep any legacy Apple enum value only long enough to decode old settings, then migrate it to Qwen3 0.6B. It must not be exposed by Settings or returned by the runtime engine factory.
 
 The radial launcher's VoiceOver accessibility path does not use these ASR models. Spoken accessibility labels remain owned by iOS.
 
