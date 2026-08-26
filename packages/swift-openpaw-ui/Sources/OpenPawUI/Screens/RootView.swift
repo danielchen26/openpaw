@@ -735,6 +735,9 @@ public struct RootView: View {
                 model.dictatedText = text
             }
         }
+        pushToTalk.onFailure = { [weak model] error in
+            model?.present(error, while: "listening for dictation")
+        }
     }
 
     // MARK: Compact

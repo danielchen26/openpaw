@@ -330,6 +330,20 @@ struct VoiceCompositionTests {
     @MainActor @Test func settingsAndComposerShareLocaleChoices() {
         #expect(DictationDraft.localeChoices(deviceLocale: "fr_FR") == VoiceLocaleChoices.choices(deviceLocale: "fr_FR"))
         #expect(OpenPawSettings.dictationLocaleChoices(deviceLocale: "en_US") == ["en-US", "zh-CN"])
+        #expect(VoiceLocaleChoices.normalize("zh_Hans_CN") == "zh-CN")
+        #expect(OpenPawSettings.dictationLocaleChoices(deviceLocale: "zh-Hans-CN") == ["en-US", "zh-CN"])
+    }
+
+    @MainActor @Test func storedSimplifiedChineseLocaleMigratesToSpeechRecognizerIdentifier() {
+        let suite = "dictation-locale-zh-hans-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("zh_Hans_CN", forKey: "openpaw.settings.dictationLocale")
+
+        let settings = OpenPawSettings(defaults: defaults)
+
+        #expect(settings.dictationLocaleID == "zh-CN")
+        #expect(settings.dictationLocale.identifier == "zh-CN")
     }
 
     /// The stored value has to be one of the identifiers the picker offers, or SwiftUI finds no matching tag and

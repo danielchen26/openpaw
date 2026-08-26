@@ -30,6 +30,8 @@ public final class PushToTalkController {
 
     /// Set by the screen currently on top. Release delivers the transcript here.
     public var onCommit: ((String) -> Void)?
+    /// Recognition failures must be visible. A silent error looks exactly like a dead microphone.
+    public var onFailure: (((any Error)) -> Void)?
 
     /// Words that were spoken while no screen was listening.
     ///
@@ -109,6 +111,7 @@ public final class PushToTalkController {
                 // Discarding or replacing a turn cancels its consumer. That is a normal lifecycle end.
             } catch {
                 self.transcript = ""
+                self.onFailure?(error)
             }
         }
     }

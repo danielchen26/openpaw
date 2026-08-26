@@ -215,6 +215,23 @@ struct PushToTalkControllerTests {
         #expect(controller.ring == nil, "a ring that cannot listen is a lie about what is happening")
     }
 
+    @Test("recognition failures are surfaced instead of silently dropping speech")
+    func recognitionFailureIsSurfaced() async {
+        let engine = FakeEngine()
+        let controller = PushToTalkController()
+        controller.configure(engine: engine, locale: .current, mode: .terminal)
+        var message: String?
+        controller.onFailure = { message = $0.localizedDescription }
+
+        controller.touchBegan(at: CGPoint(x: 5, y: 5))
+        controller.arm()
+        await engine.fail(TestRecognitionFailure())
+        await until { message != nil }
+
+        #expect(message == "recognition failed")
+        #expect(controller.transcript.isEmpty)
+    }
+
     @Test("backgrounding mid-sentence delivers nothing")
     func cancelNeverCommits() async {
         let engine = FakeEngine()
@@ -414,6 +431,16 @@ private actor FakeEngine: DictationEngine {
         if currentTurn == turn { currentTurn = nil }
     }
 
+    func fail(_ error: any Error) async {
+        for _ in 0..<200 where currentTurn == nil {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        guard let turn = currentTurn, let continuation = continuations[turn] else { return }
+        continuation.finish(throwing: error)
+        continuations[turn] = nil
+        currentTurn = nil
+    }
+
     private func began(
         turn: UUID,
         mode: DictationMode,
@@ -425,6 +452,10 @@ private actor FakeEngine: DictationEngine {
         continuations[turn] = continuation
         currentTurn = turn
     }
+}
+
+private struct TestRecognitionFailure: LocalizedError {
+    var errorDescription: String? { "recognition failed" }
 }
 
 /// A one-way flag readable without entering the actor, so a test can poll for a hand-off it is waiting on.

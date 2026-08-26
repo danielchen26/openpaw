@@ -248,7 +248,11 @@ public enum VoiceLocaleChoices {
     public static let firstClassLocales = ["en-US", "zh-CN"]
 
     public static func normalize(_ identifier: String) -> String {
-        identifier.replacingOccurrences(of: "_", with: "-")
+        let normalized = identifier.replacingOccurrences(of: "_", with: "-")
+        if normalized.lowercased().hasPrefix("zh-hans") {
+            return "zh-CN"
+        }
+        return normalized
     }
 
     public static func choices(deviceLocale: String, firstClass: [String] = firstClassLocales) -> [String] {
