@@ -371,8 +371,8 @@ struct RootNavigationTests {
     }
 
     @MainActor
-    @Test("Selecting a saved host is a disconnecting transaction, not an implicit connection")
-    func selectingHostClearsEveryHostScopedModelValueBeforeAnExplicitConnect() async throws {
+    @Test("Selecting a saved host can be followed immediately by its owned connection")
+    func selectingHostClearsEveryHostScopedModelValueBeforeConnecting() async throws {
         let model = PreviewBackend.model(.populated)
         let terminal = RecordingTerminalBackend()
         model.attach(backend: model.backend, terminal: terminal)
@@ -409,6 +409,61 @@ struct RootNavigationTests {
 
         await model.connectSelectedHost()
         #expect(terminal.connectedHosts == [second.id])
+    }
+
+    @MainActor
+    @Test("A duplicate connect cannot overlap the model-owned connection operation")
+    func duplicateConnectDoesNotOverlap() async {
+        let host = hostRecord()
+        let gate = SuspendedLifecycleGate()
+        let terminal = RecordingTerminalBackend()
+        terminal.firstConnectGate = gate
+        let model = OpenPawModel(
+            hostStore: HostStore(hosts: [host]),
+            backend: RecordingBackend(),
+            terminal: terminal)
+
+        let first = Task { @MainActor in await model.connectSelectedHost() }
+        await gate.waitUntilStarted()
+
+        #expect(model.isConnectionOperationInProgress)
+        let duplicate = Task { @MainActor in await model.connectSelectedHost() }
+        await Task.yield()
+        #expect(terminal.connectedHosts == [host.id])
+
+        await gate.release()
+        #expect(await first.value == nil)
+        #expect(await duplicate.value != nil)
+        #expect(terminal.connectedHosts == [host.id, host.id])
+        #expect(model.isConnectionOperationInProgress == false)
+    }
+
+    @MainActor
+    @Test("A disconnect queued behind connect owns the final state")
+    func disconnectSupersedesAnInflightConnectWithoutOverlap() async {
+        let host = hostRecord()
+        let gate = SuspendedLifecycleGate()
+        let terminal = RecordingTerminalBackend()
+        terminal.firstConnectGate = gate
+        let model = OpenPawModel(
+            hostStore: HostStore(hosts: [host]),
+            backend: RecordingBackend(),
+            terminal: terminal)
+
+        let staleConnect = Task { @MainActor in await model.connectSelectedHost() }
+        await gate.waitUntilStarted()
+        let disconnect = Task { @MainActor in await model.disconnect() }
+        await Task.yield()
+
+        #expect(model.isConnectionOperationInProgress)
+        #expect(terminal.disconnectCount == 1, "disconnect must wait rather than overlap the suspended connect")
+
+        await gate.release()
+        await disconnect.value
+        #expect(await staleConnect.value == nil)
+        #expect(model.connection == .disconnected(reason: nil))
+        #expect(terminal.activeHostID == nil)
+        #expect(model.isConnectionOperationInProgress == false)
     }
 
     @MainActor

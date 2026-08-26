@@ -53,7 +53,7 @@ final class HostSwitcherUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Add a device"].waitForExistence(timeout: 8))
     }
 
-    func testAHostIsSelectedBeforeAnExplicitConnectionAndConnectedHostsOfferBothActions() {
+    func testSelectingADifferentHostConnectsImmediatelyAndConnectedHostsOfferBothActions() {
         let app = launch("hostSwitcher")
         let switcher = hostSwitcher(in: app)
         waitForValue("disconnected · SSH", of: switcher)
@@ -64,13 +64,6 @@ final class HostSwitcherUITests: XCTestCase {
         buildServer.tap()
 
         XCTAssertEqual(switcher.label, "Build server")
-        waitForValue("disconnected · SSH", of: switcher)
-        XCTAssertFalse(app.buttons["host.switcher.disconnect"].exists)
-
-        switcher.tap()
-        let connect = app.buttons["host.switcher.connect"]
-        XCTAssertTrue(connect.waitForExistence(timeout: 5))
-        connect.tap()
         waitForValue("connected · SSH", of: switcher)
 
         switcher.tap()

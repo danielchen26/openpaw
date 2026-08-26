@@ -58,8 +58,7 @@ public struct HostSwitcherPresentation: Sendable, Hashable {
 
 /// The single host chooser used everywhere the shell exposes connection identity.
 ///
-/// Selection only changes the host. Connect is a second, explicit action. This is both safer and easier to understand
-/// than a menu row that begins dialing as soon as it is highlighted.
+/// Choosing a different saved host tears down the previous route and connects the selected host as one user intent.
 @MainActor
 public struct HostSwitcher: View {
     private let model: OpenPawModel
@@ -113,7 +112,11 @@ public struct HostSwitcher: View {
     private var hostChoices: some View {
         ForEach(model.hostStore.hosts) { host in
             Button {
-                Task { await model.selectHost(host.id) }
+                Task {
+                    guard await model.selectHost(host.id) != nil else { return }
+                    let lease = await model.connectSelectedHost()
+                    if let lease, model.ownsConnection(lease) { onConnected(host.id) }
+                }
             } label: {
                 if host.id == model.selectedHostID {
                     Label(host.nickname, systemImage: "checkmark")
@@ -121,7 +124,7 @@ public struct HostSwitcher: View {
                     Text(host.nickname)
                 }
             }
-            .disabled(model.isSwitchingHost)
+            .disabled(model.isSwitchingHost || model.isConnectionOperationInProgress)
             .accessibilityLabel("Select \(host.nickname)")
             .accessibilityIdentifier("host.switcher.host.\(Self.identifier(host.nickname))")
         }
@@ -132,15 +135,18 @@ public struct HostSwitcher: View {
         switch model.connection {
         case .connected:
             Button("Reconnect") { reconnect() }
+                .disabled(model.isConnectionOperationInProgress)
                 .accessibilityIdentifier("host.switcher.reconnect")
             Button("Disconnect") { disconnect() }
+                .disabled(model.isConnectionOperationInProgress)
                 .accessibilityIdentifier("host.switcher.disconnect")
         case .resolving, .connecting, .authenticating, .reconnecting:
             Button("Cancel connection") { disconnect() }
+                .disabled(model.isConnectionOperationInProgress)
                 .accessibilityIdentifier("host.switcher.disconnect")
         case .idle, .disconnected, .failed:
             Button("Connect") { connect() }
-                .disabled(model.selectedHost == nil || model.isSwitchingHost)
+                .disabled(model.selectedHost == nil || model.isSwitchingHost || model.isConnectionOperationInProgress)
                 .accessibilityIdentifier("host.switcher.connect")
         }
     }
@@ -179,9 +185,8 @@ public struct HostSwitcher: View {
 
     private func reconnect() {
         Task {
-            await model.disconnect()
-            await model.connectSelectedHost()
-            if model.connection.isConnected, let hostID = model.selectedHostID { onConnected(hostID) }
+            let lease = await model.reconnectSelectedHost()
+            if let lease, model.ownsConnection(lease) { onConnected(lease.hostID) }
         }
     }
 

@@ -207,6 +207,9 @@ public final class OpenPawModel {
     /// late A selection cannot disconnect a connection that B established later.
     private var hostSelectionOperation: Task<Void, Never>?
     private var connectionRequestID = 0
+    private var connectionOperationGeneration = 0
+    private var connectionOperation: Task<Void, Never>?
+    public private(set) var isConnectionOperationInProgress = false
 
     private var eventTask: Task<Void, Never>?
     private var stateTask: Task<Void, Never>?
@@ -1302,10 +1305,33 @@ public final class OpenPawModel {
 
     @discardableResult
     public func connectSelectedHost(purpose: HostConnectPurpose = .normal) async -> HostConnectionLease? {
+        connectionOperationGeneration += 1
+        connectionRequestID += 1
+        let operationGeneration = connectionOperationGeneration
+        let requestID = connectionRequestID
+        let previousOperation = connectionOperation
+        var result: HostConnectionLease?
+        isConnectionOperationInProgress = true
+        let operation = Task { @MainActor [weak self] in
+            if let previousOperation { await previousOperation.value }
+            guard let self, self.connectionOperationGeneration == operationGeneration else { return }
+            result = await self.performConnectSelectedHost(purpose: purpose, requestID: requestID)
+        }
+        connectionOperation = operation
+        await operation.value
+        if connectionOperationGeneration == operationGeneration {
+            connectionOperation = nil
+            isConnectionOperationInProgress = false
+        }
+        return result
+    }
+
+    private func performConnectSelectedHost(
+        purpose: HostConnectPurpose,
+        requestID: Int
+    ) async -> HostConnectionLease? {
         guard !isSwitchingHost, let terminal, let host = selectedHost else { return nil }
         let hostSelectionToken = hostSelectionGeneration
-        connectionRequestID += 1
-        let requestID = connectionRequestID
         stopFollowing()
         cancelTailscaleDiscovery()
         let preservesActiveRepoImport = activeRepoImportID != nil && activeRepoImportLease?.hostID == host.id
@@ -1534,8 +1560,51 @@ public final class OpenPawModel {
         }
     }
 
-    public func disconnect() async {
+    @discardableResult
+    public func reconnectSelectedHost(purpose: HostConnectPurpose = .normal) async -> HostConnectionLease? {
+        connectionOperationGeneration += 1
         connectionRequestID += 1
+        let operationGeneration = connectionOperationGeneration
+        let requestID = connectionRequestID
+        let previousOperation = connectionOperation
+        var result: HostConnectionLease?
+        isConnectionOperationInProgress = true
+        let operation = Task { @MainActor [weak self] in
+            if let previousOperation { await previousOperation.value }
+            guard let self, self.connectionOperationGeneration == operationGeneration else { return }
+            await self.performDisconnect()
+            guard self.connectionOperationGeneration == operationGeneration else { return }
+            result = await self.performConnectSelectedHost(purpose: purpose, requestID: requestID)
+        }
+        connectionOperation = operation
+        await operation.value
+        if connectionOperationGeneration == operationGeneration {
+            connectionOperation = nil
+            isConnectionOperationInProgress = false
+        }
+        return result
+    }
+
+    public func disconnect() async {
+        connectionOperationGeneration += 1
+        connectionRequestID += 1
+        let operationGeneration = connectionOperationGeneration
+        let previousOperation = connectionOperation
+        isConnectionOperationInProgress = true
+        let operation = Task { @MainActor [weak self] in
+            if let previousOperation { await previousOperation.value }
+            guard let self, self.connectionOperationGeneration == operationGeneration else { return }
+            await self.performDisconnect()
+        }
+        connectionOperation = operation
+        await operation.value
+        if connectionOperationGeneration == operationGeneration {
+            connectionOperation = nil
+            isConnectionOperationInProgress = false
+        }
+    }
+
+    private func performDisconnect() async {
         stopFollowing()
         cancelTailscaleDiscovery()
         let preservesActiveRepoImport = activeRepoImportID != nil && activeRepoImportLease?.hostID == selectedHostID
