@@ -104,7 +104,7 @@ public enum WorkspaceToolAction: Sendable, Hashable {
     }
 }
 
-private extension WorkspaceContextDestination {
+public extension WorkspaceContextDestination {
     var title: String {
         switch self {
         case .home: "Home"
@@ -168,6 +168,34 @@ public enum WorkspaceContextAction: Sendable, Hashable {
     case tool(WorkspaceToolAction)
     case openProposal(ProactiveProposal)
     case showMoreProposals([ProactiveProposal])
+}
+
+public extension WorkspaceContextAction {
+    /// A short human-readable name for preview surfaces that only hold the action.
+    var summaryTitle: String {
+        switch self {
+        case .switchHost: "Switch host"
+        case .openDestination(let destination): destination.title
+        case .openAgentSession(let sessionID): "Open session \(sessionID)"
+        case .attachMultiplexer(_, let sessionID): "Attach \(sessionID)"
+        case .focusMultiplexerWindow: "Focus window"
+        case .focusMultiplexerPane, .focusHerdrPane: "Focus pane"
+        case .openRepository(let path): path
+        case .tool(let tool): tool.title
+        case .openProposal(let proposal): proposal.title
+        case .showMoreProposals: "More proposals"
+        }
+    }
+}
+
+public extension WorkspaceContextNode {
+    /// The proposal payload when this node's action opens a proposal.
+    var proposal: ProactiveProposal? {
+        if case .openProposal(let proposal) = action {
+            return proposal
+        }
+        return nil
+    }
 }
 
 public struct WorkspaceContextHost: Sendable, Hashable {

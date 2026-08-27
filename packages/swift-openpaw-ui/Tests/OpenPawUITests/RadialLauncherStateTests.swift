@@ -21,7 +21,7 @@ final class RadialLauncherStateTests: XCTestCase {
         state.move(to: CGPoint(x: 90, y: 0))
         XCTAssertEqual(state.selection?.path.map(\.id), ["safe", "safe-child"])
 
-        state.move(to: CGPoint(x: 0, y: -90))
+        state.move(to: CGPoint(x: -64, y: -64))
         XCTAssertEqual(state.selection?.path.map(\.id), ["caution", "caution-child"])
 
         state.move(to: CGPoint(x: 0, y: 90))
@@ -32,7 +32,7 @@ final class RadialLauncherStateTests: XCTestCase {
         var state = RadialLauncherState()
         state.begin(graph: makeUnevenNestedGraph(), at: .zero)
 
-        state.move(to: CGPoint(x: 0, y: -140))
+        state.move(to: CGPoint(x: -99, y: -99))
 
         XCTAssertEqual(state.selection?.path.map(\.id), ["middle", "middle-b", "middle-b-center"])
     }
@@ -87,7 +87,7 @@ final class RadialLauncherStateTests: XCTestCase {
 
         var caution = RadialLauncherState()
         caution.begin(graph: makeGraph(), at: .zero)
-        caution.move(to: CGPoint(x: 0, y: -45))
+        caution.move(to: CGPoint(x: -32, y: -32))
         XCTAssertEqual(caution.end(), .freeze)
 
         let cautionEffect = caution.confirmGesture(to: CGPoint(x: 0, y: -80))
@@ -110,6 +110,106 @@ final class RadialLauncherStateTests: XCTestCase {
         XCTAssertNil(effect)
         XCTAssertEqual(state.phase, .frozenPreview)
         XCTAssertEqual(state.frozenProposal?.id, "destructive-proposal")
+    }
+
+    func testExplicitButtonConfirmsDestructiveProposalExactlyOnce() {
+        var state = RadialLauncherState()
+        state.begin(graph: makeGraph(), at: .zero)
+        state.move(to: CGPoint(x: -45, y: 0))
+        XCTAssertEqual(state.end(), .freeze)
+        XCTAssertEqual(state.frozenProposal?.risk, .destructive)
+
+        let first = state.confirmExplicitly()
+        let second = state.confirmExplicitly()
+
+        guard case .confirm(let operationID, let proposal) = first else {
+            return XCTFail("Expected explicit destructive confirmation")
+        }
+        XCTAssertEqual(proposal.id, "destructive-proposal")
+        XCTAssertEqual(state.operationID, operationID)
+        XCTAssertEqual(state.phase, .confirmed)
+        XCTAssertNil(second)
+    }
+
+    func testAccessibleProposalSelectionFreezesPreviewBeforeExecution() {
+        var state = RadialLauncherState()
+        guard case .openProposal(let proposal) = makeGraph().root.children[0].action else {
+            return XCTFail("Expected proposal fixture")
+        }
+
+        let effect = state.activate(.openProposal(proposal))
+
+        XCTAssertEqual(effect, .freeze)
+        XCTAssertEqual(state.phase, .frozenPreview)
+        XCTAssertEqual(state.frozenProposal?.id, proposal.id)
+        XCTAssertNil(state.operationID)
+    }
+
+    func testToolLeafFirstReleaseFreezesAndExplicitConfirmationPerformsExactlyOnce() {
+        let action = WorkspaceContextAction.tool(.search)
+        let graph = WorkspaceContextGraph(
+            snapshotID: UUID(),
+            hostID: nil,
+            connectionGeneration: 1,
+            root: WorkspaceContextNode(
+                id: "root",
+                kind: .host,
+                title: "Root",
+                children: [WorkspaceContextNode(id: "search", kind: .tool, title: "Search", action: action)]))
+        var state = RadialLauncherState()
+        state.begin(graph: graph, at: .zero)
+        state.move(to: CGPoint(x: 45, y: 0))
+
+        let effect = state.end()
+
+        XCTAssertEqual(effect, .freeze)
+        XCTAssertEqual(state.phase, .frozenPreview)
+        XCTAssertEqual(state.frozenAction, action)
+        XCTAssertNil(state.operationID)
+
+        let firstConfirmation = state.confirmExplicitly()
+        let secondConfirmation = state.confirmExplicitly()
+        guard case .confirmAction(let operationID, let confirmedAction) = firstConfirmation else {
+            return XCTFail("Expected typed action confirmation")
+        }
+        XCTAssertEqual(confirmedAction, action)
+        XCTAssertEqual(state.operationID, operationID)
+        XCTAssertNil(secondConfirmation)
+    }
+
+    func testAccessibleToolSelectionUsesFrozenGraphAndTheSamePreviewBoundary() {
+        let action = WorkspaceContextAction.tool(.dictate)
+        let node = WorkspaceContextNode(id: "dictate", kind: .tool, title: "Dictate", action: action)
+        let original = WorkspaceContextGraph(
+            snapshotID: UUID(uuidString: "00000000-0000-0000-0000-000000000021")!,
+            hostID: nil,
+            connectionGeneration: 1,
+            root: WorkspaceContextNode(id: "root", kind: .host, title: "Root", children: [node]))
+        let updated = WorkspaceContextGraph(
+            snapshotID: UUID(uuidString: "00000000-0000-0000-0000-000000000022")!,
+            hostID: nil,
+            connectionGeneration: 1,
+            root: WorkspaceContextNode(id: "root", kind: .host, title: "Updated"))
+        var state = RadialLauncherState()
+        state.beginAccessible(graph: original)
+        state.updateGraph(updated)
+
+        let effect = state.activate(RadialSelection(node: node, path: [node], proposal: nil))
+
+        XCTAssertEqual(effect, .freeze)
+        XCTAssertEqual(state.phase, .frozenPreview)
+        XCTAssertEqual(state.frozenAction, action)
+        XCTAssertEqual(state.snapshotGraph?.snapshotID, original.snapshotID)
+        XCTAssertEqual(state.pendingGraph?.snapshotID, updated.snapshotID)
+    }
+
+    func testBottomTrailingQuadrantMapsUpToFirstSiblingAndLeftToLastSibling() {
+        let geometry = RadialGeometry()
+        let origin = CGPoint(x: 350, y: 808)
+
+        XCTAssertEqual(geometry.siblingIndex(from: origin, to: CGPoint(x: 350, y: 744), count: 3), 0)
+        XCTAssertEqual(geometry.siblingIndex(from: origin, to: CGPoint(x: 305, y: 763), count: 3), 1)
+        XCTAssertEqual(geometry.siblingIndex(from: origin, to: CGPoint(x: 286, y: 808), count: 3), 2)
     }
 
     func testGraphUpdatesDuringTrackingAreHeldForNextGesture() {
