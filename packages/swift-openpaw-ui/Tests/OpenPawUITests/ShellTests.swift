@@ -694,9 +694,12 @@ struct RootNavigationTests {
         await gate.waitUntilStarted()
         await model.selectHost(second.id)
         await model.selectHost(first.id)
-        await model.connectSelectedHost()
+        let snapshot = model.currentHostOperationSnapshot
+        let reconnect = Task { @MainActor in await model.connectSelectedHost() }
+        while model.ownsHostOperation(snapshot) { await Task.yield() }
         await gate.release()
 
+        #expect(await reconnect.value != nil)
         #expect(await staleResume.value == nil)
         #expect(model.selectedHostID == first.id)
         #expect(model.connection.isConnected)
@@ -721,9 +724,12 @@ struct RootNavigationTests {
                 model: model)
         }
         await gate.waitUntilStarted()
-        await model.connectSelectedHost()
+        let snapshot = model.currentHostOperationSnapshot
+        let reconnect = Task { @MainActor in await model.connectSelectedHost() }
+        while model.ownsHostOperation(snapshot) { await Task.yield() }
         await gate.release()
 
+        #expect(await reconnect.value != nil)
         #expect(await staleResume.value == nil)
         #expect(model.selectedHostID == host.id)
         #expect(model.connection.isConnected)
