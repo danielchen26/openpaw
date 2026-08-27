@@ -8,16 +8,20 @@ public enum PawOrbPresentation {
 public enum RadialNodePresentation {
     public static let visualDiameter = RadialLauncherLayout.nodeVisualDiameter
     public static let hitDiameter = RadialLauncherLayout.nodeHitDiameter
-    public static let ringRadius: CGFloat = 112
 
-    /// Rendered node centers for one sibling ring, delegating to the same `RadialGeometry` quadrant that maps
-    /// drag angles to sibling indexes. Rendering and selection can therefore never disagree.
+    /// Rendered node centers for the sibling ring at `depth`, delegating both the quadrant math and the ring
+    /// radius to the same `RadialGeometry` that maps drag points to selections. Rendering and selection can
+    /// therefore never disagree.
     public nonisolated static func positions(
         count: Int,
         origin: CGPoint,
+        depth: Int = 1,
         geometry: RadialGeometry = RadialGeometry()
     ) -> [CGPoint] {
-        (0..<max(0, count)).map { geometry.nodePosition(index: $0, count: count, origin: origin, radius: ringRadius) }
+        let radius = geometry.ringRadius(depth: depth)
+        return (0..<max(0, count)).map {
+            geometry.nodePosition(index: $0, count: count, origin: origin, radius: radius)
+        }
     }
 }
 

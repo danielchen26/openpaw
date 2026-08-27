@@ -35,6 +35,36 @@ struct ProactiveRadialLauncherTests {
         #expect(positions.last?.y == origin.y)
     }
 
+    @Test("The second layer renders one ring spacing outside the first, on the same quadrant")
+    func secondLayerRingGeometry() {
+        let geometry = RadialGeometry()
+        let origin = CGPoint(x: 350, y: 800)
+        let first = RadialNodePresentation.positions(count: 3, origin: origin, depth: 1, geometry: geometry)
+        let second = RadialNodePresentation.positions(count: 3, origin: origin, depth: 2, geometry: geometry)
+
+        #expect(first.first?.y == origin.y - geometry.ringRadius(depth: 1))
+        #expect(second.first?.y == origin.y - geometry.ringRadius(depth: 2))
+        #expect(geometry.ringRadius(depth: 2) - geometry.ringRadius(depth: 1) == geometry.ringSpacing)
+        // Both rings share the quadrant: straight up first, straight left last.
+        #expect(second.first?.x == origin.x)
+        #expect(second.last?.y == origin.y)
+    }
+
+    @Test("Drag distance selects the nearest rendered ring, so pointing at a drawn node selects its layer")
+    func depthBandsFollowRenderedRings() {
+        let geometry = RadialGeometry()
+        let origin = CGPoint.zero
+
+        // On the first ring itself, and anywhere inside the halfway band, the selection stays at depth 1.
+        #expect(geometry.depth(from: origin, to: CGPoint(x: 0, y: -geometry.ringRadius(depth: 1))) == 1)
+        // On the second ring itself the selection is depth 2.
+        #expect(geometry.depth(from: origin, to: CGPoint(x: 0, y: -geometry.ringRadius(depth: 2))) == 2)
+        // The band boundary sits halfway between the rings.
+        let midpoint = (geometry.ringRadius(depth: 1) + geometry.ringRadius(depth: 2)) / 2
+        #expect(geometry.depth(from: origin, to: CGPoint(x: 0, y: -(midpoint - 1))) == 1)
+        #expect(geometry.depth(from: origin, to: CGPoint(x: 0, y: -(midpoint + 1))) == 2)
+    }
+
     @Test("Proposal card anchors in the upper middle between the island and keyboard")
     func proposalCardAnchor() {
         let frame = ProposalPreviewCardPresentation.frame(

@@ -18,13 +18,13 @@ final class RadialLauncherStateTests: XCTestCase {
         var state = RadialLauncherState()
         state.begin(graph: makeGraph(), at: .zero)
 
-        state.move(to: CGPoint(x: 90, y: 0))
+        state.move(to: CGPoint(x: 160, y: 0))
         XCTAssertEqual(state.selection?.path.map(\.id), ["safe", "safe-child"])
 
-        state.move(to: CGPoint(x: -64, y: -64))
+        state.move(to: CGPoint(x: -115, y: -115))
         XCTAssertEqual(state.selection?.path.map(\.id), ["caution", "caution-child"])
 
-        state.move(to: CGPoint(x: 0, y: 90))
+        state.move(to: CGPoint(x: 0, y: 160))
         XCTAssertEqual(state.selection?.path.map(\.id), ["safe", "safe-child"])
     }
 
@@ -32,7 +32,7 @@ final class RadialLauncherStateTests: XCTestCase {
         var state = RadialLauncherState()
         state.begin(graph: makeUnevenNestedGraph(), at: .zero)
 
-        state.move(to: CGPoint(x: -99, y: -99))
+        state.move(to: CGPoint(x: -170, y: -170))
 
         XCTAssertEqual(state.selection?.path.map(\.id), ["middle", "middle-b", "middle-b-center"])
     }
@@ -40,7 +40,7 @@ final class RadialLauncherStateTests: XCTestCase {
     func testMovingInwardBacksUpOneLevel() {
         var state = RadialLauncherState()
         state.begin(graph: makeGraph(), at: .zero)
-        state.move(to: CGPoint(x: 90, y: 0))
+        state.move(to: CGPoint(x: 160, y: 0))
         XCTAssertEqual(state.selection?.path.map(\.id), ["safe", "safe-child"])
 
         state.move(to: CGPoint(x: 45, y: 0))

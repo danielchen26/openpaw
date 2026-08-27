@@ -75,26 +75,13 @@ enum BiometricGate {
         // Cold launch, or a previous attempt that never succeeded.
         guard let lastUnlockedAt else { return .authenticate }
 
-        // Foreground the whole time since the last unlock: nothing has happened that could have exposed the
-        // screen to someone else.
-        guard let leftForegroundAt else { return .unlocked }
-
-        // A background episode that began before the last successful unlock is already accounted for by that
-        // unlock. Comparing the two timestamps rather than clearing the background marker keeps this function
-        // total: it cannot be desynchronised by a missed lifecycle callback.
-        if leftForegroundAt <= lastUnlockedAt { return .unlocked }
-
-        // Zero grace means re-lock on every trip through the background, and short-circuits before the clock is
-        // consulted at all so a wall-clock jump cannot weaken it.
-        if policy.graceInterval <= 0 { return .authenticate }
-
-        let away = now.timeIntervalSince(leftForegroundAt)
-
-        // A clock that moved backwards makes the elapsed interval meaningless. The safe reading of an
-        // untrustworthy clock is that the grace period expired.
-        if away < 0 { return .authenticate }
-
-        return away >= policy.graceInterval ? .authenticate : .unlocked
+        // One successful unlock covers the whole process lifetime. Backgrounding, the passage of time, and the
+        // grace interval no longer re-gate: the device's own lock screen already guards the phone, and
+        // re-prompting inside the app on every unlock made it unusable. `leftForegroundAt` and `now` remain
+        // parameters so the decision stays a pure function of its inputs and the call sites stay uniform.
+        _ = leftForegroundAt
+        _ = now
+        return .unlocked
     }
 
     /// The sentence shown in the system authentication sheet. It names the thing being protected, because

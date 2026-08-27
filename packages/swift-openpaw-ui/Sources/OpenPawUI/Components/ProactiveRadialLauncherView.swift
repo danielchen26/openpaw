@@ -103,7 +103,7 @@ public struct ProactiveRadialLauncherView: View {
                         .transition(nodeTransition)
                 }
 
-                if let content = LauncherPreviewContent(state: state) {
+                if let content = previewContent {
                     ProposalPreviewCard(
                         content: content,
                         breadcrumb: state.selection?.path ?? [],
@@ -114,6 +114,9 @@ public struct ProactiveRadialLauncherView: View {
                     .frame(maxHeight: previewFrame(in: proxy).height)
                     .position(previewPosition(in: proxy))
                     .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                    // While the finger is still down the card is a live preview, not a control surface: its
+                    // buttons only become tappable once the release freezes the selection.
+                    .allowsHitTesting(state.phase == .frozenPreview)
                     .zIndex(2)
                 }
 
@@ -135,6 +138,7 @@ public struct ProactiveRadialLauncherView: View {
             // GeometryReader's top-leading origin instead of the bottom-trailing corner.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             .animation(.easeOut(duration: reduceMotion ? 0.16 : 0.24), value: state.phase)
+            .animation(.easeOut(duration: reduceMotion ? 0.16 : 0.24), value: state.selection)
             .sheet(isPresented: $showsAccessibleHierarchy, onDismiss: endAccessibleBrowsing) {
                 AccessibleLauncherHierarchy(
                     model: VoiceOverLauncherModel(graph: state.snapshotGraph ?? graph),
@@ -176,23 +180,59 @@ public struct ProactiveRadialLauncherView: View {
             }
     }
 
+    /// The preview card is not only the frozen confirmation surface: as soon as the drag reaches the second
+    /// layer it appears live in the upper middle of the screen, showing what releasing would line up.
+    private var previewContent: LauncherPreviewContent? {
+        if state.phase == .frozenPreview || state.phase == .confirmed {
+            return LauncherPreviewContent(state: state)
+        }
+        if state.phase == .tracking, let selection = state.selection, selection.path.count >= 2 {
+            return LauncherPreviewContent(selection: selection)
+        }
+        return nil
+    }
+
+    /// Renders every sibling ring along the current selection path plus, one layer out, the children of the
+    /// selected node. At depth 1 that is exactly the reference design: the first quarter-arc of top-level
+    /// choices with the highlighted node's own choices fanned out on a second concentric quarter-arc.
     @ViewBuilder
     private func radialNodes(selection: RadialSelection, in size: CGSize) -> some View {
-        let nodes = visibleNodes(for: selection)
         let origin = state.origin ?? CGPoint(x: size.width - 40, y: size.height - 36)
-        let positions = RadialNodePresentation.positions(count: nodes.count, origin: origin, geometry: state.geometry)
-        ForEach(Array(nodes.enumerated()), id: \.element.id) { index, node in
-            LauncherNodeView(node: node, selected: node.id == selection.node.id)
-                .position(clamped(positions[index], in: size))
-                .accessibilityIdentifier(node.kind == .switchHost
-                    ? "root.proactive-launcher.switch-host"
-                    : "root.proactive-launcher.node.\(node.id)")
+        let root = (state.snapshotGraph ?? graph).root
+        ForEach(Array(visibleRings(selection: selection, root: root).enumerated()), id: \.offset) { ringIndex, ring in
+            let depth = ringIndex + 1
+            let positions = RadialNodePresentation.positions(
+                count: ring.nodes.count,
+                origin: origin,
+                depth: depth,
+                geometry: state.geometry
+            )
+            ForEach(Array(ring.nodes.enumerated()), id: \.element.id) { index, node in
+                LauncherNodeView(node: node, selected: node.id == ring.selectedID)
+                    .position(clamped(positions[index], in: size))
+                    .accessibilityIdentifier(node.kind == .switchHost
+                        ? "root.proactive-launcher.switch-host"
+                        : "root.proactive-launcher.node.\(node.id)")
+            }
         }
     }
 
-    private func visibleNodes(for selection: RadialSelection) -> [WorkspaceContextNode] {
-        guard selection.path.count > 1 else { return (state.snapshotGraph ?? graph).root.children }
-        return selection.path.dropLast().last?.children ?? []
+    private struct VisibleRing {
+        var nodes: [WorkspaceContextNode]
+        var selectedID: String?
+    }
+
+    private func visibleRings(selection: RadialSelection, root: WorkspaceContextNode) -> [VisibleRing] {
+        var rings: [VisibleRing] = []
+        var siblings = root.children
+        for node in selection.path {
+            rings.append(VisibleRing(nodes: siblings, selectedID: node.id))
+            siblings = node.children
+        }
+        if !siblings.isEmpty {
+            rings.append(VisibleRing(nodes: siblings, selectedID: nil))
+        }
+        return rings
     }
 
     /// Keeps a node's hit area inside the container on compact widths without disturbing the shared angle

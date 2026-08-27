@@ -98,24 +98,26 @@ final class BiometricGateTests: XCTestCase {
         XCTAssertEqual(decision, .unlocked)
     }
 
-    func testGraceBoundaryIsInclusiveAndRelocks() {
+    /// One successful unlock covers the whole launch: neither the grace boundary nor any amount of time away
+    /// re-prompts. The device's own lock screen guards the phone; re-prompting inside the app made it unusable.
+    func testUnlockedOnceNeverRePromptsThisLaunchEvenPastGrace() {
         let decision = BiometricGate.decide(
             policy: policy(grace: 120),
             lastUnlockedAt: epoch,
             leftForegroundAt: epoch.addingTimeInterval(10),
-            now: epoch.addingTimeInterval(10 + 120)
+            now: epoch.addingTimeInterval(10 + 86_400)
         )
-        XCTAssertEqual(decision, .authenticate)
+        XCTAssertEqual(decision, .unlocked)
     }
 
-    func testZeroGraceRelocksOnEveryBackgroundTrip() {
+    func testZeroGraceStillDoesNotRePromptAfterFirstUnlock() {
         let decision = BiometricGate.decide(
             policy: policy(grace: 0),
             lastUnlockedAt: epoch,
             leftForegroundAt: epoch.addingTimeInterval(1),
             now: epoch.addingTimeInterval(1.001)
         )
-        XCTAssertEqual(decision, .authenticate)
+        XCTAssertEqual(decision, .unlocked)
     }
 
     /// A background episode that predates the unlock was already paid for by that unlock. Without this the app
@@ -142,37 +144,45 @@ final class BiometricGateTests: XCTestCase {
         XCTAssertEqual(decision, .unlocked)
     }
 
-    /// A user who moves the clock backwards must not thereby extend the grace period indefinitely.
-    func testBackwardsClockFailsClosed() {
+    /// A backwards clock cannot matter when time no longer participates: an unlocked launch stays unlocked.
+    func testBackwardsClockCannotRePromptAnUnlockedLaunch() {
         let decision = BiometricGate.decide(
             policy: policy(grace: 600),
             lastUnlockedAt: epoch,
             leftForegroundAt: epoch.addingTimeInterval(100),
             now: epoch.addingTimeInterval(50)
         )
-        XCTAssertEqual(decision, .authenticate)
+        XCTAssertEqual(decision, .unlocked)
     }
 
     @MainActor
-    func testInboxURLReevaluatesExpiredGraceBeforeOpeningTheRoute() {
-        let gate = GateController(
+    func testInboxURLStaysOpenableOnceUnlockedAndBlockedBeforeFirstUnlock() {
+        let unlocked = GateController(
             policy: policy(grace: 120),
             lastUnlockedAt: epoch,
             leftForegroundAt: epoch.addingTimeInterval(10),
             now: epoch.addingTimeInterval(10 + 119)
         )
-        XCTAssertEqual(gate.decision, .unlocked)
+        XCTAssertEqual(unlocked.decision, .unlocked)
+        XCTAssertTrue(InboxURLAccessGate.refreshAndAllow(unlocked, now: epoch.addingTimeInterval(10 + 9_999)))
+        XCTAssertEqual(unlocked.decision, .unlocked)
 
+        let neverUnlocked = GateController(
+            policy: policy(grace: 120),
+            lastUnlockedAt: nil,
+            leftForegroundAt: nil,
+            now: epoch
+        )
+        XCTAssertEqual(neverUnlocked.decision, .authenticate)
         var cancellationCount = 0
         let mayOpen = InboxURLAccessGate.refreshAndAllow(
-            gate,
-            now: epoch.addingTimeInterval(10 + 120),
+            neverUnlocked,
+            now: epoch.addingTimeInterval(1),
             onDenied: { cancellationCount += 1 }
         )
-
         XCTAssertFalse(mayOpen)
         XCTAssertEqual(cancellationCount, 1)
-        XCTAssertEqual(gate.decision, .authenticate)
+        XCTAssertEqual(neverUnlocked.decision, .authenticate)
     }
 
     @MainActor

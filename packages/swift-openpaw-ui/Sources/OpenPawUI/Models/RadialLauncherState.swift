@@ -43,12 +43,19 @@ public enum RadialLauncherEffect: Sendable, Hashable {
 
 public struct RadialGeometry: Sendable, Hashable {
     public var originCancelRadius: CGFloat
-    public var depthStep: CGFloat
+    public var firstRingRadius: CGFloat
+    public var ringSpacing: CGFloat
     public var confirmationDistance: CGFloat
 
-    public init(originCancelRadius: CGFloat = 8, depthStep: CGFloat = 64, confirmationDistance: CGFloat = 56) {
+    public init(
+        originCancelRadius: CGFloat = 8,
+        firstRingRadius: CGFloat = 104,
+        ringSpacing: CGFloat = 88,
+        confirmationDistance: CGFloat = 56
+    ) {
         self.originCancelRadius = originCancelRadius
-        self.depthStep = depthStep
+        self.firstRingRadius = firstRingRadius
+        self.ringSpacing = ringSpacing
         self.confirmationDistance = confirmationDistance
     }
 
@@ -56,8 +63,20 @@ public struct RadialGeometry: Sendable, Hashable {
         hypot(point.x - origin.x, point.y - origin.y)
     }
 
+    /// The rendered radius of the ring holding depth-N nodes. The first ring leaves room for the orb plus a
+    /// finger; deeper rings step outward by one hit diameter plus breathing room.
+    public func ringRadius(depth: Int) -> CGFloat {
+        firstRingRadius + CGFloat(max(0, depth - 1)) * ringSpacing
+    }
+
+    /// Maps a drag distance to the nearest rendered ring, so pointing at a drawn node always selects that node's
+    /// level. Band boundaries sit halfway between adjacent ring radii; everything inside the first boundary is
+    /// depth 1, because the inner disk has no other ring to compete with.
     public func depth(from origin: CGPoint, to point: CGPoint) -> Int {
-        max(1, Int(distance(from: origin, to: point) / depthStep) + 1)
+        let d = distance(from: origin, to: point)
+        let firstBoundary = firstRingRadius + ringSpacing / 2
+        guard d >= firstBoundary else { return 1 }
+        return 2 + Int((d - firstBoundary) / ringSpacing)
     }
 
     /// Maps a drag point to a sibling slot in the bottom-trailing quadrant. Index 0 sits straight up from the

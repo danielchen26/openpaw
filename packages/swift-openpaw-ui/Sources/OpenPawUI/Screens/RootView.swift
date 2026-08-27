@@ -1094,8 +1094,12 @@ public struct RootView: View {
         case .freeze, .cancel:
             break
         case .confirm(let operationID, let proposal):
+            // The dispatch owns the operation now; the orb returns to idle so the preview card does not stay
+            // frozen over the destination the action navigates to.
+            _ = launcherState.cancel()
             executeLauncherProposal(proposal, operationID: operationID)
         case .confirmAction(let operationID, let action):
+            _ = launcherState.cancel()
             performLauncherRoute(RootLauncherIntegration.route(for: action, operationID: operationID))
         }
     }
