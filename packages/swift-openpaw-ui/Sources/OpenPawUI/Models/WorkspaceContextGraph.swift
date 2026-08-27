@@ -161,6 +161,8 @@ public enum WorkspaceContextAction: Sendable, Hashable {
     case focusHerdrPane(workspaceID: String?, tabID: String?, paneID: String, terminalID: String?)
     case openRepository(path: String)
     case tool(WorkspaceToolAction)
+    case openProposal(ProactiveProposal)
+    case showMoreProposals([ProactiveProposal])
 }
 
 public struct WorkspaceContextHost: Sendable, Hashable {
@@ -222,6 +224,7 @@ public struct WorkspaceContextInput: Sendable {
     public var repositories: [RepoSummary]
     public var inbox: [InboxItem]
     public var authenticatedDestinations: Set<WorkspaceContextDestination>
+    public var isConnected: Bool
 
     public init(
         snapshotID: UUID,
@@ -239,7 +242,8 @@ public struct WorkspaceContextInput: Sendable {
         selectedRepositoryPath: String? = nil,
         repositories: [RepoSummary] = [],
         inbox: [InboxItem] = [],
-        authenticatedDestinations: Set<WorkspaceContextDestination> = []
+        authenticatedDestinations: Set<WorkspaceContextDestination> = [],
+        isConnected: Bool = true
     ) {
         self.snapshotID = snapshotID
         self.host = host
@@ -257,6 +261,7 @@ public struct WorkspaceContextInput: Sendable {
         self.repositories = repositories
         self.inbox = inbox
         self.authenticatedDestinations = authenticatedDestinations
+        self.isConnected = isConnected
     }
 }
 
@@ -610,5 +615,160 @@ private extension String {
     var trimmedNonEmpty: String? {
         let value = trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+}
+
+public extension WorkspaceContextGraph {
+    /// Returns a new graph with deterministic proposal children. The receiver remains unchanged so a gesture can retain
+    /// its frozen snapshot while newer events produce a separately rebuilt graph.
+    func attaching(proposals: [ProactiveProposal]) -> WorkspaceContextGraph {
+        let ranked = proposals
+            .filter { $0.target.hostID == nil || $0.target.hostID == hostID }
+            .sorted {
+                if $0.score != $1.score { return $0.score > $1.score }
+                return $0.id < $1.id
+            }
+
+        var proposalsByNodeID: [String: [ProactiveProposal]] = [:]
+        var moreByNodeID: [String: [ProactiveProposal]] = [:]
+        for proposal in ranked.prefix(3) {
+            let nodeID = root.bestAttachmentNodeID(for: proposal.target) ?? root.id
+            proposalsByNodeID[nodeID, default: []].append(proposal)
+        }
+        if ranked.count > 3 {
+            let remaining = Array(ranked.dropFirst(3))
+            let moreTarget = ranked.first?.target ?? WorkspaceContextTarget(hostID: hostID, destination: .home)
+            let moreNodeID = root.bestAttachmentNodeID(for: moreTarget) ?? root.id
+            moreByNodeID[moreNodeID] = remaining
+        }
+
+        var copy = self
+        copy.root = root.attaching(proposalsByNodeID, moreByNodeID: moreByNodeID)
+        return copy
+    }
+}
+
+private extension WorkspaceContextNode {
+    func bestAttachmentNodeID(for target: WorkspaceContextTarget) -> String? {
+        bestAttachmentCandidate(for: target, depth: 0, inheritedScore: 0)?.nodeID
+    }
+
+    func bestAttachmentCandidate(
+        for target: WorkspaceContextTarget,
+        depth: Int,
+        inheritedScore: Int
+    ) -> ProposalAttachmentCandidate? {
+        let localScore = attachmentScore(for: target)
+        let accumulatedScore = inheritedScore + localScore
+        var best: ProposalAttachmentCandidate? = localScore > 0
+            ? ProposalAttachmentCandidate(nodeID: id, score: accumulatedScore, depth: depth)
+            : nil
+
+        for child in children {
+            guard let candidate = child.bestAttachmentCandidate(
+                for: target,
+                depth: depth + 1,
+                inheritedScore: accumulatedScore
+            ) else { continue }
+            if best == nil || candidate.isPreferred(over: best!) {
+                best = candidate
+            }
+        }
+        return best
+    }
+
+    func attachmentScore(for target: WorkspaceContextTarget) -> Int {
+        guard let action else { return 0 }
+        switch action {
+        case .openAgentSession(let sessionID):
+            return target.sessionID == sessionID ? 120 : 0
+
+        case .attachMultiplexer(_, let sessionID):
+            return target.sessionID == sessionID ? 100 : 0
+
+        case .focusMultiplexerWindow(_, let sessionID, let windowID):
+            var score = target.sessionID == sessionID ? 100 : 0
+            if target.tabID == windowID { score += 50 }
+            return score
+
+        case .focusMultiplexerPane(_, let sessionID, let windowID, let paneID):
+            var score = target.sessionID == sessionID ? 100 : 0
+            if target.tabID == windowID { score += 40 }
+            if target.paneID == paneID { score += 100 }
+            return score
+
+        case .focusHerdrPane(let workspaceID, let tabID, let paneID, let terminalID):
+            var score = 0
+            if let targetWorkspace = target.workspaceID, targetWorkspace == workspaceID { score += 40 }
+            if let targetTab = target.tabID, targetTab == tabID { score += 50 }
+            if target.paneID == paneID { score += 120 }
+            if let targetTerminal = target.terminalID, targetTerminal == terminalID { score += 30 }
+            return score
+
+        case .openRepository(let path):
+            return target.repositoryPath == path ? 90 : 0
+
+        case .switchHost, .openDestination, .tool, .openProposal, .showMoreProposals:
+            return 0
+        }
+    }
+
+    func attaching(_ proposalsByNodeID: [String: [ProactiveProposal]], moreByNodeID: [String: [ProactiveProposal]]) -> WorkspaceContextNode {
+        var copy = self
+        var existing = children
+            .filter { $0.kind != .proposal && $0.kind != .more }
+            .map { $0.attaching(proposalsByNodeID, moreByNodeID: moreByNodeID) }
+
+        let proposals = proposalsByNodeID[id] ?? []
+        let more = moreByNodeID[id] ?? []
+        guard !proposals.isEmpty || !more.isEmpty else {
+            copy.children = existing
+            return copy
+        }
+
+        let switchHostNodes = existing.filter { $0.kind == .switchHost }
+        existing.removeAll { $0.kind == .switchHost }
+        existing.append(contentsOf: proposals.map { proposal in
+            WorkspaceContextNode(
+                id: Self.proposalNodeID(parentID: id, proposalID: proposal.id),
+                kind: .proposal,
+                title: proposal.title,
+                subtitle: proposal.detail,
+                action: .openProposal(proposal)
+            )
+        })
+        if !more.isEmpty {
+            existing.append(
+                WorkspaceContextNode(
+                    id: Self.moreNodeID(parentID: id),
+                    kind: .more,
+                    title: "More (\(more.count))",
+                    subtitle: "Show remaining proposals",
+                    action: .showMoreProposals(more)
+                )
+            )
+        }
+        copy.children = existing + switchHostNodes
+        return copy
+    }
+
+    static func proposalNodeID(parentID: String, proposalID: String) -> String {
+        "proposal-node|s\(parentID.utf8.count):\(parentID)|s\(proposalID.utf8.count):\(proposalID)"
+    }
+
+    static func moreNodeID(parentID: String) -> String {
+        "proposal-more|s\(parentID.utf8.count):\(parentID)"
+    }
+}
+
+private struct ProposalAttachmentCandidate {
+    var nodeID: String
+    var score: Int
+    var depth: Int
+
+    func isPreferred(over other: ProposalAttachmentCandidate) -> Bool {
+        if score != other.score { return score > other.score }
+        if depth != other.depth { return depth > other.depth }
+        return nodeID < other.nodeID
     }
 }

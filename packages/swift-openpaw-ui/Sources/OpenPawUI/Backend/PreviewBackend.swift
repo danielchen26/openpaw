@@ -431,6 +431,77 @@ public struct PreviewBackend: OpenPawBackend, PairedHostCapabilityProviding {
     }
 }
 
+extension PreviewBackend {
+    /// Coherent context used by previews, snapshots, and UI acceptance scenarios for the proactive launcher.
+    /// It combines the fixture backend's real transcript/inbox/repository data with a truthful Herdr hierarchy.
+    func proactiveWorkspaceContextInput(
+        hostID: HostID = UUID(uuidString: "8c0b9b7e-2a71-4c47-95be-5bf4fd80a8b2")!,
+        connectionGeneration: Int = 1,
+        destination: WorkspaceContextDestination = .terminal
+    ) -> WorkspaceContextInput {
+        let herdrPanes = [
+            RemoteSession(
+                id: "pane-editor",
+                name: "Implementation",
+                kind: .herdr,
+                terminalID: "terminal-editor",
+                workspaceID: "openpaw-mobile",
+                tabID: "tab-code",
+                tabLabel: "Code",
+                isAttached: true,
+                windowCount: 1,
+                lastActivityAt: Self.now,
+                workingDirectory: PreviewFixtures.repoPath
+            ),
+            RemoteSession(
+                id: "pane-tests",
+                name: "Focused tests",
+                kind: .herdr,
+                terminalID: "terminal-tests",
+                workspaceID: "openpaw-mobile",
+                tabID: "tab-code",
+                tabLabel: "Code",
+                windowCount: 1,
+                lastActivityAt: Self.now.addingTimeInterval(-20),
+                workingDirectory: PreviewFixtures.repoPath
+            ),
+            RemoteSession(
+                id: "pane-plan",
+                name: "Implementation plan",
+                kind: .herdr,
+                terminalID: "terminal-plan",
+                workspaceID: "openpaw-mobile",
+                tabID: "tab-plan",
+                tabLabel: "Plan",
+                windowCount: 1,
+                lastActivityAt: Self.now.addingTimeInterval(-40),
+                workingDirectory: PreviewFixtures.repoPath
+            ),
+        ]
+        return WorkspaceContextInput(
+            snapshotID: UUID(uuidString: "49a9c9ca-155a-45c4-946b-6fbc72ba265d")!,
+            host: .init(id: hostID, title: "workshop"),
+            connectionGeneration: connectionGeneration,
+            destination: destination,
+            agentSessions: sessionList,
+            transcripts: transcripts,
+            sessionSpace: .init(
+                hostID: hostID,
+                connectionGeneration: connectionGeneration,
+                remoteSessions: herdrPanes
+            ),
+            selectedSessionID: Self.claudeSessionID,
+            selectedTabID: "tab-code",
+            selectedPaneID: "pane-editor",
+            selectedRepositoryPath: PreviewFixtures.repoPath,
+            repositories: repoList,
+            inbox: inboxItems,
+            authenticatedDestinations: Set(WorkspaceContextDestination.allCases),
+            isConnected: failure == nil
+        )
+    }
+}
+
 // MARK: - Resolve journal
 
 /// One decision the UI sent to the host.
