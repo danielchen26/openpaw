@@ -175,7 +175,15 @@ public final class OpenPawModel {
 
     // MARK: - Inbox
 
-    public var inbox: [InboxItem] = []
+    public var inbox: [InboxItem] = [] {
+        didSet { rebuildInboxViews() }
+    }
+    /// Sorted work queue, rebuilt when `inbox` changes. SwiftUI reads this from dozens of body evaluations
+    /// (badges, sidebar labels, the queue itself); sorting there instead of here once froze the main thread long
+    /// enough for the scene-update watchdog to kill the app when a link brought it to the foreground.
+    public private(set) var pendingInbox: [InboxItem] = []
+    /// Decided items, newest first, cached for the same reason as `pendingInbox`.
+    public private(set) var resolvedInbox: [InboxItem] = []
     /// Items the user has expanded far enough that the host will accept a decision.
     public private(set) var acknowledgedDetails: Set<String> = []
 
@@ -315,8 +323,14 @@ public final class OpenPawModel {
         backend != nil && selectedHost != nil && connection.isConnected && structuredBackendReady
     }
 
-    public var pendingInbox: [InboxItem] {
-        inbox.filter { $0.status == .pending }.sorted(by: Self.inboxOrder)
+    private func rebuildInboxViews() {
+        var pending: [InboxItem] = []
+        var resolved: [InboxItem] = []
+        for item in inbox {
+            if item.status == .pending { pending.append(item) } else { resolved.append(item) }
+        }
+        pendingInbox = pending.sorted(by: Self.inboxOrder)
+        resolvedInbox = resolved.sorted { $0.createdAt > $1.createdAt }
     }
 
     /// Risk first, then oldest first. A destructive request that arrived a minute ago outranks a completion

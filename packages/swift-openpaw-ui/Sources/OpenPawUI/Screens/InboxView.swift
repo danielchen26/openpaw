@@ -359,10 +359,8 @@ public struct InboxView: View {
     }
 
     private var decided: [InboxItem] {
-        model.inbox
-            .filter { $0.status != .pending }
-            .filter { filter == nil || $0.category == filter }
-            .sorted { $0.createdAt > $1.createdAt }
+        guard let filter else { return model.resolvedInbox }
+        return model.resolvedInbox.filter { $0.category == filter }
     }
 
     /// Buckets the already-ordered queue by session, keeping each session at the position of its first — that is,
