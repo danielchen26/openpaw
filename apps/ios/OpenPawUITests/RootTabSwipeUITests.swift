@@ -50,7 +50,7 @@ final class RootTabSwipeUITests: XCTestCase {
             return
         }
         for _ in 0..<target {
-            app.buttons["root.destination.next"].tap()
+            fling(.next, in: app)
         }
         assertCurrent(destination, in: app)
     }
@@ -87,24 +87,21 @@ final class RootTabSwipeUITests: XCTestCase {
         assertCurrent("Home", in: app)
     }
 
-    func testCompactDeckShowsOnlyCurrentDestinationWithPreviousAndNextControls() {
+    /// The deck's destination buttons are gone; the launcher orb is the only permanent navigation chrome, and
+    /// the root pager remains the accessibility surface that reports where the user is.
+    func testTheOrbReplacesTheDestinationButtons() {
         let app = launch()
 
-        XCTAssertTrue(app.buttons["root.destination.home"].exists)
-        XCTAssertTrue(app.buttons["root.destination.next"].exists)
-        XCTAssertFalse(app.buttons["root.destination.terminal"].exists)
-        XCTAssertFalse(app.buttons["root.destination.sessions"].exists)
+        XCTAssertTrue(app.buttons["root.proactive-launcher.orb"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["root.destination.next"].exists)
+        XCTAssertFalse(app.buttons["root.destination.previous"].exists)
+        XCTAssertFalse(app.buttons["root.destination.home"].exists)
 
-        app.buttons["root.destination.next"].tap()
+        fling(.next, in: app)
         assertCurrent("Terminal", in: app)
         fling(.next, in: app)
         assertCurrent("Sessions", in: app)
-        XCTAssertTrue(app.buttons["root.destination.previous"].exists)
-        XCTAssertTrue(app.buttons["root.destination.sessions"].exists)
-        XCTAssertTrue(app.buttons["root.destination.next"].exists)
-        XCTAssertFalse(app.buttons["root.destination.home"].exists)
-        XCTAssertFalse(app.buttons["root.destination.terminal"].exists)
-        XCTAssertFalse(app.buttons["root.destination.inbox"].exists)
+        XCTAssertTrue(app.buttons["root.proactive-launcher.orb"].exists)
     }
 
     func testTerminalTypingAndVerticalScrollingStayInTheTerminal() {

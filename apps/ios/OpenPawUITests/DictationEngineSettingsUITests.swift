@@ -132,7 +132,6 @@ final class DictationEngineSettingsUITests: XCTestCase {
     }
 
     private let rootDestinations = ["Home", "Terminal", "Sessions", "Inbox", "Repo", "Settings"]
-    private let controlDeckPages = 3
 
     private func pager(in app: XCUIApplication) -> XCUIElement {
         app.otherElements["root.destination.pager"]
@@ -143,15 +142,7 @@ final class DictationEngineSettingsUITests: XCTestCase {
         if let title = rootDestinations.first(where: { value.localizedCaseInsensitiveContains($0) }) {
             return title
         }
-        let visibleButton = [
-            ("Home", "root.destination.home"),
-            ("Terminal", "root.destination.terminal"),
-            ("Sessions", "root.destination.sessions"),
-            ("Inbox", "root.destination.inbox"),
-            ("Repo", "root.destination.repo"),
-            ("Settings", "root.destination.settings"),
-        ].first { app.buttons[$0.1].firstMatch.exists }
-        return visibleButton?.0 ?? "Home"
+        return "Home"
     }
 
     private func assertCurrentRootDestination(
@@ -218,16 +209,7 @@ final class DictationEngineSettingsUITests: XCTestCase {
     }
 
     private func control(_ label: String, in app: XCUIApplication) -> XCUIElement {
-        let button = app.buttons[label]
-        if button.exists && button.isHittable { return button }
-        let deck = app.otherElements["root.control-deck"]
-        let strip = deck.exists ? deck : app.windows.firstMatch
-        for _ in 0..<controlDeckPages {
-            if button.exists && button.isHittable { return button }
-            strip.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.94))
-                .press(forDuration: 0.05, thenDragTo: strip.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.94)))
-        }
-        return button
+        app.buttons[label]
     }
 
     private func pageScrollView(_ app: XCUIApplication) -> XCUIElement {

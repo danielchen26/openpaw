@@ -39,15 +39,7 @@ final class DictationFlowUITests: XCTestCase {
         if let title = rootDestinations.first(where: { value.localizedCaseInsensitiveContains($0) }) {
             return title
         }
-        let visibleButton = [
-            ("Home", "root.destination.home"),
-            ("Terminal", "root.destination.terminal"),
-            ("Sessions", "root.destination.sessions"),
-            ("Inbox", "root.destination.inbox"),
-            ("Repo", "root.destination.repo"),
-            ("Settings", "root.destination.settings"),
-        ].first { app.buttons[$0.1].firstMatch.exists }
-        return visibleButton?.0 ?? "Home"
+        return "Home"
     }
 
     private func assertCurrentRootDestination(
@@ -78,15 +70,23 @@ final class DictationFlowUITests: XCTestCase {
             let current = currentRootDestination(in: app)
             if current == destination { return }
             let currentIndex = rootDestinations.firstIndex(of: current) ?? 0
-            let step = targetIndex >= currentIndex ? 1 : -1
-            let buttonIdentifier = step == 1 ? "root.destination.next" : "root.destination.previous"
-            let button = app.buttons[buttonIdentifier].firstMatch
-            XCTAssertTrue(button.waitForExistence(timeout: 5), "missing \(buttonIdentifier) while navigating to \(destination)")
-            XCTAssertTrue(button.isEnabled, "\(buttonIdentifier) disabled while navigating to \(destination)")
-            button.tap()
+            swipeRootDestination(forward: targetIndex >= currentIndex, in: app)
             dismissAlertIfPresent(app)
         }
         assertCurrentRootDestination(destination, in: app)
+    }
+
+    /// The strip's previous/next buttons are gone with the Control Deck; the root pager is driven by the same
+    /// horizontal fling a user makes.
+    private func swipeRootDestination(forward: Bool, in app: XCUIApplication) {
+        let window = app.windows.firstMatch
+        let sourceX: CGFloat = forward ? 0.82 : 0.18
+        let destinationX: CGFloat = forward ? 0.18 : 0.82
+        window.coordinate(withNormalizedOffset: CGVector(dx: sourceX, dy: 0.18))
+            .press(
+                forDuration: 0.05,
+                thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: destinationX, dy: 0.18))
+            )
     }
 
     private func goToTerminal(_ app: XCUIApplication) {

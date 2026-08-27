@@ -17,8 +17,9 @@ final class ScenarioLaunchUITests: XCTestCase {
     }
 
     private func openInbox(in app: XCUIApplication) {
-        let inbox = app.buttons["root.destination.inbox"]
-        XCTAssertTrue(inbox.waitForExistence(timeout: 15), "the Inbox destination never appeared")
+        // The deck's Inbox button is gone; the Home surface's own Inbox summary is the tap route now.
+        let inbox = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Inbox, '")).firstMatch
+        XCTAssertTrue(inbox.waitForExistence(timeout: 15), "the Inbox summary never appeared")
         inbox.tap()
     }
 
@@ -35,9 +36,7 @@ final class ScenarioLaunchUITests: XCTestCase {
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Open pending approval '")).firstMatch.exists)
         XCTAssertTrue(app.buttons["Open repository openpaw"].exists)
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Inbox, '")).firstMatch.exists)
-        let sessions = app.buttons["root.destination.sessions"]
-        XCTAssertTrue(sessions.exists)
-        XCTAssertEqual(sessions.label, "Sessions")
+        XCTAssertTrue(app.buttons["root.proactive-launcher.orb"].exists)
         XCTAssertFalse(app.buttons["Chat"].exists)
     }
 

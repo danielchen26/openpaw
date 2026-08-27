@@ -149,17 +149,14 @@ final class SessionCreationUITests: XCTestCase {
             XCTFail("session creation failed before navigation:\n\(commandFailure.debugDescription)")
         }
 
-        // Creation switches to Terminal and deliberately lands the one-row control deck on its keys page. The root
-        // destinations are the next deck page, so return the same way a person does rather than expecting an off-screen
-        // tab button to remain in the accessibility tree.
+        // Creation switches to Terminal. Return to Sessions with the root swipe, the same way a person does.
         XCTAssertTrue(
             app.buttons["Escape"].waitForExistence(timeout: 10),
             "session creation did not navigate to the interactive terminal")
-        swipeControlDeckToDestinations(app)
+        swipeRootBack(app)
         XCTAssertTrue(
-            app.buttons["Sessions"].waitForExistence(timeout: 5),
-            "the terminal control deck did not page back to root destinations")
-        app.buttons["Sessions"].tap()
+            app.otherElements["root.destination.pager"].waitForExistence(timeout: 5),
+            "the root pager disappeared after session creation")
 
         let created = app.buttons["Attach to \(name)"]
         for _ in 0..<10 where !created.exists {
@@ -171,11 +168,13 @@ final class SessionCreationUITests: XCTestCase {
         XCTAssertTrue(created.exists, "created a session but it never appeared in the list")
     }
 
-    private func swipeControlDeckToDestinations(_ app: XCUIApplication) {
+    /// One root fling from Terminal lands on Sessions: the destinations sit beside each other and the deck's
+    /// tab buttons are gone.
+    private func swipeRootBack(_ app: XCUIApplication) {
         let window = app.windows.firstMatch
-        window.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.955))
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.18))
             .press(
                 forDuration: 0.05,
-                thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.955)))
+                thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.18)))
     }
 }

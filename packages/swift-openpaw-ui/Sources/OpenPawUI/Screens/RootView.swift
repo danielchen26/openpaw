@@ -441,9 +441,13 @@ public struct RootView: View {
     /// Hold-anywhere dictation. Owned here so the gesture and its ring exist on every destination rather than
     /// being reimplemented per screen.
     @State private var pushToTalk = PushToTalkController()
-    /// The bottom strip: which page it is showing and whether it is folded away.
-    @State private var deck = ControlDeck()
-    @State private var deckBeforeTerminalSearch: ControlDeck?
+    /// The Paw Orb radial launcher: one frozen gesture state and the latest context graph it launches from.
+    @State private var launcherState = RadialLauncherState()
+    @State private var launcherGraph = WorkspaceContextGraphBuilder().build(
+        WorkspaceContextInput(snapshotID: UUID(), host: nil, connectionGeneration: 0, destination: .home))
+    /// The terminal key strip: esc, ctrl, arrows. On by default on the Terminal destination, toggled from the
+    /// launcher's Tools branch. The strip is the one Control Deck page a terminal cannot be driven without.
+    @State private var showsTerminalKeys = true
     @State private var isTerminalSearchPresented = false
     /// Modifiers the key bar is holding down. Owned here because the key bar moved out of the terminal screen and
     /// onto the strip, and a latched `ctrl` has to survive the user swiping to another page.
@@ -785,60 +789,77 @@ public struct RootView: View {
 
     // MARK: Compact
 
-    /// Content above, one paged strip below, both ours.
+    /// Content above, the Paw Orb floating bottom-trailing, and the terminal keys as the only remaining inset.
     ///
-    /// Not a `TabView`, for the same reason the sidebar is not a `List`: the platform control brings a surface we
-    /// cannot reach and, on macOS, places its strip at the top with labels that do not draw — so the compact
-    /// layout could not be verified on the only machine this project renders on.
-    ///
-    /// The strip is one row that pages sideways rather than a stack of bars. On the terminal there used to be
-    /// three of them — a control rail, this tab bar, and the key bar — which a phone screenshot showed piled up
-    /// with the last one crushed against the home indicator.
-    ///
-    /// Attached with `safeAreaInset` rather than stacked above the content. The strip is translucent, so content
-    /// has to keep drawing underneath it for there to be anything to see through; a `VStack` would stop the
-    /// content at the strip's top edge and leave the glass blurring a flat colour. The inset also means scroll
-    /// views inset their own content, so nothing scrollable ends up parked underneath the strip permanently.
-    ///
-    /// Stowed, it moves from an inset to an overlay. An inset reserves its height whatever it draws, and a strip
-    /// swiped off the screen that still reserved a row would have given back none of the space it was dismissed
-    /// for.
+    /// The paged Control Deck strip is gone. Its three pages became: destinations — the existing root swipe plus
+    /// the launcher's Tools nodes; view controls — Tools nodes routed through the same `TerminalControlBus`; and
+    /// the key strip, which stays as a bottom inset on the Terminal destination only, because esc/ctrl/arrows are
+    /// held down mid-command and cannot live behind a two-step launcher.
     private func tabs(width: RootWidth) -> some View {
         navigated(router.destination, width: width)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !isTerminalSearchPresented, !deck.isStowed { controlDeck(width: width) }
+                if showsTerminalKeyStrip { terminalKeyStrip(width: width) }
             }
-            .overlay(alignment: .bottomLeading) {
-                if !isTerminalSearchPresented, deck.isStowed { controlDeck(width: width) }
-            }
-            // Arriving somewhere new turns the strip to the page that screen is driven from, because a strip
-            // showing terminal keys over a settings screen is a row of controls that do nothing.
-            .onChange(of: router.destination) { _, destination in
-                deck = deck.showing(ControlDeck.page(arrivingAt: destination))
-            }
+            .overlay { launcherLayer }
     }
 
-    /// The room the strip takes from the content, and nothing when it has been swiped off the screen.
-    private var deckInset: CGFloat { isTerminalSearchPresented || deck.isStowed ? 0 : deck.height }
+    /// The room the key strip takes from the content on the Terminal destination, and nothing anywhere else.
+    private var deckInset: CGFloat { showsTerminalKeyStrip ? ControlDeck.contentHeight : 0 }
 
-    private func controlDeck(width: RootWidth) -> some View {
-        ControlDeckView(deck: $deck, overTerminal: router.destination == .terminal) {
-            keysPage(width: width)
-        } destinations: {
-            destinationsPage
-        } view: {
-            viewPage
-        }
+    private var showsTerminalKeyStrip: Bool {
+        router.destination == .terminal && showsTerminalKeys && !isTerminalSearchPresented
+    }
+
+    /// The radial launcher overlay: radial nodes and the preview card only while a gesture is live, plus the
+    /// permanently visible Orb. `allowsHitTesting` stays on because only the Orb and the card have gestures; the
+    /// rest of the overlay is `ZStack` space that does not intercept touches.
+    @ViewBuilder
+    private var launcherLayer: some View {
+        ProactiveRadialLauncherView(
+            graph: launcherGraph,
+            state: launcherStateBinding,
+            onEffect: handleLauncherEffect
+        )
         .destinationSwipeExclusion(.horizontalChildControl)
+        .onAppear { rebuildLauncherGraph() }
+        .onChange(of: model.connectionGeneration) { _, _ in
+            _ = launcherState.invalidate(.hostChanged)
+            rebuildLauncherGraph()
+        }
+        .onChange(of: model.selectedHostID) { _, _ in
+            _ = launcherState.invalidate(.hostChanged)
+            rebuildLauncherGraph()
+        }
+        .onChange(of: router.destination) { _, _ in rebuildLauncherGraph() }
+        .onChange(of: sessionSpace) { _, _ in rebuildLauncherGraph() }
+        .onChange(of: model.sessions) { _, _ in rebuildLauncherGraph() }
+        .onChange(of: model.inbox) { _, _ in rebuildLauncherGraph() }
+        .onChange(of: model.repos) { _, _ in rebuildLauncherGraph() }
+        .onChange(of: model.connection.isConnected) { _, _ in rebuildLauncherGraph() }
+    }
+
+    /// The launcher's begin taps flow through the binding, which is where dictation gives up the touch: a
+    /// gesture that belongs to the Orb must never simultaneously arm the full-screen hold.
+    private var launcherStateBinding: Binding<RadialLauncherState> {
+        Binding(
+            get: { launcherState },
+            set: { newValue in
+                let wasIdle = launcherState.phase == .idle
+                launcherState = newValue
+                if wasIdle, newValue.phase != .idle {
+                    pushToTalk.cancel()
+                }
+            }
+        )
     }
 
     /// The key bar, at the very bottom of the screen and scrolling sideways.
     ///
-    /// It used to sit above the tab bar, which put the keys a terminal is driven with in the middle of the chrome
-    /// and the app's navigation under the user's thumb. The keys are what gets used constantly, so they get the
-    /// bottom of the screen and the navigation is a swipe away.
-    private func keysPage(width: RootWidth) -> some View {
+    /// The one Control Deck page that stays a permanent surface: esc, ctrl and arrows are pressed continuously
+    /// while driving a terminal, and a modifier that has to be re-summoned through a launcher for every keypress
+    /// is not a modifier. The launcher's Tools branch toggles it for users who want the full screen back.
+    private func terminalKeyStrip(width: RootWidth) -> some View {
         ShortcutBarView(
             shortcuts: Binding(get: { settings.shortcuts }, set: { settings.shortcuts = $0 }),
             latched: $latchedModifiers,
@@ -846,124 +867,11 @@ public struct RootView: View {
             onChord: sendChord,
             onText: sendText
         )
-    }
-
-    private var destinationsPage: some View {
-        HStack(spacing: 0) {
-            adjacentDestinationButton(
-                ControlDeck.previousDestination(before: router.destination),
-                direction: .previous
-            )
-            destinationItem(router.destination)
-            adjacentDestinationButton(
-                ControlDeck.nextDestination(after: router.destination),
-                direction: .next
-            )
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func adjacentDestinationButton(
-        _ destination: ShellDestination?,
-        direction: DestinationPageDecision
-    ) -> some View {
-        Button {
-            if let destination { router.destination = destination }
-        } label: {
-            Image(systemName: direction == .previous ? "chevron.left" : "chevron.right")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(OpenPawTheme.textSecondary)
-        .disabled(destination == nil)
-        .accessibilityIdentifier("root.destination.\(direction == .previous ? "previous" : "next")")
-        .accessibilityLabel(destination.map {
-            "\(direction == .previous ? "Previous" : "Next") destination, \($0.title)"
-        } ?? "No \(direction == .previous ? "previous" : "next") destination")
-    }
-
-    private func destinationItem(_ destination: ShellDestination) -> some View {
-        let isSelected = router.destination == destination
-        return Button {
-            router.destination = destination
-        } label: {
-            VStack(spacing: OpenPawTheme.Space.hair) {
-                Image(systemName: destination.glyph)
-                    .font(.system(size: 20, weight: .medium, design: .monospaced))
-                    .overlay(alignment: .topTrailing) {
-                        if destination == .inbox, pendingCount > 0 {
-                            Text("\(pendingCount)")
-                                .font(OpenPawTheme.Machine.label)
-                                .padding(.horizontal, OpenPawTheme.Space.tight)
-                                .foregroundStyle(OpenPawTheme.ink)
-                                .background(OpenPawTheme.warn)
-                                .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.chip))
-                                .alignmentGuide(.top) { $0[.bottom] / 2 }
-                                .alignmentGuide(.trailing) { $0[.leading] }
-                        }
-                    }
-                if ControlDeck.showsDestinationTitle(
-                    isSelected: isSelected, isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
-                ) {
-                    Text(destination.title)
-                        .font(OpenPawTheme.Machine.label)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .foregroundStyle(isSelected ? OpenPawTheme.textPrimary : OpenPawTheme.textSecondary)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("root.destination.\(destination.rawValue)")
-        .accessibilityLabel(sidebarVoiceLabel(destination))
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-    }
-
-    /// Adjustments to the terminal, which is the only screen they apply to.
-    ///
-    /// Dictation keeps a button here even though holding anywhere is the everyday route to it: a press held for a
-    /// third of a second is not a gesture a VoiceOver user can perform, so deleting the only button would take
-    /// speech away from the people who most need it.
-    private var viewPage: some View {
-        HStack(spacing: OpenPawTheme.Space.small) {
-            deckButton(terminalControls.dictationGlyph, label: terminalControls.dictationLabel) {
-                terminalControls.dictate()
-            }
-            deckButton("magnifyingglass", label: "Search scrollback") {
-                terminalControls.search()
-            }
-            deckButton("doc.on.doc", label: "Copy all output") {
-                terminalControls.copyAll()
-            }
-            Spacer(minLength: 0)
-            deckButton("minus", label: "Smaller terminal text") {
-                settings.terminalFontSize = OpenPawSettings.clamp(fontSize: settings.terminalFontSize - 1)
-            }
-            Text("\(Int(settings.terminalFontSize))")
-                .font(OpenPawTheme.Machine.codeSmall)
-                .foregroundStyle(OpenPawTheme.textSecondary)
-                .frame(minWidth: 24)
-                .accessibilityLabel("Terminal cell size \(Int(settings.terminalFontSize)) points")
-            deckButton("plus", label: "Larger terminal text") {
-                settings.terminalFontSize = OpenPawSettings.clamp(fontSize: settings.terminalFontSize + 1)
-            }
-        }
-        .padding(.horizontal, OpenPawTheme.Space.medium)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func deckButton(_ glyph: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: glyph)
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(OpenPawTheme.textSecondary)
-        .accessibilityLabel(label)
+        .frame(height: ControlDeck.contentHeight)
+        .glassChrome(overTerminal: true, edge: .top)
+        .destinationSwipeExclusion(.horizontalChildControl)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("root.terminal-keys")
     }
 
     private func sendChord(_ chord: KeyChord) {
@@ -1165,11 +1073,173 @@ public struct RootView: View {
     private func updateTerminalSearchPresentation(_ isPresented: Bool) {
         guard isTerminalSearchPresented != isPresented else { return }
         isTerminalSearchPresented = isPresented
-        if isPresented {
-            deckBeforeTerminalSearch = deck
-        } else if let prior = deckBeforeTerminalSearch {
-            deck = prior
-            deckBeforeTerminalSearch = nil
+    }
+
+    // MARK: Radial launcher
+
+    /// Rebuilds the launcher's graph from current root state. Called on every state change the graph renders
+    /// from; the builder is pure and cheap, and a stale graph is a launcher offering sessions that are gone.
+    private func rebuildLauncherGraph() {
+        let input = RootLauncherIntegration.graphInput(
+            model: model,
+            sessionSpace: sessionSpace,
+            destination: router.destination,
+            selectedRepositoryPath: model.selectedRepo)
+        let graph = WorkspaceContextGraphBuilder().build(input)
+        launcherGraph = graph.attaching(proposals: ProposalEngine().proposals(for: input))
+    }
+
+    /// The launcher's terminal: every effect the state machine emits lands here exactly once per operation ID.
+    private func handleLauncherEffect(_ effect: RadialLauncherEffect) {
+        switch effect {
+        case .freeze, .cancel:
+            break
+        case .confirm(let operationID, let proposal):
+            executeLauncherProposal(proposal, operationID: operationID)
+        case .confirmAction(let operationID, let action):
+            performLauncherRoute(RootLauncherIntegration.route(for: action, operationID: operationID))
+        }
+    }
+
+    private func performLauncherRoute(_ route: RootLauncherIntegration.ConfirmedActionRoute) {
+        switch route {
+        case .none:
+            break
+        case .navigate(let destination):
+            router.destination = destination
+        case .switchHost:
+            requestedSheet = .manageHosts
+        case .openAgentSession(let sessionID):
+            model.selectedSessionID = sessionID
+            router.destination = .sessions
+        case .attach(let session):
+            attachLauncherSession(session)
+        case .focusWindow(let kind, let sessionID, let windowID):
+            focusLauncherWindow(kind: kind, sessionID: sessionID, windowID: windowID)
+        case .openRepository(let path):
+            model.selectedRepo = model.repos.first(where: { $0.path == path })?.name ?? model.selectedRepo
+            router.destination = .repo
+        case .tool(let tool):
+            performLauncherTool(tool)
+        case .executeProposal(let proposal, let operationID):
+            executeLauncherProposal(proposal, operationID: operationID)
+        }
+    }
+
+    /// Attach through the same guarded path the Sessions screen uses: ownership check, restoration recording,
+    /// then the coordinator, which routes to the terminal on success.
+    private func attachLauncherSession(_ session: RemoteSession) {
+        attachSession(session)
+    }
+
+    /// Window focus is an attach followed by a window selection inside the multiplexer. The attach itself is
+    /// the part the app owns; the frozen graph's window is selected with the multiplexer's own command so the
+    /// user lands looking at the window they aimed at, not whichever was last active.
+    private func focusLauncherWindow(kind: MultiplexerKind, sessionID: String, windowID: String) {
+        guard canUseCurrentSessionSpace() else { return }
+        guard let hostID = model.selectedHostID,
+              let action = SessionSpaceActionPlan.attach(
+                hostID: hostID,
+                session: .target(sessionID, kind: kind)) else {
+            presentUnavailableSessionAction()
+            return
+        }
+        runSessionAction(action)
+        Task {
+            // Give the attach a beat to land before steering the window; a select sent before the client is
+            // attached is dropped by tmux without an error.
+            try? await Task.sleep(for: .milliseconds(300))
+            guard model.connection.isConnected, let terminal = model.terminal else { return }
+            let command = Self.windowSelectionCommand(kind: kind, windowID: windowID)
+            guard !command.isEmpty else { return }
+            try? await terminal.send(text: command)
+        }
+    }
+
+    static func windowSelectionCommand(kind: MultiplexerKind, windowID: String) -> String {
+        switch kind {
+        case .tmux: "tmux select-window -t '\(windowID)'\n"
+        case .zellij: "zellij action go-to-tab-name '\(windowID)'\n"
+        case .screen, .herdr: ""
+        }
+    }
+
+    /// Tools raise the same signals the Control Deck buttons used to. Terminal-scoped tools also navigate to
+    /// the terminal first: a "search scrollback" confirmed from the Sessions screen that silently signals a bus
+    /// nobody is listening to would be a launcher that does nothing.
+    private func performLauncherTool(_ tool: WorkspaceToolAction) {
+        switch tool {
+        case .navigate(let destination):
+            router.destination = RootLauncherIntegration.shellDestination(for: destination)
+        case .terminalKeys:
+            router.destination = .terminal
+            showsTerminalKeys.toggle()
+        case .dictate:
+            router.destination = .terminal
+            terminalControls.dictate()
+        case .search:
+            router.destination = .terminal
+            terminalControls.search()
+        case .copyAll:
+            router.destination = .terminal
+            terminalControls.copyAll()
+        case .fontSmaller:
+            settings.terminalFontSize = OpenPawSettings.clamp(fontSize: settings.terminalFontSize - 1)
+        case .fontLarger:
+            settings.terminalFontSize = OpenPawSettings.clamp(fontSize: settings.terminalFontSize + 1)
+        }
+    }
+
+    /// Proposals run through the execution coordinator, whose ownership checks are pinned to the frozen graph
+    /// that offered the proposal. A world that moved since the freeze downgrades to reconnect-needed, never a
+    /// command in the wrong pane.
+    private func executeLauncherProposal(_ proposal: ProactiveProposal, operationID: UUID) {
+        // Navigation and tool proposals are app-side: no terminal dispatch, so no coordinator.
+        switch proposal.payload {
+        case .navigate(let target):
+            if let destination = target.destination {
+                router.destination = RootLauncherIntegration.shellDestination(for: destination)
+            }
+            return
+        case .tool(let tool):
+            performLauncherTool(tool)
+            return
+        case .agentMessage, .terminalCommand:
+            break
+        }
+        guard let hostID = model.selectedHostID, let terminal = model.terminal else { return }
+        let graph = launcherGraph
+        let coordinator = ProposalExecutionCoordinator(
+            expectedHostID: hostID,
+            expectedGeneration: model.connectionGeneration,
+            expectedGraphSnapshotID: graph.snapshotID,
+            context: { [weak model] in
+                guard let model else {
+                    return ProposalExecutionContext(
+                        hostID: nil, connectionGeneration: -1, graphSnapshotID: graph.snapshotID,
+                        selectedSessionID: nil, selectedTabID: nil, isConnected: false)
+                }
+                return RootLauncherIntegration.executionContext(
+                    model: model, graph: graph, target: proposal.target)
+            },
+            executor: sessionCommandExecutor,
+            terminal: terminal)
+        Task {
+            let phase = await coordinator.execute(proposal, operationID: operationID.uuidString)
+            switch phase {
+            case .completed:
+                router.destination = .terminal
+            case .reconnectNeeded:
+                model.lastError = PresentedError(
+                    title: "Action expired",
+                    detail: "The connection changed since this suggestion was made. Reconnect and try again.",
+                    isRecoverable: true)
+            case .failed(_, let message):
+                model.lastError = PresentedError(
+                    title: "Suggestion failed", detail: message, isRecoverable: true)
+            case .routing, .executing:
+                break
+            }
         }
     }
 

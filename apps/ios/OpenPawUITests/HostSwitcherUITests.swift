@@ -23,9 +23,13 @@ final class HostSwitcherUITests: XCTestCase {
     private func hostSwitcher(in app: XCUIApplication) -> XCUIElement {
         let switcher = app.buttons["host.switcher"]
         if !switcher.waitForExistence(timeout: 2) {
-            let next = app.buttons["root.destination.next"]
-            XCTAssertTrue(next.waitForExistence(timeout: 10))
-            next.tap()
+            // The switcher lives on the terminal header; reach it with the root fling now that the deck's
+            // next button is gone.
+            let window = app.windows.firstMatch
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.18))
+                .press(
+                    forDuration: 0.05,
+                    thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.18)))
         }
         XCTAssertTrue(switcher.waitForExistence(timeout: 10))
         return switcher
