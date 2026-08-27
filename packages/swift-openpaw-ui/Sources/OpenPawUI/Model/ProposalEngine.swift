@@ -1,5 +1,6 @@
 import Foundation
 import OpenPawProtocol
+import OpenPawTerminalCore
 
 /// A pure projection from an immutable workspace snapshot to deterministic, local next-step proposals.
 /// It never calls a backend or writes an event, so populating the launcher cannot create a hidden Agent turn.
@@ -330,24 +331,61 @@ public struct ProposalEngine: Sendable {
     ) -> WorkspaceContextTarget {
         let cwd = input.agentSessions.first { $0.sessionID == sessionID }?.cwd
         let session = input.agentSessions.first { $0.sessionID == sessionID }
-        let selectedHerdr = sessionID == input.selectedSessionID ? input.sessionSpace.remoteSessions.first {
-            $0.kind == .herdr &&
-            (input.selectedPaneID == nil || $0.id == input.selectedPaneID) &&
-            (input.selectedTabID == nil || $0.tabID == input.selectedTabID)
-        } : nil
-        let matchedHerdr = selectedHerdr ?? session?.multiplexerTarget.flatMap { target in
-            input.sessionSpace.remoteSessions.first { $0.kind == .herdr && ($0.id == target || $0.terminalID == target) }
+        let selectedRemote: RemoteSession? = if sessionID == input.selectedSessionID,
+                                                let paneID = input.selectedPaneID {
+            input.sessionSpace.remoteSessions.first {
+                $0.kind == .herdr &&
+                $0.id == paneID &&
+                (input.selectedTabID == nil || $0.tabID == input.selectedTabID)
+            }
+        } else {
+            nil
+        }
+        let matchedRemote = selectedRemote ?? session?.multiplexerTarget.flatMap { target in
+            matchedRemoteSession(for: target, in: input.sessionSpace.remoteSessions)
         }
         return WorkspaceContextTarget(
             hostID: input.host?.id,
             destination: destination,
+            multiplexerKind: matchedRemote?.kind,
+            multiplexerSessionID: matchedRemote?.id,
             sessionID: sessionID,
-            workspaceID: matchedHerdr?.workspaceID,
-            tabID: matchedHerdr?.tabID ?? (sessionID == input.selectedSessionID ? input.selectedTabID : nil),
-            paneID: matchedHerdr?.id ?? (sessionID == input.selectedSessionID ? input.selectedPaneID : nil),
-            terminalID: matchedHerdr?.terminalID,
+            workspaceID: matchedRemote?.workspaceID,
+            tabID: matchedRemote?.tabID ?? (sessionID == input.selectedSessionID ? input.selectedTabID : nil),
+            paneID: matchedRemote?.kind == .herdr ? matchedRemote?.id : nil,
+            terminalID: matchedRemote?.terminalID,
             repositoryPath: repositoryRoot(matching: cwd, repositories: input.repositories)
         )
+    }
+
+    private func matchedRemoteSession(for target: String, in remoteSessions: [RemoteSession]) -> RemoteSession? {
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let components = trimmed.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        let hintedKind = components.first.flatMap { MultiplexerKind(rawValue: $0) }
+        let candidates = hintedKind.map { kind in remoteSessions.filter { $0.kind == kind } } ?? remoteSessions
+        let unprefixed = hintedKind == nil ? trimmed : components.dropFirst().joined(separator: ":")
+
+        for identity in [trimmed, unprefixed] where !identity.isEmpty {
+            if let match = uniqueRemoteSession(in: candidates, where: { $0.id == identity }) { return match }
+            if let match = uniqueRemoteSession(in: candidates, where: { $0.terminalID == identity }) { return match }
+            if let match = uniqueRemoteSession(in: candidates, where: { $0.name == identity }) { return match }
+        }
+
+        let sessionName = unprefixed.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            .first.map(String.init) ?? unprefixed
+        guard !sessionName.isEmpty else { return nil }
+        if let match = uniqueRemoteSession(in: candidates, where: { $0.id == sessionName }) { return match }
+        return uniqueRemoteSession(in: candidates, where: { $0.name == sessionName })
+    }
+
+    private func uniqueRemoteSession(
+        in sessions: [RemoteSession],
+        where predicate: (RemoteSession) -> Bool
+    ) -> RemoteSession? {
+        let matches = sessions.filter(predicate)
+        return matches.count == 1 ? matches[0] : nil
     }
 
     private func eligibleAgentSessionIDs(_ input: WorkspaceContextInput) -> Set<String> {

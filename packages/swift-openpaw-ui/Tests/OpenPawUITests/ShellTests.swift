@@ -1778,6 +1778,54 @@ struct TypedSessionCommandExecutionTests {
         #expect(terminal.runCommands == ["herdr pane get w3:p9"])
         #expect(terminal.sentTexts.isEmpty)
     }
+
+    @MainActor
+    @Test("Herdr attach rejects stale workspace, tab, or terminal metadata")
+    func herdrAttachRequiresExactDiscoveredIdentity() async {
+        let terminal = RecordingTerminalBackend()
+        let executor = TerminalSessionCommandExecutor(terminal: terminal)
+        let session = RemoteSession(
+            id: "w3:p9",
+            name: "fix the build",
+            kind: .herdr,
+            terminalID: "term-current",
+            workspaceID: "workspace-current",
+            tabID: "tab-current")
+        terminal.runResponses["herdr pane get w3:p9"] = #"{"id":"cli:pane:get","result":{"pane_id":"w3:p9","terminal_id":"term-stale","workspace_id":"workspace-current","tab_id":"tab-current"}}"#
+
+        do {
+            _ = try await executor.executeSessionCommand(.attach(session))
+            Issue.record("expected stale Herdr metadata to stop attachment")
+        } catch let error as MultiplexerError {
+            if case .malformedOutput(let kind, _) = error {
+                #expect(kind == .herdr)
+            } else {
+                Issue.record("unexpected multiplexer error: \(error)")
+            }
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+
+        #expect(terminal.sentTexts.isEmpty)
+    }
+
+    @MainActor
+    @Test("Non-Herdr attach prefers an exact native ID over an earlier name match")
+    func nonHerdrAttachPrefersExactID() async throws {
+        let terminal = RecordingTerminalBackend()
+        let executor = TerminalSessionCommandExecutor(terminal: terminal)
+        let requested = RemoteSession.target("$9", kind: .tmux)
+        let first = ["$1", "$9", "0", "1", "1755697800", "1755701400", "/srv/old"]
+            .joined(separator: Multiplexer.fieldSeparator)
+        let exact = ["$9", "work", "0", "1", "1755697800", "1755701400", "/srv/work"]
+            .joined(separator: Multiplexer.fieldSeparator)
+        terminal.runResponses[TmuxAdapter().discoverCommand] = first + "\n" + exact
+
+        let acknowledgement = try await executor.executeSessionCommand(.attach(requested))
+
+        #expect(acknowledgement.session?.id == "$9")
+        #expect(terminal.sentTexts == ["tmux attach-session -t '$9'\n"])
+    }
 }
 
 @Suite("Structured backend lifecycle")

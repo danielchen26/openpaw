@@ -1043,6 +1043,12 @@ public struct HerdrAdapter: MultiplexerAdapter {
     /// acknowledgement by itself: the envelope must contain the exact pane that was requested before OpenPaw enters
     /// the interactive terminal or persists restoration state.
     public func validatePaneProbeResponse(_ json: String, expectedPaneID: String) throws {
+        try validatePaneProbeResponse(json, expected: .target(expectedPaneID, kind: .herdr))
+    }
+
+    /// Validates every persisted Herdr identity component that the caller knows. Pane IDs alone are insufficient because
+    /// a stale snapshot can retain a pane handle after its terminal, tab, or workspace has been replaced.
+    public func validatePaneProbeResponse(_ json: String, expected session: RemoteSession) throws {
         guard let data = json.data(using: .utf8),
               let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw MultiplexerError.malformedOutput(kind: .herdr, detail: "pane probe was not acknowledged")
@@ -1051,9 +1057,21 @@ public struct HerdrAdapter: MultiplexerAdapter {
         guard error == nil || error is NSNull,
               let result = envelope["result"] as? [String: Any],
               let paneID = result["pane_id"] as? String,
-              paneID == expectedPaneID else {
+              paneID == session.id,
+              Self.matchesExpectedIdentity(result, key: "terminal_id", expected: session.terminalID),
+              Self.matchesExpectedIdentity(result, key: "workspace_id", expected: session.workspaceID),
+              Self.matchesExpectedIdentity(result, key: "tab_id", expected: session.tabID) else {
             throw MultiplexerError.malformedOutput(kind: .herdr, detail: "pane probe was not acknowledged")
         }
+    }
+
+    private static func matchesExpectedIdentity(
+        _ result: [String: Any],
+        key: String,
+        expected: String?
+    ) -> Bool {
+        guard let expected else { return true }
+        return result[key] as? String == expected
     }
 
     /// OpenPaw presents Herdr workspaces through their root panes. A workspace creation receipt gives the exact pane id

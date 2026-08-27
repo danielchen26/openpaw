@@ -255,6 +255,8 @@ final class ProposalEngineTests: XCTestCase {
         )
 
         let proposal = try XCTUnwrap(ProposalEngine().proposals(for: input).first { $0.title == "Use selected pane" })
+        XCTAssertEqual(proposal.target.multiplexerKind, .herdr)
+        XCTAssertEqual(proposal.target.multiplexerSessionID, "pane-1")
         XCTAssertEqual(proposal.target.workspaceID, "workspace-1")
         XCTAssertEqual(proposal.target.tabID, "tab-1")
         XCTAssertEqual(proposal.target.paneID, "pane-1")
@@ -291,6 +293,23 @@ final class ProposalEngineTests: XCTestCase {
         XCTAssertEqual(selected.target.paneID, "pane-selected")
         XCTAssertEqual(other.target.paneID, "pane-other")
         XCTAssertNotEqual(other.target.paneID, "pane-selected")
+    }
+
+    func testExecutableAgentTargetResolvesExactTmuxSessionIdentity() throws {
+        let remote = RemoteSession(id: "$9", name: "work", kind: .tmux)
+        let plan = Plan(planID: "plan-tmux", steps: [.init(id: "step", title: "Continue tmux work", status: .inProgress)])
+        let input = makeInput(
+            agentSessions: [session(multiplexerTarget: "work:2.0")],
+            transcripts: [sessionID: [event(seq: 1, body: .planUpdated(plan))]],
+            selectedSessionID: sessionID,
+            sessionSpace: .init(hostID: hostID, connectionGeneration: 4, remoteSessions: [remote])
+        )
+
+        let proposal = try XCTUnwrap(ProposalEngine().proposals(for: input).first { $0.title == "Continue tmux work" })
+
+        XCTAssertEqual(proposal.target.sessionID, sessionID)
+        XCTAssertEqual(proposal.target.multiplexerKind, .tmux)
+        XCTAssertEqual(proposal.target.multiplexerSessionID, "$9")
     }
 
     func testEqualScoresUseStableIDTieBreaking() {

@@ -663,14 +663,12 @@ public final class TerminalSessionCommandExecutor: SessionSpaceCommandExecuting 
         if requested.kind == .herdr {
             let adapter = HerdrAdapter()
             let output = try await runner.run(adapter.paneProbeCommand(requested))
-            try adapter.validatePaneProbeResponse(output, expectedPaneID: requested.id)
+            try adapter.validatePaneProbeResponse(output, expected: requested)
             return requested
         }
         let sessions = try await MultiplexerAdapters.adapter(for: requested.kind)
             .discoverSessions(runner: runner)
-        guard let session = sessions.first(where: { candidate in
-            candidate.isAlive && Self.matches(candidate, target: requested.id)
-        }) else {
+        guard let session = Self.exactAcknowledgedSession(in: sessions, target: requested.id) else {
             throw SessionSpaceCommandExecutionError.sessionUnavailable(
                 kind: requested.kind,
                 target: requested.id)
@@ -691,6 +689,24 @@ public final class TerminalSessionCommandExecutor: SessionSpaceCommandExecuting 
 
     private static func matches(_ session: RemoteSession, target: String) -> Bool {
         session.id == target || session.name == target || session.id.hasSuffix(".\(target)")
+    }
+
+    private static func exactAcknowledgedSession(
+        in sessions: [RemoteSession],
+        target: String
+    ) -> RemoteSession? {
+        let alive = sessions.filter(\.isAlive)
+        if let exactID = uniqueSession(in: alive, where: { $0.id == target }) { return exactID }
+        if let exactName = uniqueSession(in: alive, where: { $0.name == target }) { return exactName }
+        return uniqueSession(in: alive, where: { $0.id.hasSuffix(".\(target)") })
+    }
+
+    private static func uniqueSession(
+        in sessions: [RemoteSession],
+        where predicate: (RemoteSession) -> Bool
+    ) -> RemoteSession? {
+        let matches = sessions.filter(predicate)
+        return matches.count == 1 ? matches[0] : nil
     }
 }
 

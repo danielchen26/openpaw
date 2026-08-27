@@ -121,6 +121,9 @@ public struct WorkspaceContextTarget: Sendable, Hashable {
     public var hostID: HostID?
     public var destination: WorkspaceContextDestination?
     public var multiplexerKind: MultiplexerKind?
+    /// The multiplexer-native session handle used for routing. This is distinct from ``sessionID``, which identifies
+    /// the Agent protocol session whose proposal owns the action.
+    public var multiplexerSessionID: String?
     public var sessionID: String?
     public var workspaceID: String?
     public var tabID: String?
@@ -132,6 +135,7 @@ public struct WorkspaceContextTarget: Sendable, Hashable {
         hostID: HostID? = nil,
         destination: WorkspaceContextDestination? = nil,
         multiplexerKind: MultiplexerKind? = nil,
+        multiplexerSessionID: String? = nil,
         sessionID: String? = nil,
         workspaceID: String? = nil,
         tabID: String? = nil,
@@ -142,6 +146,7 @@ public struct WorkspaceContextTarget: Sendable, Hashable {
         self.hostID = hostID
         self.destination = destination
         self.multiplexerKind = multiplexerKind
+        self.multiplexerSessionID = multiplexerSessionID
         self.sessionID = sessionID
         self.workspaceID = workspaceID
         self.tabID = tabID
