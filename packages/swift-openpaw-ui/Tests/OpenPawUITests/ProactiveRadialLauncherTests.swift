@@ -65,6 +65,51 @@ struct ProactiveRadialLauncherTests {
         #expect(geometry.depth(from: origin, to: CGPoint(x: 0, y: -(midpoint + 1))) == 2)
     }
 
+    @Test("The preview card appears live once the drag reaches the second layer, and not on the first")
+    func livePreviewFollowsDragDepth() {
+        let geometry = RadialGeometry()
+        var state = RadialLauncherState()
+        state.begin(graph: Self.nestedGraph(), at: .zero)
+
+        // First layer: arc only, no card.
+        state.move(to: CGPoint(x: 0, y: -geometry.ringRadius(depth: 1)))
+        #expect(state.selection?.path.count == 1)
+        #expect(LauncherLivePreviewPolicy.content(for: state) == nil)
+
+        // Second layer: the card previews the selection while the finger is still down.
+        state.move(to: CGPoint(x: 0, y: -geometry.ringRadius(depth: 2)))
+        #expect(state.selection?.path.count == 2)
+        let live = LauncherLivePreviewPolicy.content(for: state)
+        #expect(live != nil)
+        #expect(live?.title == "Open home")
+
+        // Releasing freezes: the same card remains as the confirmation surface.
+        #expect(state.end() == .freeze)
+        #expect(LauncherLivePreviewPolicy.content(for: state) != nil)
+    }
+
+    private static func nestedGraph() -> WorkspaceContextGraph {
+        let child = WorkspaceContextNode(
+            id: "child",
+            kind: .tool,
+            title: "Open home",
+            action: .openDestination(.home)
+        )
+        return WorkspaceContextGraph(
+            snapshotID: UUID(uuidString: "00000000-0000-0000-0000-000000000030")!,
+            hostID: nil,
+            connectionGeneration: 1,
+            root: WorkspaceContextNode(
+                id: "root",
+                kind: .host,
+                title: "Root",
+                children: [
+                    WorkspaceContextNode(id: "branch", kind: .session, title: "Branch", children: [child])
+                ]
+            )
+        )
+    }
+
     @Test("Proposal card anchors in the upper middle between the island and keyboard")
     func proposalCardAnchor() {
         let frame = ProposalPreviewCardPresentation.frame(

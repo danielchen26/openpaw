@@ -34,6 +34,23 @@ public enum ProposalPreviewCardPresentation {
     }
 }
 
+/// When the preview card is on screen. It is not only the frozen confirmation surface: as soon as a drag
+/// reaches the second layer, the card appears live in the upper middle of the screen showing what releasing
+/// would line up. First-layer browsing stays card-free so the arc remains the whole interface.
+public enum LauncherLivePreviewPolicy {
+    public nonisolated static func content(for state: RadialLauncherState) -> LauncherPreviewContent? {
+        switch state.phase {
+        case .frozenPreview, .confirmed:
+            return LauncherPreviewContent(state: state)
+        case .tracking:
+            guard let selection = state.selection, selection.path.count >= 2 else { return nil }
+            return LauncherPreviewContent(selection: selection)
+        case .idle, .accessibleBrowsing:
+            return nil
+        }
+    }
+}
+
 /// The unified data a frozen preview renders, whether the selection was a proactive proposal or an ordinary typed
 /// action. Every frozen selection gets a complete preview: title, detail, risk framing, and a named confirmation.
 public struct LauncherPreviewContent: Sendable, Hashable {

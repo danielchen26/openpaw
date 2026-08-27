@@ -180,16 +180,8 @@ public struct ProactiveRadialLauncherView: View {
             }
     }
 
-    /// The preview card is not only the frozen confirmation surface: as soon as the drag reaches the second
-    /// layer it appears live in the upper middle of the screen, showing what releasing would line up.
     private var previewContent: LauncherPreviewContent? {
-        if state.phase == .frozenPreview || state.phase == .confirmed {
-            return LauncherPreviewContent(state: state)
-        }
-        if state.phase == .tracking, let selection = state.selection, selection.path.count >= 2 {
-            return LauncherPreviewContent(selection: selection)
-        }
-        return nil
+        LauncherLivePreviewPolicy.content(for: state)
     }
 
     /// Renders every sibling ring along the current selection path plus, one layer out, the children of the
