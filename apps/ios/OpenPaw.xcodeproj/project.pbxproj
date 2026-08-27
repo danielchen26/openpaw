@@ -57,6 +57,7 @@
 		1A2B3C00000000000000F107 /* RootTabSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F106 /* RootTabSwipeUITests.swift */; };
 		1A2B3C00000000000000F109 /* DestinationSwipeCatcherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F108 /* DestinationSwipeCatcherTests.swift */; };
 		1A2B3C00000000000000F111 /* HostSwitcherUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F110 /* HostSwitcherUITests.swift */; };
+		1A2B3C00000000000000F121 /* OrbDragProbeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F120 /* OrbDragProbeUITests.swift */; };
 		1A2B3C00000000000000F113 /* TailscaleAdminConnector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F112 /* TailscaleAdminConnector.swift */; };
 		1A2B3C00000000000000F115 /* TailscaleAdminConnectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C00000000000000F114 /* TailscaleAdminConnectorTests.swift */; };
 /* End PBXBuildFile section */
@@ -124,6 +125,7 @@
 		1A2B3C00000000000000F106 /* RootTabSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabSwipeUITests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F108 /* DestinationSwipeCatcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DestinationSwipeCatcherTests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F110 /* HostSwitcherUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSwitcherUITests.swift; sourceTree = "<group>"; };
+		1A2B3C00000000000000F120 /* OrbDragProbeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbDragProbeUITests.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F112 /* TailscaleAdminConnector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailscaleAdminConnector.swift; sourceTree = "<group>"; };
 		1A2B3C00000000000000F114 /* TailscaleAdminConnectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailscaleAdminConnectorTests.swift; sourceTree = "<group>"; };
 		1A2B3C0000000000000000B2 /* OpenPawUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenPawUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -244,6 +246,7 @@
 				1A2B3C00000000000000F104 /* ScenarioLaunchUITests.swift */,
 				1A2B3C00000000000000F106 /* RootTabSwipeUITests.swift */,
 				1A2B3C00000000000000F110 /* HostSwitcherUITests.swift */,
+				1A2B3C00000000000000F120 /* OrbDragProbeUITests.swift */,
 			);
 			path = OpenPawUITests;
 			sourceTree = "<group>";
@@ -436,6 +439,7 @@
 				1A2B3C00000000000000F105 /* ScenarioLaunchUITests.swift in Sources */,
 				1A2B3C00000000000000F107 /* RootTabSwipeUITests.swift in Sources */,
 				1A2B3C00000000000000F111 /* HostSwitcherUITests.swift in Sources */,
+				1A2B3C00000000000000F121 /* OrbDragProbeUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

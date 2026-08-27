@@ -438,6 +438,7 @@ public struct RootView: View {
     private let persistHostStore: @MainActor @Sendable (HostStore) -> Void
     private let onOpenPawURL: (URL) -> Void
     @State private var sessionSpace = SessionSpaceSnapshot()
+    @State private var reportedDiscoveryIssues: [String] = []
     /// Hold-anywhere dictation. Owned here so the gesture and its ring exist on every destination rather than
     /// being reimplemented per screen.
     @State private var pushToTalk = PushToTalkController()
@@ -1350,12 +1351,16 @@ public struct RootView: View {
               snapshot.hostID == model.selectedHostID,
               snapshot.connectionGeneration == model.connectionGeneration else { return }
         sessionSpace = snapshot
-        if !snapshot.issues.isEmpty {
+        // The same unavailable-multiplexer list re-arrives on every periodic refresh; re-raising the alert each
+        // time turns a static fact into an interruption loop. Only a change in the issues is news.
+        if !snapshot.issues.isEmpty, snapshot.issues != reportedDiscoveryIssues {
+            reportedDiscoveryIssues = snapshot.issues
             model.lastError = PresentedError(
                 title: "Session discovery issue",
                 detail: snapshot.issues.joined(separator: "\n"),
                 isRecoverable: true)
         }
+        if snapshot.issues.isEmpty { reportedDiscoveryIssues = [] }
     }
 
     private func refreshModelAndSessionSpace() async {

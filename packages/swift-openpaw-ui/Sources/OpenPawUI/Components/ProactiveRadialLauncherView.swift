@@ -137,6 +137,10 @@ public struct ProactiveRadialLauncherView: View {
             // The ZStack sizes to its children; without this it shrinks to the orb and parks it at the
             // GeometryReader's top-leading origin instead of the bottom-trailing corner.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            // The drag gesture and the node renderer must share one coordinate space: the gesture records
+            // `state.origin` and the rings are drawn with `.position(...)` from that same origin. A local-space
+            // gesture on the orb would put the origin near (32, 32) and fling every ring to the top-left corner.
+            .coordinateSpace(name: Self.coordinateSpaceName)
             .animation(.easeOut(duration: reduceMotion ? 0.16 : 0.24), value: state.phase)
             .animation(.easeOut(duration: reduceMotion ? 0.16 : 0.24), value: state.selection)
             .sheet(isPresented: $showsAccessibleHierarchy, onDismiss: endAccessibleBrowsing) {
@@ -148,8 +152,10 @@ public struct ProactiveRadialLauncherView: View {
         }
     }
 
+    private static let coordinateSpaceName = "proactive-launcher"
+
     private var orbGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.coordinateSpaceName))
             .onChanged { value in
                 if !didHandleTouchDown {
                     didHandleTouchDown = true
