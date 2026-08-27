@@ -128,6 +128,12 @@ public struct RemoteSession: Sendable, Hashable, Codable, Identifiable {
     public var kind: MultiplexerKind
     /// Herdr's terminal transport handle. Herdr manages panes by ``id`` but attaches a stream by this separate ID.
     public var terminalID: String?
+    /// Herdr workspace that owns this pane. Nil for other multiplexers and older persisted snapshots.
+    public var workspaceID: String?
+    /// Herdr tab that owns this pane. Nil for other multiplexers and older persisted snapshots.
+    public var tabID: String?
+    /// User-visible Herdr tab label captured during discovery.
+    public var tabLabel: String?
     public var isAttached: Bool
     /// False for sessions the multiplexer reports as dead/exited but still lists.
     public var isAlive: Bool
@@ -143,6 +149,9 @@ public struct RemoteSession: Sendable, Hashable, Codable, Identifiable {
         name: String,
         kind: MultiplexerKind,
         terminalID: String? = nil,
+        workspaceID: String? = nil,
+        tabID: String? = nil,
+        tabLabel: String? = nil,
         isAttached: Bool = false,
         isAlive: Bool = true,
         windowCount: Int = 0,
@@ -155,6 +164,9 @@ public struct RemoteSession: Sendable, Hashable, Codable, Identifiable {
         self.name = name
         self.kind = kind
         self.terminalID = terminalID
+        self.workspaceID = workspaceID
+        self.tabID = tabID
+        self.tabLabel = tabLabel
         self.isAttached = isAttached
         self.isAlive = isAlive
         self.windowCount = windowCount
@@ -173,6 +185,9 @@ public struct RemoteSession: Sendable, Hashable, Codable, Identifiable {
     private enum CodingKeys: String, CodingKey {
         case id, name, kind
         case terminalID = "terminal_id"
+        case workspaceID = "workspace_id"
+        case tabID = "tab_id"
+        case tabLabel = "tab_label"
         case isAttached = "is_attached"
         case isAlive = "is_alive"
         case windowCount = "window_count"
@@ -843,6 +858,7 @@ public struct HerdrAdapter: MultiplexerAdapter {
 
     private struct TabDTO: Decodable {
         var tab_id: String
+        var workspace_id: String?
         var label: String?
     }
 
@@ -921,12 +937,18 @@ public struct HerdrAdapter: MultiplexerAdapter {
             return []
         }
         // Tab labels only improve the names, so a failure here must not lose the panes themselves.
-        let tabs = (try? await runner.run(tabListCommand)).map(Self.parseTabLabels) ?? [:]
-        return try parseSessions(output, tabLabels: tabs)
+        let tabs = (try? await runner.run(tabListCommand)).map(Self.parseTabMetadata)
+            ?? (labels: [:], workspaces: [:])
+        return try parseSessions(
+            output,
+            tabLabels: tabs.labels,
+            tabWorkspaces: tabs.workspaces)
     }
 
-    static func parseTabLabels(_ json: String) -> [String: String] {
-        guard let data = json.data(using: .utf8) else { return [:] }
+    static func parseTabMetadata(_ json: String) -> (
+        labels: [String: String], workspaces: [String: String]
+    ) {
+        guard let data = json.data(using: .utf8) else { return ([:], [:]) }
         let decoder = Self.decoder()
         let tabs: [TabDTO]
         if let envelope = try? decoder.decode(Envelope<TabList>.self, from: data), let result = envelope.result {
@@ -934,17 +956,26 @@ public struct HerdrAdapter: MultiplexerAdapter {
         } else if let bare = try? decoder.decode(TabList.self, from: data) {
             tabs = bare.tabs
         } else {
-            return [:]
+            return ([:], [:])
         }
-        return Dictionary(tabs.compactMap { tab in tab.label.map { (tab.tab_id, $0) } },
-                          uniquingKeysWith: { first, _ in first })
+        let labels = Dictionary(
+            tabs.compactMap { tab in tab.label.map { (tab.tab_id, $0) } },
+            uniquingKeysWith: { first, _ in first })
+        let workspaces = Dictionary(
+            tabs.compactMap { tab in tab.workspace_id.map { (tab.tab_id, $0) } },
+            uniquingKeysWith: { first, _ in first })
+        return (labels, workspaces)
     }
 
     public func parseSessions(_ json: String) throws -> [RemoteSession] {
-        try parseSessions(json, tabLabels: [:])
+        try parseSessions(json, tabLabels: [:], tabWorkspaces: [:])
     }
 
-    public func parseSessions(_ json: String, tabLabels: [String: String]) throws -> [RemoteSession] {
+    public func parseSessions(
+        _ json: String,
+        tabLabels: [String: String],
+        tabWorkspaces: [String: String] = [:]
+    ) throws -> [RemoteSession] {
         guard let data = json.data(using: .utf8) else {
             throw MultiplexerError.malformedOutput(kind: .herdr, detail: "output is not UTF-8")
         }
@@ -965,6 +996,9 @@ public struct HerdrAdapter: MultiplexerAdapter {
                 name: dto.displayName(tabLabels: tabLabels),
                 kind: .herdr,
                 terminalID: dto.terminal_id,
+                workspaceID: dto.workspace_id ?? dto.tab_id.flatMap { tabWorkspaces[$0] },
+                tabID: dto.tab_id,
+                tabLabel: dto.tab_id.flatMap { tabLabels[$0] },
                 // Herdr has no "attached" concept; the focused pane is the one the user is looking at.
                 isAttached: dto.focused ?? false,
                 isAlive: true,

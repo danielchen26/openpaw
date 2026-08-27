@@ -640,6 +640,33 @@ final class SessionSpacePresentationTests: XCTestCase {
     }
 
     @MainActor
+    func testLiveProviderPreservesHerdrWorkspaceAndTabMetadata() async throws {
+        let pane = RemoteSession(
+            id: "workspace-main:pane-agent",
+            name: "Agent",
+            kind: .herdr,
+            terminalID: "term-agent",
+            workspaceID: "workspace-main",
+            tabID: "tab-build",
+            tabLabel: "Build",
+            windowCount: 1)
+        let provider = LiveMultiplexerSessionSpaceProvider(
+            runner: RecordingRunner(),
+            adapters: [ProviderAdapter(kind: .herdr, result: .success([pane]))])
+        let model = OpenPawModel(hostStore: HostStore(hosts: [testHost()]))
+        model.connection = .connected(.ssh)
+
+        let snapshot = await provider.snapshot(for: model)
+        let discovered = try XCTUnwrap(snapshot.remoteSessions.first)
+
+        XCTAssertEqual(discovered.id, "workspace-main:pane-agent")
+        XCTAssertEqual(discovered.terminalID, "term-agent")
+        XCTAssertEqual(discovered.workspaceID, "workspace-main")
+        XCTAssertEqual(discovered.tabID, "tab-build")
+        XCTAssertEqual(discovered.tabLabel, "Build")
+    }
+
+    @MainActor
     func testLiveProviderKeepsMalformedOutputVisibleButUnavailableAdaptersEmpty() async {
         let provider = LiveMultiplexerSessionSpaceProvider(
             runner: RecordingRunner(),

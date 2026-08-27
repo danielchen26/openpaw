@@ -372,6 +372,8 @@ final class MultiplexerAdapterTests: XCTestCase {
 
         XCTAssertEqual(sessions.map(\.id), ["w3:p1", "w3:p9"])
         XCTAssertEqual(sessions.map(\.terminalID), ["term_65909b7e01df01", "term_65909b7e020c13"])
+        XCTAssertEqual(sessions.map(\.workspaceID), ["w3", "w3"])
+        XCTAssertEqual(sessions.map(\.tabID), ["w3:t1", "w3:t1"])
         // The pane title is what the user recognises the agent by, not the agent binary name.
         XCTAssertEqual(sessions.map(\.name), ["π - tianchichen", "修复Codex和Claude不可用的问题"])
         XCTAssertEqual(sessions.map(\.isAttached), [false, true])
@@ -531,9 +533,24 @@ final class MultiplexerAdapterTests: XCTestCase {
         let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
 
         XCTAssertEqual(sessions.map(\.id), ["w3:p9", "w4:p6"])
+        XCTAssertEqual(sessions.map(\.workspaceID), ["w3", "w4"])
+        XCTAssertEqual(sessions.map(\.tabID), ["w3:t1", "w4:t4"])
+        XCTAssertEqual(sessions.map(\.tabLabel), ["1", "openpaw-uitest"])
         // The shell pane has no title of its own, so it is named by the tab label the user typed.
         XCTAssertEqual(sessions.map(\.name), ["修复Codex和Claude不可用的问题", "openpaw-uitest"])
         XCTAssertEqual(sessions.map(\.workingDirectory), ["/Users/tianchichen", "/Users/tianchichen/tmp"])
+    }
+
+    func testRemoteSessionDecodesLegacyJSONWithoutWorkspaceOrTabMetadata() throws {
+        let json = #"{"id":"w3:p9","name":"build","kind":"herdr","terminal_id":"term_9","is_attached":false,"is_alive":true,"window_count":1}"#
+
+        let session = try JSONDecoder().decode(RemoteSession.self, from: Data(json.utf8))
+
+        XCTAssertEqual(session.id, "w3:p9")
+        XCTAssertEqual(session.terminalID, "term_9")
+        XCTAssertNil(session.workspaceID)
+        XCTAssertNil(session.tabID)
+        XCTAssertNil(session.tabLabel)
     }
 
     func testHerdrStillListsPanesWhenTabLabelsAreUnavailable() async throws {
@@ -545,6 +562,22 @@ final class MultiplexerAdapterTests: XCTestCase {
         let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
         XCTAssertEqual(sessions.map(\.id), ["w3:p9", "w4:p6"])
         XCTAssertEqual(sessions.last?.name, "w4:p6")
+    }
+
+    func testHerdrUsesTabMetadataWhenThePaneOmitsWorkspaceID() async throws {
+        let panes = #"{"result":{"panes":[{"pane_id":"w8:p2","terminal_id":"term_8","tab_id":"w8:t2"}]}}"#
+        let tabs = #"{"result":{"tabs":[{"tab_id":"w8:t2","workspace_id":"w8","label":"Build"}]}}"#
+        let runner = StubRunner([
+            ("herdr pane list", .output(panes)),
+            ("herdr tab list", .output(tabs)),
+        ])
+
+        let sessions = try await HerdrAdapter().discoverSessions(runner: runner)
+        let session = try XCTUnwrap(sessions.first)
+
+        XCTAssertEqual(session.workspaceID, "w8")
+        XCTAssertEqual(session.tabID, "w8:t2")
+        XCTAssertEqual(session.tabLabel, "Build")
     }
 
     // MARK: factory
