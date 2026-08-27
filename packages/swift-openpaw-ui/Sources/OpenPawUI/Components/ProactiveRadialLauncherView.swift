@@ -128,6 +128,9 @@ public struct ProactiveRadialLauncherView: View {
                     .padding(.bottom, 4)
                     .zIndex(3)
             }
+            // The ZStack sizes to its children; without this it shrinks to the orb and parks it at the
+            // GeometryReader's top-leading origin instead of the bottom-trailing corner.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             .animation(.easeOut(duration: reduceMotion ? 0.16 : 0.24), value: state.phase)
             .sheet(isPresented: $showsAccessibleHierarchy, onDismiss: endAccessibleBrowsing) {
                 AccessibleLauncherHierarchy(
