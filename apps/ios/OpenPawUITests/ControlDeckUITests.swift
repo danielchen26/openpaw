@@ -24,11 +24,18 @@ final class ControlDeckUITests: XCTestCase {
         let pager = app.otherElements["root.destination.pager"]
         XCTAssertTrue(pager.waitForExistence(timeout: 15), "the root paging surface never appeared")
         let window = app.windows.firstMatch
-        window.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.18))
-            .press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.18)))
         let predicate = NSPredicate(format: "value == %@", "Terminal")
-        let wait = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: pager)], timeout: 5)
-        XCTAssertEqual(wait, .completed, "swiping from Home did not reach the Terminal")
+        // The debug scenario raises a discovery alert on a delay; it swallows the fling, so clear it between
+        // attempts rather than once at launch.
+        for _ in 0..<4 {
+            let dismiss = app.alerts.buttons["Dismiss"]
+            if dismiss.waitForExistence(timeout: 2) { dismiss.tap() }
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.18))
+                .press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.18)))
+            let wait = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: pager)], timeout: 4)
+            if wait == .completed { return }
+        }
+        XCTFail("swiping from Home did not reach the Terminal. On screen:\n\(app.debugDescription)")
     }
 
     /// The launcher is the app's permanent control surface, so the orb must exist on every destination —

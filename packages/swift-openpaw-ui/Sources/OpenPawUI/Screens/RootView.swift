@@ -821,7 +821,6 @@ public struct RootView: View {
             state: launcherStateBinding,
             onEffect: handleLauncherEffect
         )
-        .destinationSwipeExclusion(.horizontalChildControl)
         .onAppear { rebuildLauncherGraph() }
         .onChange(of: model.connectionGeneration) { _, _ in
             _ = launcherState.invalidate(.hostChanged)

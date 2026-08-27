@@ -124,6 +124,9 @@ public struct ProactiveRadialLauncherView: View {
                         if voiceOverEnabled { presentAccessibleHierarchy() }
                     }
                     .gesture(orbGesture)
+                    // Only the orb itself is a horizontal-child-control zone: a fling that starts on the orb
+                    // belongs to the launcher, and a fling that starts anywhere else still pages the root.
+                    .destinationSwipeExclusion(.horizontalChildControl)
                     .padding(.trailing, 8)
                     .padding(.bottom, 4)
                     .zIndex(3)
