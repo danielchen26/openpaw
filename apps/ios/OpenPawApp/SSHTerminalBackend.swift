@@ -2,6 +2,7 @@ import Foundation
 import OpenPawSSH
 import OpenPawTerminalCore
 import OpenPawUI
+import os
 
 /// `TerminalBackend` over a `RemoteTransport`.
 ///
@@ -46,6 +47,15 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner, TerminalCapabilityProb
 
     private var lastState: ConnectionState = .idle
     private var reconnectAttempt = 0
+    /// Connection lifecycle breadcrumbs for `log stream` and sysdiagnose. The terminal UI shows only a summary
+    /// line; when a phone in the field cannot connect, this is the only way to see which host, which phase, and
+    /// which underlying NIO error without attaching a debugger.
+    private static let log = Logger(subsystem: "dev.openpaw.app", category: "ssh")
+    /// Armed only by a connection that actually established, and disarmed by a user disconnect or a failed dial.
+    /// `reconnectIfNeeded` keys off this rather than `lastState` alone because the Face ID prompt that guards the
+    /// private key flips the scene inactive and back: if a *failed* attempt were retried on every foregrounding,
+    /// each retry's biometry prompt would re-trigger the foreground handler and the app would loop Face ID forever.
+    private var shouldAutoReconnect = false
 
     init(
         makeTransport: @escaping TransportFactory,
@@ -63,14 +73,17 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner, TerminalCapabilityProb
     nonisolated var outputStream: AsyncStream<Data> { outputRelay.stream() }
 
     func connect(host: HostRecord) async throws {
+        shouldAutoReconnect = false
         await teardown(reason: nil)
         self.host = host
+        Self.log.info("connect requested: \(host.nickname, privacy: .public) -> \(host.hostname):\(host.port)")
         let configuration = try makeConfiguration(host)
         self.configuration = configuration
         try await dial(configuration)
     }
 
     func disconnect() async {
+        shouldAutoReconnect = false
         await teardown(reason: "you disconnected")
         publish(.disconnected(reason: "you disconnected"))
     }
@@ -154,10 +167,16 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner, TerminalCapabilityProb
 
     // MARK: Reconnect
 
-    /// Called when the app returns to the foreground. Reconnects only when the connection actually ended, so a
-    /// backgrounded-and-resumed app with a live channel is left alone.
+    /// Called when the app returns to the foreground. Reconnects only when a previously *established* connection
+    /// ended, so a backgrounded-and-resumed app with a live channel is left alone — and a connection that never
+    /// succeeded is not retried behind the user's back. Automatic redial of a failing host would loop the Face ID
+    /// prompt that guards the key: the prompt backgrounds the scene, foregrounding retries, the retry prompts again.
     func reconnectIfNeeded() async {
-        guard let configuration, lastState.isTerminal else { return }
+        guard let configuration, shouldAutoReconnect, lastState.isTerminal else { return }
+        // One automatic attempt per drop. Every dial re-reads the key behind Face ID, and the prompt itself cycles
+        // the scene through background and foreground: a failing host retried on each foregrounding is an infinite
+        // Face ID loop. A successful dial re-arms; after a failure reconnecting is an explicit user action.
+        shouldAutoReconnect = false
         reconnectAttempt += 1
         publish(.reconnecting(attempt: reconnectAttempt, reason: "the app returned to the foreground"))
         do {
@@ -192,6 +211,8 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner, TerminalCapabilityProb
         do {
             try await transport.connect(configuration: configuration)
             reconnectAttempt = 0
+            shouldAutoReconnect = true
+            Self.log.info("connected over \(String(describing: configuration.requestedTransport ?? .ssh), privacy: .public)")
             // `connect` returning without throwing *is* the connection, so the state is settled here rather than
             // left to the pump task that drains `transport.state`. That task is scheduled independently, so waiting
             // on it would leave `connect(host:)` returning while `lastState` is still `.resolving` — and the first
@@ -201,6 +222,7 @@ actor SSHTerminalBackend: TerminalBackend, CommandRunner, TerminalCapabilityProb
                 publish(.connected(configuration.requestedTransport ?? .ssh))
             }
         } catch let error as TransportError {
+            Self.log.error("connect failed: \(String(describing: error), privacy: .public)")
             switch error {
             case .hostKeyUnknown, .hostKeyChanged:
                 // Not a failure to retry: the user has to make a trust decision first, and a changed key must stop

@@ -242,6 +242,68 @@ final class SSHTerminalBackendTests: XCTestCase {
         XCTAssertTrue(writes.isEmpty)
     }
 
+    /// A connection that never established must not be redialled by foregrounding. Each dial re-reads the private
+    /// key behind Face ID, and the prompt itself backgrounds and re-foregrounds the scene, so retrying failed
+    /// attempts on foreground turns one bad host into an endless Face ID loop.
+    func testForegroundingNeverRedialsAConnectionThatNeverEstablished() async throws {
+        let transport = FailingTransport()
+        let backend = SSHTerminalBackend(
+            makeTransport: { _ in transport },
+            makeConfiguration: { $0.connectionConfiguration },
+            onHostKeyProblem: { _ in })
+
+        do {
+            try await backend.connect(host: host())
+            XCTFail("connect should have thrown")
+        } catch {}
+        let dialsAfterFailure = await transport.connectAttempts
+        XCTAssertEqual(dialsAfterFailure, 1)
+
+        await backend.reconnectIfNeeded()
+        await backend.reconnectIfNeeded()
+        let dialsAfterForegrounds = await transport.connectAttempts
+        XCTAssertEqual(dialsAfterForegrounds, 1, "foregrounding must not retry a connection that never succeeded")
+    }
+
+    /// A drop after a real connection gets exactly one automatic redial per foregrounding-after-drop. If that
+    /// redial fails, the next foregrounding stays quiet: reconnecting a failing host is the user's decision.
+    func testForegroundingRedialsOnceAfterAnEstablishedConnectionDrops() async throws {
+        let transport = FailingTransport(failFromAttempt: 2)
+        let backend = SSHTerminalBackend(
+            makeTransport: { _ in transport },
+            makeConfiguration: { $0.connectionConfiguration },
+            onHostKeyProblem: { _ in })
+
+        try await backend.connect(host: host())
+        await transport.drop()
+        // The drop is delivered through the state pump; give it a tick.
+        try await Task.sleep(for: .milliseconds(50))
+
+        await backend.reconnectIfNeeded()
+        let dialsAfterFirstForeground = await transport.connectAttempts
+        XCTAssertEqual(dialsAfterFirstForeground, 2, "one automatic redial after a real connection dropped")
+
+        await backend.reconnectIfNeeded()
+        let dialsAfterSecondForeground = await transport.connectAttempts
+        XCTAssertEqual(dialsAfterSecondForeground, 2, "a failed automatic redial must not be retried automatically")
+    }
+
+    /// Disconnecting by hand disarms the automatic redial entirely.
+    func testForegroundingDoesNotRedialAfterUserDisconnect() async throws {
+        let transport = FailingTransport()
+        let backend = SSHTerminalBackend(
+            makeTransport: { _ in transport },
+            makeConfiguration: { $0.connectionConfiguration },
+            onHostKeyProblem: { _ in })
+
+        do { try await backend.connect(host: host()) } catch {}
+        await backend.disconnect()
+        let dials = await transport.connectAttempts
+        await backend.reconnectIfNeeded()
+        let dialsAfterForeground = await transport.connectAttempts
+        XCTAssertEqual(dialsAfterForeground, dials, "you disconnected means stay disconnected")
+    }
+
     private func makeBackend(_ transport: ControlledTransport) -> SSHTerminalBackend {
         SSHTerminalBackend(
             makeTransport: { _ in transport },
@@ -290,6 +352,46 @@ final class SSHTerminalBackendTests: XCTestCase {
             .split(whereSeparator: { $0.isWhitespace || $0 == "'" })
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ";{}()&|<>\"")) }
     }
+}
+
+private actor FailingTransport: RemoteTransport {
+    private let failFromAttempt: Int
+    private(set) var connectAttempts = 0
+    private let stateContinuation: AsyncStream<ConnectionState>.Continuation
+    private let outputContinuation: AsyncStream<Data>.Continuation
+
+    nonisolated let state: AsyncStream<ConnectionState>
+    nonisolated let output: AsyncStream<Data>
+
+    /// Attempts numbered `failFromAttempt` and later throw; earlier ones connect.
+    init(failFromAttempt: Int = 1) {
+        self.failFromAttempt = failFromAttempt
+        var stateContinuation: AsyncStream<ConnectionState>.Continuation!
+        self.state = AsyncStream { stateContinuation = $0 }
+        self.stateContinuation = stateContinuation
+        var outputContinuation: AsyncStream<Data>.Continuation!
+        self.output = AsyncStream { outputContinuation = $0 }
+        self.outputContinuation = outputContinuation
+    }
+
+    func connect(configuration: ConnectionConfiguration) async throws {
+        connectAttempts += 1
+        if connectAttempts >= failFromAttempt {
+            let error = TransportError.connectionFailed("dial refused by FailingTransport")
+            stateContinuation.yield(.failed(error))
+            throw error
+        }
+        stateContinuation.yield(.connected(.ssh))
+    }
+
+    /// Simulates the link dying while the app is suspended.
+    func drop() {
+        stateContinuation.yield(.disconnected(reason: "link dropped"))
+    }
+
+    func write(_ data: Data) async throws {}
+    func resize(columns: Int, rows: Int) async throws {}
+    func disconnect() async {}
 }
 
 private actor ControlledTransport: RemoteTransport {
