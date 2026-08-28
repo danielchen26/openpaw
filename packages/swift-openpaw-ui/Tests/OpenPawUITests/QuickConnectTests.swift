@@ -10,6 +10,45 @@ struct QuickConnectTests {
     private let issuedAt = Date(timeIntervalSince1970: 1_800_000_000)
     private let expiresAt = Date(timeIntervalSince1970: 1_800_000_240)
 
+    /// The host mints these links with the `time` crate's RFC 3339 serialiser, which prints fractional seconds
+    /// whenever the instant has sub-second precision. `JSONDecoder`'s `.iso8601` strategy accepts only whole seconds,
+    /// so a link from a real host failed to decode and was reported as `invalidFragment` - indistinguishable, to the
+    /// user, from a corrupt or tampered link.
+    @Test("A link whose timestamps carry fractional seconds decodes")
+    func decodesFractionalSecondTimestamps() throws {
+        let url = try Self.link(issuedAtText: "2027-01-15T09:41:12.348Z", expiresAtText: "2027-01-15T09:45:12.348Z")
+        let proposal = try QuickConnectLinkCodec(now: { Date(timeIntervalSince1970: 1_800_000_060) })
+            .decode(url)
+        #expect(proposal.nickname == "MacBook Pro")
+    }
+
+    @Test("A link whose timestamps carry whole seconds still decodes")
+    func decodesWholeSecondTimestamps() throws {
+        let url = try Self.link(issuedAtText: "2027-01-15T09:41:12Z", expiresAtText: "2027-01-15T09:45:12Z")
+        let proposal = try QuickConnectLinkCodec(now: { Date(timeIntervalSince1970: 1_800_000_060) })
+            .decode(url)
+        #expect(proposal.nickname == "MacBook Pro")
+    }
+
+    /// Builds the link as JSON text so the timestamp format under test is the one on the wire, rather than whatever
+    /// `JSONEncoder` would have produced from a `Date`.
+    private static func link(issuedAtText: String, expiresAtText: String) throws -> URL {
+        let json = """
+            {"expires_at":"\(expiresAtText)","host_api_port":4317,\
+            "host_keys":[{"algorithm":"ssh-ed25519","fingerprint":"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}],\
+            "issued_at":"\(issuedAtText)","nickname":"MacBook Pro",\
+            "pairing_code":"ABCD-EFGH-IJKL-MNOP-QRST-UVWX","profile":"operator",\
+            "session_id":"ses_0123456789abcdef01234567",\
+            "targets":[{"hostname":"macbook-pro.tailnet.example","port":22,"source":"magic_dns"}],\
+            "username":"openpaw","v":1}
+            """
+        let payload = Data(json.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return try #require(URL(string: "openpaw://pair#v1.\(payload)"))
+    }
+
     private func knownEnvelope() -> QuickConnectEnvelopeV1 {
         QuickConnectEnvelopeV1(
             issuedAt: issuedAt,

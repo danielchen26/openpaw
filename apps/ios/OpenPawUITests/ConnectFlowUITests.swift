@@ -36,12 +36,15 @@ final class ConnectFlowUITests: XCTestCase {
         return Target(nickname: environment["OPENPAW_LIVE_NICKNAME"] ?? "home", keyPath: keyPath)
     }
 
-    private func scenarioApp(_ scenario: String) -> XCUIApplication {
+    private func scenarioApp(_ scenario: String, openingURL url: URL? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
             "-openpaw-debug-scenario", scenario,
             "-openpaw.settings.biometricGate", "<false/>",
         ]
+        if let url {
+            app.launchArguments += ["-openpaw-debug-open-url", url.absoluteString]
+        }
         app.launch()
         return app
     }
@@ -76,8 +79,17 @@ final class ConnectFlowUITests: XCTestCase {
         return try XCTUnwrap(URL(string: "openpaw://pair#v1.\(fragment)"))
     }
 
+    /// Delivers a pairing URL to an app that is *already running*.
+    ///
+    /// `XCUIApplication.open` routes through Safari and SpringBoard, and on the simulators used here the URL is
+    /// silently dropped: nothing arrives, no alert is visible in either process, and the test fails as though the
+    /// app could not route the link. Relaunching with `-openpaw-debug-open-url` feeds the same URL through the same
+    /// `receiveOpenPawURL` entry point, so decode, gate and dispatch are all still exercised.
     private func openPairingURL(_ url: URL, app: XCUIApplication) {
-        app.open(url)
+        app.terminate()
+        app.launchArguments = app.launchArguments.filter { $0 != "-openpaw-debug-open-url" }
+        app.launchArguments += ["-openpaw-debug-open-url", url.absoluteString]
+        app.launch()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10), app.debugDescription)
     }
 
@@ -275,11 +287,20 @@ final class ConnectFlowUITests: XCTestCase {
         XCTAssertTrue(username.waitForExistence(timeout: 5))
         username.tap()
         username.typeText("openpaw")
+        // A preflight needs a credential it could actually authenticate with, so the draft has to carry one before
+        // the run button will do anything.
+        let password = app.secureTextFields["Password"]
+        XCTAssertTrue(password.waitForExistence(timeout: 5), app.debugDescription)
+        password.tap()
+        password.typeText("hunter2")
+
+        // Scrolling dismisses the keyboard, which otherwise covers the lower half of the form and leaves the run
+        // button on screen but not hittable. Return is avoided: on this form it submits and closes the editor.
         let preflight = app.buttons["connection.preflight.run"]
-        for _ in 0..<5 where !preflight.isHittable { app.swipeUp() }
-        XCTAssertTrue(preflight.isHittable, app.debugDescription)
+        for _ in 0..<12 where !preflight.isHittable { app.swipeUp() }
+        XCTAssertTrue(preflight.isHittable, "preflight not reachable: \(app.debugDescription)")
         preflight.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["connection.preflight.stage.route"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["connection.preflight.stage.route"].waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.descendants(matching: .any)["connection.preflight.stage.transportCapabilities"].exists)
         XCTAssertFalse(app.buttons["Mosh"].exists)
         XCTAssertFalse(app.buttons["Eternal Terminal"].exists)

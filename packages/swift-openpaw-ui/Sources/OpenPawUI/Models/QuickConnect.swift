@@ -259,7 +259,7 @@ public struct QuickConnectLinkCodec: Sendable {
         } catch {
             throw QuickConnectLinkError.invalidFragment
         }
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = Self.rfc3339DateDecoding
         let envelope: QuickConnectEnvelopeV1
         do { envelope = try decoder.decode(QuickConnectEnvelopeV1.self, from: data) } catch { throw QuickConnectLinkError.invalidFragment }
         let canonical = try canonicalEnvelope(envelope, at: now(), checkExpiry: true)
@@ -313,6 +313,25 @@ public struct QuickConnectLinkCodec: Sendable {
     }
     private static func sourceRank(_ source: QuickConnectTarget.Source) -> Int {
         switch source { case .magicDNS: 0; case .tailnet: 1; case .explicit: 2 }
+    }
+
+    /// Accepts RFC 3339 with *or* without fractional seconds.
+    ///
+    /// `JSONDecoder.DateDecodingStrategy.iso8601` accepts only whole seconds, but the host serialises these
+    /// timestamps with the `time` crate's RFC 3339 support, which emits fractional seconds whenever the instant has
+    /// sub-second precision, which is almost always. A pairing link minted by a real host therefore failed to decode
+    /// roughly always, and the failure surfaced as `invalidFragment`: the link looked corrupt rather than merely
+    /// more precise than the reader expected. Being liberal about precision here is the whole fix.
+    static let rfc3339DateDecoding: JSONDecoder.DateDecodingStrategy = .custom { decoder in
+        let text = try decoder.singleValueContainer().decode(String.self)
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFraction.date(from: text) { return date }
+        let whole = ISO8601DateFormatter()
+        whole.formatOptions = [.withInternetDateTime]
+        if let date = whole.date(from: text) { return date }
+        throw DecodingError.dataCorrupted(
+            .init(codingPath: decoder.codingPath, debugDescription: "Expected an RFC 3339 timestamp, got \(text)."))
     }
 
     private static func validSessionID(_ value: String) -> Bool {

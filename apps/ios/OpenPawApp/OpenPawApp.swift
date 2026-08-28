@@ -97,7 +97,22 @@ struct AppShell: View {
             }
         }
         .onOpenURL { wiring.receiveOpenPawURL($0) }
-        .task { await wiring.start() }
+        .task {
+            await wiring.start()
+            // UI tests cannot deliver an openpaw:// URL reliably: `XCUIApplication.open` routes through Safari and
+            // SpringBoard, which on some simulators swallows it behind a confirmation the test app cannot see. The
+            // URL then never arrives and the failure looks like broken routing rather than a harness limitation.
+            // Debug builds therefore accept the same URL as a launch argument and feed it through the identical
+            // entry point, so the test exercises the real decode, gate and dispatch path.
+            #if DEBUG
+                if let url = Self.debugLaunchURL() {
+                    // After the first layout pass: the Quick Connect sheet is presented by the root view, which does
+                    // not exist yet while this task's first statement runs.
+                    try? await Task.sleep(for: .milliseconds(600))
+                    wiring.receiveOpenPawURL(url)
+                }
+            #endif
+        }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
@@ -195,6 +210,19 @@ struct AppShell: View {
 /// Opens one independent SSH exec channel per session-control command over the currently connected transport. The
 /// interactive PTY may be blocked inside tmux, screen, or a full-screen program; control traffic must never be typed
 /// into that user-owned terminal stream.
+#if DEBUG
+    extension AppShell {
+        /// The `openpaw://` URL passed as `-openpaw-debug-open-url`, if any. Debug builds only.
+        static func debugLaunchURL() -> URL? {
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let flag = arguments.firstIndex(of: "-openpaw-debug-open-url") else { return nil }
+            let next = arguments.index(after: flag)
+            guard next < arguments.endIndex else { return nil }
+            return URL(string: arguments[next])
+        }
+    }
+#endif
+
 struct ActiveSSHCommandRunner: CommandRunner {
     let activeConnection: @Sendable () async -> SSHConnection?
 

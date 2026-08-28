@@ -986,12 +986,25 @@ public struct HostEditorView: View {
         hasAttemptedSave = true
         credentialError = nil
         guard draft.validate().isEmpty else { return }
-        do {
-            let record = try draft.record(id: existing?.id ?? UUID(), existing: existing)
-            preflightTarget = "\(record.username)@\(record.hostname):\(record.port)"
-            Task { await model.runConnectionPreflight(for: record) }
-        } catch {
-            credentialError = "OpenPaw could not prepare this preflight. Check the credential references and try again."
+        // A preflight authenticates for real, so a secret typed here has to be stored before it can be used. Without
+        // this the draft has a password but no reference, `record()` throws, and the button appears to do nothing.
+        Task {
+            var auth: AuthMethod?
+            if let pending = draft.pendingCredential() {
+                do { auth = try await model.installCredential(pending) } catch {
+                    credentialError =
+                        "OpenPaw could not save this credential to the keychain, so it cannot test the connection."
+                    return
+                }
+            }
+            do {
+                let record = try draft.record(id: existing?.id ?? UUID(), existing: existing, auth: auth)
+                preflightTarget = "\(record.username)@\(record.hostname):\(record.port)"
+                await model.runConnectionPreflight(for: record)
+            } catch {
+                credentialError =
+                    "OpenPaw could not prepare this preflight. Check the credential and try again."
+            }
         }
     }
 }
