@@ -17,6 +17,9 @@
         case repoProviders
         case connectionFailures
         case quickPairing
+        /// A host that is connected over SSH but not yet paired: the exact state the self-service pairing offer exists
+        /// for, and the only one where that panel appears.
+        case selfServicePairing
 
         private static let launchFlag = "-openpaw-debug-scenario"
         private static let hostID = UUID(uuidString: "51CE0000-0000-4000-8000-000000000001") ?? UUID()
@@ -43,6 +46,13 @@
         ) -> OpenPawModel {
             if self == .quickPairing {
                 return makeQuickPairingModel(
+                    settings: settings,
+                    dictationModels: dictationModels,
+                    dictationEngineFactory: dictationEngineFactory
+                )
+            }
+            if self == .selfServicePairing {
+                return makeSelfServicePairingModel(
                     settings: settings,
                     dictationModels: dictationModels,
                     dictationEngineFactory: dictationEngineFactory
@@ -75,7 +85,8 @@
             let hosts: [HostRecord] = switch self {
             case .noHosts: []
             case .hostSwitcher: [host, buildHost]
-            case .empty, .connectedWorkspace, .sessions, .inboxRisks, .repoProviders, .connectionFailures, .quickPairing: [host]
+            case .empty, .connectedWorkspace, .sessions, .inboxRisks, .repoProviders, .connectionFailures, .quickPairing,
+                .selfServicePairing: [host]
             }
             let modelTerminal: (any TerminalBackend)? = self == .hostSwitcher
                 ? DebugScenarioTerminalBackend()
@@ -114,7 +125,8 @@
                 model.connection = .idle
             case .hostSwitcher:
                 model.connection = .disconnected(reason: nil)
-            case .empty, .connectedWorkspace, .sessions, .inboxRisks, .repoProviders, .quickPairing:
+            case .empty, .connectedWorkspace, .sessions, .inboxRisks, .repoProviders, .quickPairing,
+                .selfServicePairing:
                 model.connection = .connected(.ssh)
             }
             return model
@@ -122,7 +134,7 @@
 
         private var previewScenario: PreviewBackend.Scenario {
             switch self {
-            case .empty, .noHosts, .hostSwitcher, .quickPairing:
+            case .empty, .noHosts, .hostSwitcher, .quickPairing, .selfServicePairing:
                 .empty
             case .connectedWorkspace, .sessions:
                 .populated
@@ -133,6 +145,40 @@
             case .connectionFailures:
                 .disconnected
             }
+        }
+
+        /// A connected, unpaired host with an SSH channel that answers `openpaw-host pairing-code`.
+        ///
+        /// The whole point of the offer is that the phone never has to reach the machine physically, so the fixture
+        /// supplies the code the way the real host does: alone on stdout, from the command runner.
+        @MainActor
+        private func makeSelfServicePairingModel(
+            settings: OpenPawSettings,
+            dictationModels: any DictationModelInstalling,
+            dictationEngineFactory: (any DictationEngineMaking)?
+        ) -> OpenPawModel {
+            let host = HostRecord(
+                id: Self.hostID,
+                nickname: "Studio",
+                hostname: "studio.tail123.ts.net",
+                port: 22,
+                username: "openpaw",
+                auth: .agentForwarding,
+                preferredTransport: .ssh,
+                lastSuccessfulTransport: .ssh,
+                multiplexerPreference: .tmux,
+                tags: ["fixture"])
+            let model = OpenPawModel(
+                hostStore: HostStore(hosts: [host]),
+                backend: DebugQuickPairingBackend(),
+                terminal: DebugScenarioTerminalBackend(),
+                dictationModels: dictationModels,
+                dictationEngineFactory: dictationEngineFactory,
+                tailscaleRouteHintSource: DebugTailscaleRoutePathSource(),
+                remoteCommandRunner: DebugPairingCodeCommandRunner(),
+                settings: settings)
+            model.connection = .connected(.ssh)
+            return model
         }
 
         @MainActor
@@ -344,4 +390,12 @@
         case invalidCredentials
         case missingCredentials
     }
+    /// Answers the pairing-code request the way a real host does: the code alone on stdout.
+    private struct DebugPairingCodeCommandRunner: CommandRunner {
+        func run(_ command: String) async throws -> String {
+            await DebugQuickPairingFixture.delay(seconds: 1.2)
+            return "K3F2-9QAM-7XZP-4TWC-6BND-2HRS\n"
+        }
+    }
+
 #endif

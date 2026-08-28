@@ -441,6 +441,26 @@ enum ScreenCatalog {
         ),
 
         Screen(
+            // The welcome screen offers pairing only when a connected host could answer, which needs a pairing-capable
+            // backend and a command channel. Rendering it proves the offer appears where it is honest to appear.
+            name: "AddDeviceFlow-welcome-can-request-pairing",
+            build: { _, _ in
+                let host = HostRecord(
+                    nickname: "Studio", hostname: "studio.tail123.ts.net", username: "openpaw", auth: .agentForwarding)
+                let model = OpenPawModel(
+                    hostStore: HostStore(hosts: [host]),
+                    backend: SnapshotPairingBackend(),
+                    remoteCommandRunner: SnapshotPairingCommandRunner())
+                model.setConnectionForSnapshot(.connected(.ssh))
+                return AnyView(
+                    NavigationStack {
+                        AddDeviceFlow(model: model, settings: OpenPawSettings.preview(), onDismiss: {})
+                    }
+                )
+            },
+            unavailableReason: ""
+        ),
+        Screen(
             name: "AddDeviceFlow-tailscale-loading",
             build: { _, _ in
                 var state = AddDeviceFlowState(hosts: [])
@@ -699,4 +719,38 @@ enum ScreenCatalog {
             unavailableReason: ""
         ),
     ]
+}
+
+/// Pairing-capable backend, so the welcome screen's self-service offer has something that could answer it.
+private final class SnapshotPairingBackend: OpenPawBackend, OpenPawHostPairing, @unchecked Sendable {
+    private let preview = PreviewBackend(.empty)
+
+    func pair(pairingCode: String, deviceName: String) async throws -> PairingResult {
+        PairingResult(deviceID: deviceName, token: "", hmacKeyB64: "", capabilities: [])
+    }
+
+    func health() async throws -> HealthInfo { try await preview.health() }
+    func sessions() async throws -> [SessionSummary] { try await preview.sessions() }
+    func inbox(status: InboxStatus?) async throws -> [InboxItem] { try await preview.inbox(status: status) }
+    func resolve(item: InboxItem, action: ActionID, answer: String?, detailAcknowledged: Bool) async throws -> ResolveResult {
+        try await preview.resolve(item: item, action: action, answer: answer, detailAcknowledged: detailAcknowledged)
+    }
+    func events(session: String?, afterSeq: UInt64?) -> AsyncThrowingStream<Event, any Error> {
+        preview.events(session: session, afterSeq: afterSeq)
+    }
+    func repos() async throws -> [RepoSummary] { try await preview.repos() }
+    func repoStatus(_ repo: String) async throws -> RepoStatus { try await preview.repoStatus(repo) }
+    func diff(repo: String, mode: DiffMode, path: String?) async throws -> Diff { try await preview.diff(repo: repo, mode: mode, path: path) }
+    func tree(repo: String, ref: String, path: String) async throws -> [TreeEntry] { try await preview.tree(repo: repo, ref: ref, path: path) }
+    func blob(repo: String, ref: String, path: String) async throws -> Blob { try await preview.blob(repo: repo, ref: ref, path: path) }
+    func search(repo: String, query: String, path: String?) async throws -> [ContentMatch] { try await preview.search(repo: repo, query: query, path: path) }
+    func upload(data: Data, filename: String) async throws -> UploadResult { try await preview.upload(data: data, filename: filename) }
+    func previewURL(port: Int, path: String) throws -> URL { try preview.previewURL(port: port, path: path) }
+    func tailscaleDevices() async throws -> TailscaleDevicesResponse { try await preview.tailscaleDevices() }
+    func audit(limit: Int) async throws -> [AuditEntry] { try await preview.audit(limit: limit) }
+}
+
+/// Stands in for the SSH exec channel the offer is gated on. Never run during a render.
+private struct SnapshotPairingCommandRunner: CommandRunner {
+    func run(_ command: String) async throws -> String { "" }
 }

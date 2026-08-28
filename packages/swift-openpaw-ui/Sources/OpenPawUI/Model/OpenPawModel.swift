@@ -1055,6 +1055,11 @@ public final class OpenPawModel {
         tailscaleDiscovery = state
     }
 
+    /// Places the model in a connected state for a headless render, without an SSH stack to connect with.
+    @_spi(SnapshotTesting) public func setConnectionForSnapshot(_ state: ConnectionState) {
+        connection = state
+    }
+
     public func stopFollowing() {
         eventTask?.cancel()
         eventTask = nil

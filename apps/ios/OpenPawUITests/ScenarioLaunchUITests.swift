@@ -40,6 +40,29 @@ final class ScenarioLaunchUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Chat"].exists)
     }
 
+    /// The point of the self-service path is that nobody walks to the remote machine, so this drives the whole thing
+    /// from the phone: open Add a device on a connected-but-unpaired host, ask that host for a code, and require that
+    /// the app reports itself paired without a QR ever being shown.
+    func testConnectedHostCanBeAskedForAPairingCodeWithoutTouchingThatMachine() {
+        let app = launch(scenario: "selfServicePairing")
+
+        let add = app.buttons["Add a Tailscale or SSH device"].firstMatch
+        XCTAssertTrue(add.waitForExistence(timeout: 15), app.debugDescription)
+        add.tap()
+
+        let request = app.buttons["addDevice.requestPairing.run"]
+        XCTAssertTrue(request.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertEqual(request.label, "Ask this host for a pairing code")
+        let scrollViews = app.scrollViews
+        let sheet = scrollViews.element(boundBy: max(0, scrollViews.count - 1))
+        for _ in 0..<8 where !request.isHittable { sheet.swipeUp() }
+        request.tap()
+
+        let paired = app.descendants(matching: .any)["addDevice.requestPairing.paired"]
+        XCTAssertTrue(paired.waitForExistence(timeout: 20), app.debugDescription)
+        XCTAssertTrue(paired.label.contains("Paired as"), paired.label)
+    }
+
     func testFixtureOnlyHostIsAbsentWithoutTheScenarioArgument() {
         let app = launch()
 
