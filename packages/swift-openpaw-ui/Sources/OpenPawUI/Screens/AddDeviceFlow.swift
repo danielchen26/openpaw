@@ -163,8 +163,15 @@ public enum AddDeviceFlowCopy {
     public static let activeRouteNoHostTitle = "A Tailscale-compatible route may be active"
     public static let activeRouteNoHostExplanation = "OpenPaw found a VPN-style route that may be Tailscale. iOS does not share the signed-in Tailscale account or device list with OpenPaw. Automatic discovery needs a connected OpenPaw host to report tailnet devices, or you can authorize with Tailnet administrator credentials."
     public static let confirmation = "This is only a discovery candidate. OpenPaw will not trust it, save it, or connect until you review and save SSH details yourself."
-    public static let entryActions = [tailscaleAction, sshAction, scanPairingAction, adminAction]
-    public static let onboardingCopy = [title, tailscaleAction, sshAction, scanPairingAction, adminAction, adminRequirement, honestDiscovery, noCandidates, activeRouteNoHostTitle, activeRouteNoHostExplanation, confirmation]
+    /// The three entries are the three ways a device can actually reach the app, and they do not overlap: find it on
+    /// the tailnet, type it in, or let a QR carry everything at once. Tailnet administrator credentials are not a
+    /// fourth way in — they are a second *source* for the first one, and they live inside that screen.
+    public static let entryActions = [tailscaleAction, sshAction, scanPairingAction]
+    public static let adminSourceHint = "Not listed? A read-only Tailnet administrator connector can supply devices when no host is connected."
+    public static let requestPairingAction = "Ask this host for a pairing code"
+    public static let requestPairingExplanation = "OpenPaw asks the connected host to issue a pairing code over the SSH session that is already open, then redeems it. Nobody has to walk to that machine."
+    public static let scanPairingExplanation = "Scan the QR from `openpaw-host pair --qr` when this phone has never reached the machine before."
+    public static let onboardingCopy = [title, tailscaleAction, sshAction, scanPairingAction, adminAction, adminRequirement, honestDiscovery, noCandidates, activeRouteNoHostTitle, activeRouteNoHostExplanation, confirmation, adminSourceHint, requestPairingAction, requestPairingExplanation, scanPairingExplanation]
 }
 
 @MainActor
@@ -297,34 +304,85 @@ public struct AddDeviceFlow: View {
                     .foregroundStyle(OpenPawTheme.textSecondary)
                 ViewThatFits(in: .horizontal) {
                     HStack(alignment: .top, spacing: OpenPawTheme.Space.medium) {
-                        actionButton(AddDeviceFlowCopy.tailscaleAction, glyph: "point.3.connected.trianglepath.dotted") {
-                            state.startTailscaleDiscovery()
-                        }
-                        actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
-                            draft = state.startManualSSH()
-                        }
-                        scanPairingAction
-                        actionButton(AddDeviceFlowCopy.adminAction, glyph: "person.badge.key") {
-                            state.startTailscaleAdministrator()
-                        }
+                        entryActionButtons
                     }
                     VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
-                        actionButton(AddDeviceFlowCopy.tailscaleAction, glyph: "point.3.connected.trianglepath.dotted") {
-                            state.startTailscaleDiscovery()
-                        }
-                        actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
-                            draft = state.startManualSSH()
-                        }
-                        scanPairingAction
-                        actionButton(AddDeviceFlowCopy.adminAction, glyph: "person.badge.key") {
-                            state.startTailscaleAdministrator()
-                        }
+                        entryActionButtons
                     }
                 }
+                pairingSection
             }
             .padding(OpenPawTheme.Space.xl)
             .frame(maxWidth: 680, alignment: .leading)
         }
+    }
+
+    /// The three non-overlapping ways a device gets in. Kept in one builder so the wide and narrow layouts cannot drift.
+    @ViewBuilder private var entryActionButtons: some View {
+        actionButton(AddDeviceFlowCopy.tailscaleAction, glyph: "point.3.connected.trianglepath.dotted") {
+            state.startTailscaleDiscovery()
+        }
+        actionButton(AddDeviceFlowCopy.sshAction, glyph: "terminal") {
+            draft = state.startManualSSH()
+        }
+        scanPairingAction
+    }
+
+    /// Offered only when it can actually work: an SSH session to the host is what stands in for walking to it.
+    @ViewBuilder private var pairingSection: some View {
+        if model.canRequestPairingFromHost {
+            Panel(label: "Pair this phone with the connected host") {
+                VStack(alignment: .leading, spacing: OpenPawTheme.Space.medium) {
+                    Text(AddDeviceFlowCopy.requestPairingExplanation)
+                        .font(OpenPawTheme.Human.prose)
+                        .foregroundStyle(OpenPawTheme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    selfServicePairingContent
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var selfServicePairingContent: some View {
+        switch model.selfServicePairing {
+        case .requestingCode:
+            ProgressView("Asking the host for a pairing code…")
+                .accessibilityIdentifier("addDevice.requestPairing.progress")
+        case .pairing:
+            ProgressView("Redeeming the pairing code…")
+                .accessibilityIdentifier("addDevice.requestPairing.progress")
+        case .paired(let result):
+            Label(
+                "Paired as \(result.deviceID). Capabilities: \(result.capabilities.isEmpty ? "none" : result.capabilities.joined(separator: " "))",
+                systemImage: "checkmark.seal")
+                .font(OpenPawTheme.Human.prose)
+                .foregroundStyle(OpenPawTheme.textPrimary)
+                .accessibilityIdentifier("addDevice.requestPairing.paired")
+        case .failed(let error):
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.small) {
+                Text(error.title)
+                    .font(OpenPawTheme.Machine.headline)
+                    .foregroundStyle(OpenPawTheme.caution)
+                Text(error.detail)
+                    .font(OpenPawTheme.Human.prose)
+                    .foregroundStyle(OpenPawTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityIdentifier("addDevice.requestPairing.error")
+            requestPairingButton(title: "Try again")
+        case .idle:
+            requestPairingButton(title: AddDeviceFlowCopy.requestPairingAction)
+        }
+    }
+
+    private func requestPairingButton(title: String) -> some View {
+        Button(title) {
+            // Same default Quick Connect uses, so one phone appears under one name however it paired.
+            Task { await model.requestPairingFromHost(deviceName: ProcessInfo.processInfo.hostName) }
+        }
+        .font(OpenPawTheme.Machine.headline)
+        .frame(minHeight: 44)
+        .accessibilityIdentifier("addDevice.requestPairing.run")
     }
 
     @ViewBuilder private var scanPairingAction: some View {
@@ -364,9 +422,27 @@ public struct AddDeviceFlow: View {
                         .accessibilityLabel(candidate.accessibilityLabel)
                     }
                 }
+                administratorSourceEntry
             }
             .padding(OpenPawTheme.Space.xl)
             .frame(maxWidth: 680, alignment: .leading)
+        }
+    }
+
+    /// The administrator connector is a *source* of tailnet candidates, so it belongs on the screen that lists them.
+    /// It used to sit on the welcome screen beside "Tailscale devices", where it read as a separate way to add a
+    /// device and put the same destination behind two doors.
+    @ViewBuilder private var administratorSourceEntry: some View {
+        if !(model.tailscaleDiscovery == .noConnectedHost && model.tailscaleRouteHint == .likelyAvailable) {
+            VStack(alignment: .leading, spacing: OpenPawTheme.Space.small) {
+                Text(AddDeviceFlowCopy.adminSourceHint)
+                    .font(OpenPawTheme.Human.caption)
+                    .foregroundStyle(OpenPawTheme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                actionButton(AddDeviceFlowCopy.adminAction, glyph: "person.badge.key") {
+                    state.startTailscaleAdministrator()
+                }
+            }
         }
     }
 

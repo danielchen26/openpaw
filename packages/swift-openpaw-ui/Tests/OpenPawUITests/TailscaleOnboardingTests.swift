@@ -278,8 +278,10 @@ struct TailscaleAdministratorOnboardingTests {
             "Tailscale devices",
             "Enter SSH details manually",
             "Scan pairing QR",
-            "Authorize with Tailnet administrator credentials",
         ])
+        // The administrator connector is a source of tailnet candidates, not a fourth way to add a device, so it is
+        // reached from inside the Tailscale screen rather than duplicating that destination on the welcome screen.
+        #expect(!AddDeviceFlowCopy.entryActions.contains(AddDeviceFlowCopy.adminAction))
         #expect(AddDeviceFlowCopy.adminRequirement.contains("Tailnet administrator credentials required"))
         #expect(!AddDeviceFlowCopy.onboardingCopy.joined(separator: " ").localizedCaseInsensitiveContains("Sign in with Tailscale"))
     }

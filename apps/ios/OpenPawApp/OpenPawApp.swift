@@ -492,6 +492,7 @@ final class AppWiring {
                     tailscaleAdminConnector: tailscaleAdmin,
                     tailscaleLocalIdentityConnector: tailscaleLocalIdentity,
                     connectionPreflightRunner: connectionPreflight,
+                    remoteCommandRunner: sessionCommandRunner,
                     settings: settings
                 )
             }
@@ -506,6 +507,7 @@ final class AppWiring {
                 tailscaleAdminConnector: tailscaleAdmin,
                 tailscaleLocalIdentityConnector: tailscaleLocalIdentity,
                 connectionPreflightRunner: connectionPreflight,
+                remoteCommandRunner: sessionCommandRunner,
                 settings: settings
             )
         #endif

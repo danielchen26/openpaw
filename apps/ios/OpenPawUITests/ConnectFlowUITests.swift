@@ -220,10 +220,13 @@ final class ConnectFlowUITests: XCTestCase {
 
         XCTAssertTrue(app.buttons["Tailscale devices"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Enter SSH details manually"].exists)
-        XCTAssertTrue(app.buttons["Authorize with Tailnet administrator credentials"].exists)
+        // The administrator connector is a candidate source, not a fourth front door, so the welcome screen no longer
+        // offers it beside the destination it merely feeds.
+        XCTAssertFalse(app.buttons["Authorize with Tailnet administrator credentials"].exists)
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Sign in with Tailscale")).firstMatch.exists)
 
         app.buttons["Tailscale devices"].tap()
+        XCTAssertTrue(app.buttons["Authorize with Tailnet administrator credentials"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["A VPN route compatible with Tailscale was detected. This is a connectivity hint, not account access."].waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)["addDevice.tailscale.provenance"].waitForExistence(timeout: 5))
         let candidates = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "not trusted or saved"))
@@ -243,7 +246,15 @@ final class ConnectFlowUITests: XCTestCase {
         let add = app.buttons["Add a Tailscale or SSH device"].firstMatch
         XCTAssertTrue(add.waitForExistence(timeout: 10))
         add.tap()
-        app.buttons["Authorize with Tailnet administrator credentials"].tap()
+        app.buttons["Tailscale devices"].tap()
+        let admin = app.buttons["Authorize with Tailnet administrator credentials"]
+        XCTAssertTrue(admin.waitForExistence(timeout: 5), app.debugDescription)
+        // The connector now sits under the candidate list it feeds, so it can start below the fold.
+        let scrollViews = app.scrollViews
+        let sheetScrollView = scrollViews.element(boundBy: max(0, scrollViews.count - 1))
+        for _ in 0..<8 where !admin.isHittable { sheetScrollView.swipeUp() }
+        XCTAssertTrue(admin.isHittable, app.debugDescription)
+        admin.tap()
 
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Tailnet administrator credentials required")).firstMatch.waitForExistence(timeout: 5))
         app.textFields["addDevice.tailscaleAdmin.clientID"].tap()

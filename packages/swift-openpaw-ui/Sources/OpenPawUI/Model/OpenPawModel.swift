@@ -81,6 +81,21 @@ public enum HostPairingError: Error, Sendable, Hashable {
     case staleConnection
 }
 
+/// Progress of asking a connected host to pair this phone with itself.
+public enum SelfServicePairingState: Sendable, Equatable {
+    case idle
+    /// The SSH exec channel is asking `openpaw-host` for a code.
+    case requestingCode
+    /// A code came back and is being redeemed for a device token.
+    case pairing
+    case paired(PairingResult)
+    case failed(PresentedError)
+
+    public var isRunning: Bool {
+        self == .requestingCode || self == .pairing
+    }
+}
+
 @MainActor
 @Observable
 public final class OpenPawModel {
@@ -229,6 +244,11 @@ public final class OpenPawModel {
     @ObservationIgnored private let tailscaleLocalIdentityConnector: (any TailscaleLocalIdentityConnecting)?
     @ObservationIgnored private let connectionPreflightRunner: (any ConnectionPreflightRunning)?
     @ObservationIgnored private let now: @Sendable () -> Date
+    /// Opens an exec channel on the live SSH connection. Present only in the app, where an SSH transport exists.
+    @ObservationIgnored private let remoteCommandRunner: (any CommandRunner)?
+    /// Progress of "ask this host to pair me", surfaced by the Add Device and Settings screens.
+    public private(set) var selfServicePairing: SelfServicePairingState = .idle
+    private var selfServicePairingGeneration = 0
     private var tailscaleAdminGeneration = 0
     private var homeTailnetBootstrapGeneration = 0
     private var homeTailnetBootstrapTask: Task<Void, Never>?
@@ -279,6 +299,7 @@ public final class OpenPawModel {
         tailscaleAdminConnector: (any TailscaleAdminConnecting)? = nil,
         tailscaleLocalIdentityConnector: (any TailscaleLocalIdentityConnecting)? = nil,
         connectionPreflightRunner: (any ConnectionPreflightRunning)? = nil,
+        remoteCommandRunner: (any CommandRunner)? = nil,
         settings: OpenPawSettings = OpenPawSettings(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -291,6 +312,7 @@ public final class OpenPawModel {
         self.tailscaleAdminConnector = tailscaleAdminConnector
         self.tailscaleLocalIdentityConnector = tailscaleLocalIdentityConnector
         self.connectionPreflightRunner = connectionPreflightRunner
+        self.remoteCommandRunner = remoteCommandRunner
         self.settings = settings
         self.now = now
         if let dictationModels { self.dictationModels = dictationModels }
@@ -1494,6 +1516,85 @@ public final class OpenPawModel {
         await refresh()
         startFollowing(session: selectedSessionID)
         return result
+    }
+
+    /// True when this phone could ask the connected host to pair it, without anyone walking to that machine.
+    ///
+    /// Requires a live SSH connection (that is the proof of control the pairing code otherwise stands in for) and a
+    /// backend that can redeem a code. It does not require the structured tunnel to be up yet: pairing is precisely
+    /// what a connected-but-unpaired host is missing, and the tunnel is reopened as part of the attempt.
+    public var canRequestPairingFromHost: Bool {
+        remoteCommandRunner != nil
+            && backend is any OpenPawHostPairing
+            && connection.isConnected
+            && selectedHost != nil
+    }
+
+    /// Asks the connected host for a pairing code over its own SSH session, then redeems it.
+    ///
+    /// This replaces "walk to the Mac, run a command, read a QR out loud" for the common case where the phone is
+    /// already logged into that machine. Every guarantee of the pairing code survives: the daemon mints it, it expires,
+    /// it is single-use, and the profile is the daemon's decision. What goes away is only the human courier.
+    @discardableResult
+    public func requestPairingFromHost(deviceName: String) async -> PairingResult? {
+        selfServicePairingGeneration += 1
+        let generation = selfServicePairingGeneration
+        guard let runner = remoteCommandRunner, backend is any OpenPawHostPairing, let lease = currentConnectionLease else {
+            selfServicePairing = .failed(PresentedError(
+                title: "This host cannot pair itself",
+                detail: "Connect the host over SSH first. Pairing without the remote machine needs that session as proof you control it.",
+                isRecoverable: true))
+            return nil
+        }
+
+        selfServicePairing = .requestingCode
+        let code: String
+        do {
+            code = try await RemotePairingCodeRequest(runner: runner).requestCode()
+        } catch {
+            guard selfServicePairingGeneration == generation else { return nil }
+            selfServicePairing = .failed(Self.presentedPairingRequestError(error))
+            return nil
+        }
+        guard selfServicePairingGeneration == generation, ownsConnection(lease) else { return nil }
+
+        selfServicePairing = .pairing
+        do {
+            // A host that has never been paired may not have its structured tunnel open yet; pairing is what would
+            // have opened it. Reopening here is what makes "connect, then pair" work in one tap.
+            try await prepareHostPairing(lease: lease)
+            guard selfServicePairingGeneration == generation else { return nil }
+            let result = try await pairHost(pairingCode: code, deviceName: deviceName, lease: lease)
+            guard selfServicePairingGeneration == generation else { return result }
+            selfServicePairing = .paired(result)
+            updateProviderCapabilityState()
+            return result
+        } catch {
+            guard selfServicePairingGeneration == generation else { return nil }
+            selfServicePairing = .failed(presentedError(error, while: "pairing with this host"))
+            return nil
+        }
+    }
+
+    /// Clears a finished self-service pairing so the screen can be shown again cleanly.
+    public func clearSelfServicePairing() {
+        selfServicePairingGeneration += 1
+        selfServicePairing = .idle
+    }
+
+    private static func presentedPairingRequestError(_ error: any Error) -> PresentedError {
+        guard let failure = error as? RemotePairingCodeRequest.Failure else {
+            return PresentedError(
+                title: "Could not ask the host to pair",
+                detail: "The SSH session could not run `openpaw-host pairing-code`. Check the connection and try again.",
+                isRecoverable: true)
+        }
+        let title = switch failure {
+        case .hostBinaryMissing: "openpaw-host is not installed there"
+        case .daemonNotRunning: "openpaw-host is not running there"
+        case .unreadableOutput, .refused: "The host would not issue a pairing code"
+        }
+        return PresentedError(title: title, detail: failure.description, isRecoverable: true)
     }
 
     private func connectionLease(
