@@ -600,6 +600,25 @@ enum ScreenCatalog {
             },
             unavailableReason: ""
         ),
+        // The private key form is a different shape from the password form: a tall pasteable field plus a passphrase.
+        // Without it the only credential UI a reviewer ever sees is the single-line password case.
+        Screen(
+            name: "HostEditorView-private-key",
+            build: { model, _ in
+                var draft = HostDraft(
+                    nickname: "workshop", hostname: "10.0.0.4", username: "dana")
+                draft.authKind = .privateKey
+                return AnyView(
+                    HostEditorView(
+                        model: model,
+                        settings: OpenPawSettings.preview(),
+                        initialDraft: draft,
+                        onDismiss: {}
+                    )
+                )
+            },
+            unavailableReason: ""
+        ),
         Screen(
             name: "SettingsView",
             build: { model, _ in AnyView(SettingsView(model: model, settings: OpenPawSettings.preview())) },
