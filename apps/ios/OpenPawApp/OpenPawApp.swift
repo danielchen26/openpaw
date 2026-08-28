@@ -511,6 +511,9 @@ final class AppWiring {
                 settings: settings
             )
         #endif
+        // A transport that worked is only worth remembering if it outlives the launch that discovered it.
+        model.persistHostStore = { store in hosts.save(store) }
+        model.credentialInstaller = quickConnectCredentialInstaller
         self.asrModels = asrModels
         self.sessionCommandRunner = sessionCommandRunner
 

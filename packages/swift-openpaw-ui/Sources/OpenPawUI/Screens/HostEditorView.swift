@@ -114,15 +114,24 @@ public struct HostDraft: Sendable, Hashable {
             }
         }
 
+        /// Whether this build can actually authenticate this way.
+        ///
+        /// NIOSSH ships no ssh-agent client, so agent forwarding has nothing to offer the server and
+        /// `SSHConnection.resolveCredentials` throws the moment it is tried. It stayed selectable, and was even the
+        /// default, so hosts saved from Add Device could never connect: every attempt failed in credential
+        /// resolution before a packet was sent. Marking it here keeps the option visible and honest rather than
+        /// letting someone pick it and watch every connection fail.
+        public var isSupported: Bool { self != .agentForwarding }
+
         /// What will actually happen at connect time, in the user's words.
         public var explanation: String {
             switch self {
             case .password:
-                "The password is read from the keychain at connect time. OpenPaw never stores it in the host list."
+                "The password is stored in this device's keychain and read at connect time. It is never written to the host list."
             case .privateKey:
-                "The key stays in the keychain. OpenPaw holds a reference to it, never the key itself."
+                "The key is stored in this device's keychain, protected by Face ID, and read at connect time. It is never written to the host list."
             case .agentForwarding:
-                "Your running SSH agent answers the challenge. Nothing is stored on this device."
+                "Not available in this build: OpenPaw has no SSH agent client, so there is nothing to answer the server's challenge. Use a password or a private key."
             }
         }
     }
@@ -135,6 +144,14 @@ public struct HostDraft: Sendable, Hashable {
     public var passwordReference: String
     public var keyReference: String
     public var passphraseReference: String
+    /// The secret as typed or pasted here, when the person is supplying one rather than naming an entry that exists.
+    ///
+    /// The editor used to collect only a keychain *entry name*, but nothing in the app writes an entry under a name
+    /// you choose, so on a fresh install every name pointed at nothing and every connection failed. Collecting the
+    /// secret and storing it under a generated reference is what makes hand-entered hosts connectable at all.
+    public var passwordSecret: String
+    public var privateKeySecret: String
+    public var passphraseSecret: String
     /// `nil` selects the automatic policy: `TransportSelector` orders the attempts and falls back to SSH.
     public var preferredTransport: TransportKind?
     /// `nil` means "plain login shell, no multiplexer".
@@ -147,10 +164,13 @@ public struct HostDraft: Sendable, Hashable {
         hostname: String = "",
         port: Int = 22,
         username: String = "",
-        authKind: AuthKind = .agentForwarding,
+        authKind: AuthKind = .password,
         passwordReference: String = "",
         keyReference: String = "",
         passphraseReference: String = "",
+        passwordSecret: String = "",
+        privateKeySecret: String = "",
+        passphraseSecret: String = "",
         preferredTransport: TransportKind? = nil,
         multiplexer: MultiplexerKind? = .tmux,
         tags: [String] = [],
@@ -164,6 +184,9 @@ public struct HostDraft: Sendable, Hashable {
         self.passwordReference = passwordReference
         self.keyReference = keyReference
         self.passphraseReference = passphraseReference
+        self.passwordSecret = passwordSecret
+        self.privateKeySecret = privateKeySecret
+        self.passphraseSecret = passphraseSecret
         self.preferredTransport = preferredTransport
         self.multiplexer = multiplexer
         self.tags = tags
@@ -260,21 +283,59 @@ public struct HostDraft: Sendable, Hashable {
         }
 
         switch authKind {
-        case .password where passwordReference.trimmingCharacters(in: .whitespaces).isEmpty:
+        case .password
+        where passwordSecret.isEmpty && passwordReference.trimmingCharacters(in: .whitespaces).isEmpty:
             issues.append(
                 ValidationIssue(
                     field: .credential,
-                    message: "Name the keychain entry holding the password. OpenPaw stores the name, not the secret."))
-        case .privateKey where keyReference.trimmingCharacters(in: .whitespaces).isEmpty:
+                    message: "Enter the password for this account. It is stored in this device's keychain, never in the host list."))
+        case .privateKey
+        where privateKeySecret.trimmingCharacters(in: .whitespaces).isEmpty
+            && keyReference.trimmingCharacters(in: .whitespaces).isEmpty:
             issues.append(
                 ValidationIssue(
                     field: .credential,
-                    message: "Name the keychain entry holding the private key. OpenPaw stores the name, not the key."))
+                    message: "Paste the private key for this account. It is stored in this device's keychain, never in the host list."))
+        case .privateKey where !privateKeySecret.trimmingCharacters(in: .whitespaces).isEmpty
+            && !Self.looksLikePrivateKey(privateKeySecret):
+            issues.append(
+                ValidationIssue(
+                    field: .credential,
+                    message: "That does not look like a private key. Paste the whole file, beginning with -----BEGIN and ending with -----END."))
+        case .agentForwarding:
+            issues.append(
+                ValidationIssue(
+                    field: .credential,
+                    message: "This build has no SSH agent, so agent forwarding cannot authenticate. Choose Password or Private key."))
         default:
             break
         }
 
         return issues
+    }
+
+    /// Rejects the two common pastes that are not a private key: a *public* key, and a bare passphrase. A private key
+    /// is a PEM block, so the armour is the honest thing to check for.
+    static func looksLikePrivateKey(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("-----BEGIN") && trimmed.contains("PRIVATE KEY")
+    }
+
+    /// The secret this draft wants stored, if any. `nil` when it names an entry that already exists.
+    public func pendingCredential() -> QuickConnectCredentialChoice? {
+        let label = resolvedNickname.isEmpty ? "host" : resolvedNickname
+        switch authKind {
+        case .password:
+            guard !passwordSecret.isEmpty else { return nil }
+            return .password(label: label, secret: passwordSecret)
+        case .privateKey:
+            let key = privateKeySecret.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty, let data = (key + "\n").data(using: .utf8) else { return nil }
+            let passphrase = passphraseSecret.isEmpty ? nil : passphraseSecret
+            return .privateKey(label: label, key: data, passphraseLabel: nil, passphrase: passphrase)
+        case .agentForwarding:
+            return nil
+        }
     }
 
     public var isValid: Bool { validate().isEmpty }
@@ -286,14 +347,16 @@ public struct HostDraft: Sendable, Hashable {
     /// Throws when a keychain reference is rejected — pasting a whole private key into the reference field is the
     /// common mistake, and `KeychainReference` refuses it rather than persisting key material. Pass `existing` when
     /// editing so pinned host keys and the last known good transport are carried over instead of being dropped.
-    public func record(id: HostID = UUID(), existing: HostRecord? = nil) throws -> HostRecord {
+    /// Pass `auth` when a typed secret has just been stored: the reference is only known after the keychain write, so
+    /// the draft itself cannot name it.
+    public func record(id: HostID = UUID(), existing: HostRecord? = nil, auth: AuthMethod? = nil) throws -> HostRecord {
         HostRecord(
             id: id,
             nickname: resolvedNickname,
             hostname: hostname.trimmingCharacters(in: .whitespaces),
             port: port,
             username: username.trimmingCharacters(in: .whitespaces),
-            auth: try authMethod(),
+            auth: try auth ?? authMethod(),
             preferredTransport: preferredTransport,
             lastSuccessfulTransport: existing?.lastSuccessfulTransport,
             multiplexerPreference: multiplexer,
@@ -346,8 +409,10 @@ public struct HostDraft: Sendable, Hashable {
     }
 
     /// Reads an existing record and its device-local profile back into an editable draft.
+    /// Reading a record saved with agent forwarding lands on Password, not on the dead option, because the editor is
+    /// where such a host gets repaired and leaving it selected would just reproduce the failure on save.
     public init(record: HostRecord, profile: SessionProfile = SessionProfile()) {
-        var authKind = HostDraft.AuthKind.agentForwarding
+        var authKind = HostDraft.AuthKind.password
         var passwordReference = ""
         var keyReference = ""
         var passphraseReference = ""
@@ -360,7 +425,7 @@ public struct HostDraft: Sendable, Hashable {
             keyReference = reference.identifier
             passphraseReference = passphraseRef?.identifier ?? ""
         case .agentForwarding:
-            authKind = .agentForwarding
+            authKind = .password
         }
 
         self.init(
@@ -416,6 +481,7 @@ public struct HostEditorView: View {
     @State private var draft: HostDraft
     @State private var newTag = ""
     @State private var credentialError: String?
+    @State private var isStoringCredential = false
     @State private var hasAttemptedSave = false
     @State private var preflightTarget: String?
 
@@ -518,15 +584,18 @@ public struct HostEditorView: View {
 
                 switch draft.authKind {
                 case .password:
-                    ShellField(
-                        label: "Keychain entry", placeholder: "workshop-password",
-                        text: $draft.passwordReference, issue: issue(.credential))
+                    ShellSecureField(
+                        label: "Password", placeholder: "the account password",
+                        text: $draft.passwordSecret, issue: issue(.credential))
                 case .privateKey:
-                    ShellField(
-                        label: "Key entry", placeholder: "id_ed25519", text: $draft.keyReference,
+                    ShellSecretEditor(
+                        label: "Private key",
+                        placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----",
+                        text: $draft.privateKeySecret,
                         issue: issue(.credential))
-                    ShellField(
-                        label: "Passphrase entry", placeholder: "optional", text: $draft.passphraseReference)
+                    ShellSecureField(
+                        label: "Key passphrase", placeholder: "optional",
+                        text: $draft.passphraseSecret)
                 case .agentForwarding:
                     EmptyView()
                 }
@@ -545,7 +614,10 @@ public struct HostEditorView: View {
         } label: {
             Text(kind.displayName)
                 .font(OpenPawTheme.Machine.body)
-                .foregroundStyle(isSelected ? OpenPawTheme.textPrimary : OpenPawTheme.textSecondary)
+                .foregroundStyle(
+                    !kind.isSupported
+                        ? OpenPawTheme.textSecondary.opacity(0.5)
+                        : (isSelected ? OpenPawTheme.textPrimary : OpenPawTheme.textSecondary))
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
                 .frame(maxWidth: .infinity, minHeight: 44)
@@ -554,7 +626,8 @@ public struct HostEditorView: View {
                 .clipShape(RoundedRectangle(cornerRadius: OpenPawTheme.Radius.chip, style: .continuous))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(kind.displayName)
+        .disabled(!kind.isSupported)
+        .accessibilityLabel(kind.isSupported ? kind.displayName : "\(kind.displayName), unavailable in this build")
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
@@ -873,14 +946,36 @@ public struct HostEditorView: View {
         hasAttemptedSave = true
         credentialError = nil
         guard draft.validate().isEmpty else { return }
+        // A typed secret has to reach the keychain before the record that references it is saved, otherwise the host
+        // points at an entry that does not exist and every connection fails in credential resolution.
+        if let pending = draft.pendingCredential() {
+            isStoringCredential = true
+            Task {
+                do {
+                    let auth = try await model.installCredential(pending)
+                    isStoringCredential = false
+                    finishSave(auth: auth)
+                } catch {
+                    isStoringCredential = false
+                    credentialError =
+                        "OpenPaw could not save this credential to the keychain. Try again, or use a different credential."
+                }
+            }
+            return
+        }
+        finishSave(auth: nil)
+    }
+
+    private func finishSave(auth: AuthMethod?) {
         do {
             let id = existing?.id ?? UUID()
-            let record = try draft.record(id: id, existing: existing)
+            let record = try draft.record(id: id, existing: existing, auth: auth)
             model.hostStore.upsert(record)
             settings.setProfile(draft.profile, for: id)
             if model.selectedHostID == nil || existing == nil {
                 model.selectedHostID = id
             }
+            model.persistHostStore(model.hostStore)
             onDismiss()
         } catch {
             credentialError = String(describing: error)
@@ -933,6 +1028,86 @@ struct ShellField: View {
                 #endif
                 .accessibilityLabel(issue.map { "\(label). \($0)" } ?? label)
                 .accessibilityIdentifier(label)
+            if let issue {
+                ShellIssueText(issue)
+            }
+        }
+    }
+}
+
+/// A single-line secret. Uses `SecureField`, so the value is not shown, not autocorrected, and not offered to the
+/// keyboard's learning cache.
+struct ShellSecureField: View {
+    let label: String
+    let placeholder: String
+    @Binding var text: String
+    var issue: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+            Text(label).microLabel()
+                .accessibilityHidden(true)
+            SecureField(placeholder, text: $text)
+                .font(OpenPawTheme.Machine.body)
+                .foregroundStyle(OpenPawTheme.textPrimary)
+                .textFieldStyle(.plain)
+                .padding(.horizontal, OpenPawTheme.Space.small)
+                .frame(minHeight: 44)
+                .background(OpenPawTheme.well)
+                .overlay(
+                    RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(
+                        issue == nil ? OpenPawTheme.line : OpenPawTheme.bad, lineWidth: OpenPawTheme.hairline))
+                .autocorrectionDisabled()
+                #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                #endif
+                .accessibilityLabel(issue.map { "\(label). \($0)" } ?? label)
+                .accessibilityIdentifier(label)
+            if let issue {
+                ShellIssueText(issue)
+            }
+        }
+    }
+}
+
+/// A multi-line secret: a private key is a PEM block that no one types, so it needs to be pasteable in full and tall
+/// enough to see that the paste landed.
+struct ShellSecretEditor: View {
+    let label: String
+    let placeholder: String
+    @Binding var text: String
+    var issue: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: OpenPawTheme.Space.tight) {
+            Text(label).microLabel()
+                .accessibilityHidden(true)
+            ZStack(alignment: .topLeading) {
+                if text.isEmpty {
+                    Text(placeholder)
+                        .font(OpenPawTheme.Machine.body)
+                        .foregroundStyle(OpenPawTheme.textSecondary.opacity(0.6))
+                        .padding(.horizontal, OpenPawTheme.Space.small)
+                        .padding(.vertical, 10)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: $text)
+                    .font(OpenPawTheme.Machine.body)
+                    .foregroundStyle(OpenPawTheme.textPrimary)
+                    .scrollContentBackground(.hidden)
+                    .padding(.horizontal, OpenPawTheme.Space.small / 2)
+                    .frame(minHeight: 120)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                    #endif
+                    .accessibilityLabel(issue.map { "\(label). \($0)" } ?? label)
+                    .accessibilityIdentifier(label)
+            }
+            .background(OpenPawTheme.well)
+            .overlay(
+                RoundedRectangle(cornerRadius: OpenPawTheme.Radius.machine, style: .continuous).stroke(
+                    issue == nil ? OpenPawTheme.line : OpenPawTheme.bad, lineWidth: OpenPawTheme.hairline))
             if let issue {
                 ShellIssueText(issue)
             }

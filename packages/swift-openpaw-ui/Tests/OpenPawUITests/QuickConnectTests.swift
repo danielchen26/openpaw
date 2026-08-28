@@ -517,7 +517,9 @@ struct QuickConnectTests {
         #expect(saved.port == reviewedTarget.port)
         #expect(saved.username == "reviewed-user")
         #expect(saved.preferredTransport == .mosh)
-        #expect(saved.lastSuccessfulTransport == .eternalTerminal)
+        // Not preserved, and deliberately so: the fixture claimed Eternal Terminal but this connection ran over SSH,
+        // and the last transport that *actually* worked is an observation rather than metadata to carry forward.
+        #expect(saved.lastSuccessfulTransport == .ssh)
         #expect(saved.multiplexerPreference == .zellij)
         #expect(saved.tags == ["favorite", "production"])
         #expect(saved.knownHosts == [savedPin])

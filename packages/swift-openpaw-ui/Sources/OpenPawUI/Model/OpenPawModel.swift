@@ -244,6 +244,23 @@ public final class OpenPawModel {
     @ObservationIgnored private let tailscaleLocalIdentityConnector: (any TailscaleLocalIdentityConnecting)?
     @ObservationIgnored private let connectionPreflightRunner: (any ConnectionPreflightRunning)?
     @ObservationIgnored private let now: @Sendable () -> Date
+    /// Stores a secret in this device's keychain and returns the reference-bearing auth method to save on the host.
+    ///
+    /// The host editor collected only a keychain *entry name*, and nothing in the app ever wrote an entry under a
+    /// name of your choosing, so on a fresh install every hand-entered host referenced a secret that did not exist.
+    /// The app injects the real keychain-backed installer; the default refuses, so previews and tests cannot
+    /// silently pretend a secret was stored.
+    @ObservationIgnored
+    public var credentialInstaller: (any QuickConnectCredentialInstalling)?
+
+    public func installCredential(_ choice: QuickConnectCredentialChoice) async throws -> AuthMethod {
+        guard let credentialInstaller else { throw QuickConnectCredentialInstallError.storageFailed }
+        return try await credentialInstaller.install(choice)
+    }
+
+    /// Writes the host store to disk. Facts the model learns while connecting, like which transport worked, are only
+    /// worth learning if they survive relaunch.
+    @ObservationIgnored public var persistHostStore: @MainActor @Sendable (HostStore) -> Void = { _ in }
     /// Opens an exec channel on the live SSH connection. Present only in the app, where an SSH transport exists.
     @ObservationIgnored private let remoteCommandRunner: (any CommandRunner)?
     /// Progress of "ask this host to pair me", surfaced by the Add Device and Settings screens.
@@ -1770,6 +1787,20 @@ public final class OpenPawModel {
     /// `TerminalBackend.stateStream` is a single event seam, so it has one consumer for the lifetime of the attached
     /// terminal. Replacing that consumer per host can let a cancelled iterator steal the next attempt's `.connected`
     /// event. Attempts are scoped by `stateTaskHostID` instead.
+    /// Remembers the transport that actually carried a connection, and persists it.
+    ///
+    /// Without this a host that has connected many times still reports "Not checked" on Home, because that label is
+    /// derived from `lastSuccessfulTransport` being nil. The store recorded the fact for Quick Connect only, so hosts
+    /// added by hand or by Tailscale discovery never earned a status however often they worked.
+    private func recordSuccessfulTransport(_ state: ConnectionState, for hostID: HostRecord.ID) {
+        guard case .connected(let kind) = state else { return }
+        guard hostStore.hosts.first(where: { $0.id == hostID })?.lastSuccessfulTransport != kind else { return }
+        var store = hostStore
+        guard (try? store.recordSuccessfulTransport(kind, for: hostID)) != nil else { return }
+        hostStore = store
+        persistHostStore(store)
+    }
+
     private func ensureTerminalStateTask(_ terminal: any TerminalBackend) {
         guard stateTask == nil else { return }
         stateStreamGeneration += 1
@@ -1782,6 +1813,7 @@ public final class OpenPawModel {
                 else { continue }
                 if state.isConnected {
                     self.stateAttemptHasConnected = true
+                    self.recordSuccessfulTransport(state, for: targetHostID)
                     self.resumeTerminalConnectAcknowledgement()
                 }
                 // A `.disconnected` before this attempt ever connected belongs to teardown, not the new host.

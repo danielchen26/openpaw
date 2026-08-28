@@ -178,6 +178,59 @@ struct SelfServicePairingTests {
     }
 }
 
+@MainActor
+@Suite("Remembering the transport that worked")
+struct SuccessfulTransportRecordingTests {
+
+    private static func host() -> HostRecord {
+        HostRecord(nickname: "Studio", hostname: "studio.local", username: "dev", auth: .agentForwarding)
+    }
+
+    @Test("A host that has never connected reads as unchecked, not as offline")
+    func unconnectedHostIsUnchecked() {
+        let host = Self.host()
+        #expect(host.lastSuccessfulTransport == nil)
+        let model = OpenPawModel(hostStore: HostStore(hosts: [host]))
+        #expect(WorkspaceDevicePresentation(host: host, model: model).availability == .unknown)
+    }
+
+    /// Home derives "Not checked" from `lastSuccessfulTransport` being nil, so a host that connects and is still
+    /// labelled unchecked is not a display bug: the fact was never recorded. It used to be recorded only by Quick
+    /// Connect, which left every hand-added and discovered host permanently unchecked however often it connected.
+    @Test("Connecting records the transport, so the device stops reading as never checked")
+    func connectingRecordsTheTransport() async {
+        let host = Self.host()
+        let model = OpenPawModel(
+            hostStore: HostStore(hosts: [host]),
+            terminal: ConnectedTerminalDouble())
+        var persisted: [HostStore] = []
+        model.persistHostStore = { persisted.append($0) }
+
+        _ = await model.connectSelectedHost()
+
+        #expect(model.hostStore.hosts.first?.lastSuccessfulTransport == .ssh)
+        #expect(persisted.last?.hosts.first?.lastSuccessfulTransport == .ssh)
+        let connected = try! #require(model.hostStore.hosts.first)
+        #expect(WorkspaceDevicePresentation(host: connected, model: model).availability == .online)
+    }
+
+    @Test("Recording the same transport twice does not rewrite the store")
+    func repeatedConnectDoesNotRewrite() async {
+        var host = Self.host()
+        host.lastSuccessfulTransport = .ssh
+        let model = OpenPawModel(
+            hostStore: HostStore(hosts: [host]),
+            terminal: ConnectedTerminalDouble())
+        var persisted: [HostStore] = []
+        model.persistHostStore = { persisted.append($0) }
+
+        _ = await model.connectSelectedHost()
+
+        #expect(persisted.isEmpty)
+        #expect(model.hostStore.hosts.first?.lastSuccessfulTransport == .ssh)
+    }
+}
+
 private final class SelfServicePairingBackend: OpenPawBackend, OpenPawHostPairing, @unchecked Sendable {
     private(set) var pairedCode: String?
     private(set) var pairedDeviceName: String?

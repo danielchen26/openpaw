@@ -20,7 +20,10 @@ struct HostDraftValidationTests {
         port: Int = 22,
         username: String = "chet"
     ) -> HostDraft {
-        HostDraft(nickname: "workshop", hostname: hostname, port: port, username: username)
+        // Carries a credential, because a host with none cannot connect and must not validate.
+        HostDraft(
+            nickname: "workshop", hostname: hostname, port: port, username: username,
+            passwordReference: "workshop-password")
     }
 
     @Test("A complete draft has nothing to report")
@@ -137,11 +140,84 @@ struct HostDraftValidationTests {
         #expect(reread.profile.rows == 40)
     }
 
+    /// The default authentication kind used to be agent forwarding, which `SSHConnection.resolveCredentials` refuses
+    /// outright because NIOSSH has no agent client. Every host added through Add Device therefore saved a credential
+    /// that could never authenticate, and Connect failed before a packet was sent while Home still showed the host as
+    /// merely "Not checked". The default has to be something this build can actually perform.
+    @Test("The default authentication kind is one this build can actually perform")
+    func defaultAuthIsSupported() {
+        #expect(HostDraft().authKind.isSupported)
+        #expect(HostDraft.AuthKind.agentForwarding.isSupported == false)
+    }
+
+    @Test("Agent forwarding cannot be saved, and the message says what to choose instead")
+    func agentForwardingIsRejected() {
+        var spoiled = draft()
+        spoiled.authKind = .agentForwarding
+        let issue = spoiled.validate().first { $0.field == .credential }
+        #expect(issue != nil)
+        #expect(issue?.message.contains("Password or Private key") == true)
+    }
+
+    /// Reading a host that was already saved with the dead default must land somewhere repairable, or opening the
+    /// editor to fix such a host would just save the same broken record back.
+    @Test("Opening a host saved with agent forwarding lands on a usable kind")
+    func migratesExistingAgentForwardingHosts() {
+        let stranded = HostRecord(
+            nickname: "workshop", hostname: "10.0.0.4", username: "chet", auth: .agentForwarding)
+        #expect(HostDraft(record: stranded).authKind == .password)
+    }
+
+    @Test("A typed password is offered for storage rather than saved as a name")
+    func typedPasswordBecomesAStorageRequest() {
+        var typed = HostDraft(nickname: "workshop", hostname: "10.0.0.4", username: "chet")
+        typed.passwordSecret = "hunter2"
+        guard case .password(_, let secret)? = typed.pendingCredential() else {
+            Issue.record("expected a password credential to store")
+            return
+        }
+        #expect(secret == "hunter2")
+    }
+
+    @Test("A pasted private key is offered for storage, passphrase included")
+    func typedPrivateKeyBecomesAStorageRequest() {
+        var typed = HostDraft(nickname: "workshop", hostname: "10.0.0.4", username: "chet")
+        typed.authKind = .privateKey
+        typed.privateKeySecret = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"
+        typed.passphraseSecret = "open sesame"
+        #expect(typed.validate().isEmpty)
+        guard case .privateKey(_, let key, _, let passphrase)? = typed.pendingCredential() else {
+            Issue.record("expected a private key credential to store")
+            return
+        }
+        #expect(String(data: key, encoding: .utf8)?.contains("BEGIN OPENSSH PRIVATE KEY") == true)
+        #expect(passphrase == "open sesame")
+    }
+
+    /// Pasting a public key is the mistake worth catching: it is the file people reach for, it is the wrong one, and
+    /// storing it would fail at connect time with an opaque key-loading error instead of here.
+    @Test("A public key pasted into the private key field is rejected before it is stored")
+    func rejectsAPastedPublicKey() {
+        var typed = HostDraft(nickname: "workshop", hostname: "10.0.0.4", username: "chet")
+        typed.authKind = .privateKey
+        typed.privateKeySecret = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI chet@workshop"
+        let issue = typed.validate().first { $0.field == .credential }
+        #expect(issue?.message.contains("-----BEGIN") == true)
+    }
+
+    @Test("A host with no credential at all cannot be saved")
+    func rejectsAHostWithNoCredential() {
+        let bare = HostDraft(nickname: "workshop", hostname: "10.0.0.4", username: "chet")
+        #expect(bare.isValid == false)
+        #expect(bare.validate().contains { $0.field == .credential })
+    }
+
     @Test("Editing an existing host keeps its pinned keys")
     func editingPreservesPinnedKeys() throws {
         let pin = KnownHostEntry(keyType: "ssh-ed25519", fingerprint: "SHA256:abc", addedAt: Date())
         let existing = HostRecord(
-            nickname: "workshop", hostname: "10.0.0.4", username: "chet", auth: .agentForwarding,
+            nickname: "workshop", hostname: "10.0.0.4", username: "chet",
+            auth: .password(reference: try KeychainReference(identifier: "workshop-password")),
             knownHosts: [pin])
         var edited = HostDraft(record: existing)
         edited.nickname = "workshop mk2"
